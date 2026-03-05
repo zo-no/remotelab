@@ -128,7 +128,7 @@ which cloudflared   # only if using Cloudflare mode
 remotelab generate-token
 ```
 
-This writes to `~/.config/claude-web/auth.json` and prints the token. **Capture this token** — it's required for the first login.
+This writes to `~/.config/remotelab/auth.json` and prints the token. **Capture this token** — it's required for the first login.
 
 Optionally, set a username/password alternative:
 ```bash

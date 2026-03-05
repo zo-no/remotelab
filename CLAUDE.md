@@ -53,7 +53,7 @@ RemoteLab 是一个让用户通过手机浏览器远程操控 macOS/Linux 上 AI
 
 ### 文件存储
 
-所有运行时数据存在 `~/.config/claude-web/`：
+所有运行时数据存在 `~/.config/remotelab/`：
 
 - `auth.json` — 访问 token
 - `sessions.json` — 所有 session 元数据

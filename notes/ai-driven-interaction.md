@@ -37,7 +37,7 @@ This preserves the two-party dialogue primitive. The model is still "replying to
    { "type": "on_complete", "session": "auth-refactor", "message": "Review what auth-refactor finished and continue." }
    ```
 
-2. RemoteLab stores these triggers (a simple `~/.config/claude-web/triggers.json`).
+2. RemoteLab stores these triggers (a simple `~/.config/remotelab/triggers.json`).
 
 3. A background process polls triggers and delivers them to the target session at the right time — which looks identical to a human sending a message.
 

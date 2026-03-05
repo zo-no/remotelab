@@ -1,6 +1,6 @@
 #!/bin/sh
 # Accept session name, folder, and tool command as CLI arguments (passed by ttyd via --url-arg)
-SESSION_NAME="${1:-claude-web}"
+SESSION_NAME="${1:-remotelab}"
 WORK_DIR="${2:-$HOME}"
 TOOL_CMD="${3:-claude}"
 
@@ -43,7 +43,7 @@ if [ ! -d "$WORK_DIR" ]; then
     WORK_DIR="$HOME"
 fi
 
-SOCKET_DIR="$HOME/.config/claude-web/sockets"
+SOCKET_DIR="$HOME/.config/remotelab/sockets"
 mkdir -p "$SOCKET_DIR"
 SOCKET="$SOCKET_DIR/$SESSION_NAME.dtach"
 

@@ -3,8 +3,9 @@ import { randomBytes } from 'crypto';
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
+import { AUTH_FILE } from './lib/config.mjs';
 
-const authFile = join(homedir(), '.config', 'claude-web', 'auth.json');
+const authFile = AUTH_FILE;
 const authDir = dirname(authFile);
 
 mkdirSync(authDir, { recursive: true });

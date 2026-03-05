@@ -121,9 +121,9 @@ remotelab --help               显示帮助
 
 | 路径 | 内容 |
 |------|------|
-| `~/.config/claude-web/auth.json` | 访问 token + 密码哈希 |
-| `~/.config/claude-web/chat-sessions.json` | Chat 会话元数据 |
-| `~/.config/claude-web/chat-history/` | 每个会话的事件日志（JSONL） |
+| `~/.config/remotelab/auth.json` | 访问 token + 密码哈希 |
+| `~/.config/remotelab/chat-sessions.json` | Chat 会话元数据 |
+| `~/.config/remotelab/chat-history/` | 每个会话的事件日志（JSONL） |
 | `~/Library/Logs/chat-server.log` | Chat server 标准输出 **(macOS)** |
 | `~/Library/Logs/auth-proxy.log` | Auth proxy 标准输出 **(macOS)** |
 | `~/Library/Logs/cloudflared.log` | Tunnel 标准输出 **(macOS)** |

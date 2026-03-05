@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { createInterface } from 'readline';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
-import { homedir } from 'os';
-import { join, dirname } from 'path';
+import { dirname } from 'path';
 import { hashPassword } from './lib/auth.mjs';
+import { AUTH_FILE } from './lib/config.mjs';
 
-const authFile = join(homedir(), '.config', 'claude-web', 'auth.json');
+const authFile = AUTH_FILE;
 const authDir = dirname(authFile);
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });

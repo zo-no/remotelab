@@ -121,9 +121,9 @@ remotelab --help               Show help
 
 | Path | Contents |
 |------|----------|
-| `~/.config/claude-web/auth.json` | Access token + password hash |
-| `~/.config/claude-web/chat-sessions.json` | Chat session metadata |
-| `~/.config/claude-web/chat-history/` | Per-session event logs (JSONL) |
+| `~/.config/remotelab/auth.json` | Access token + password hash |
+| `~/.config/remotelab/chat-sessions.json` | Chat session metadata |
+| `~/.config/remotelab/chat-history/` | Per-session event logs (JSONL) |
 | `~/Library/Logs/chat-server.log` | Chat server stdout **(macOS)** |
 | `~/.local/share/remotelab/logs/chat-server.log` | Chat server stdout **(Linux)** |
 | `~/Library/Logs/cloudflared.log` | Tunnel stdout **(macOS)** |
