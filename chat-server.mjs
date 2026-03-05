@@ -1,9 +1,19 @@
 #!/usr/bin/env node
 import http from 'http';
-import { CHAT_PORT, SECURE_COOKIES } from './lib/config.mjs';
+import { existsSync, mkdirSync } from 'fs';
+import { CHAT_PORT, SECURE_COOKIES, MEMORY_DIR } from './lib/config.mjs';
 import { handleRequest } from './chat/router.mjs';
 import { attachWebSocket } from './chat/ws.mjs';
 import { killAll } from './chat/session-manager.mjs';
+import { join } from 'path';
+
+// Ensure memory directory structure exists
+for (const dir of [MEMORY_DIR, join(MEMORY_DIR, 'tasks')]) {
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+    console.log(`[setup] Created ${dir}`);
+  }
+}
 
 const server = http.createServer((req, res) => {
   handleRequest(req, res).catch(err => {

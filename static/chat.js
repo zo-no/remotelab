@@ -1008,9 +1008,6 @@
     if (!isDesktop) closeSidebarFn();
     newSessionModal.classList.add("open");
     loadTools();
-    folderInput.value = "";
-    folderSuggestions.innerHTML = "";
-    folderInput.focus();
   });
 
   cancelModal.addEventListener("click", () =>
@@ -1021,12 +1018,8 @@
   });
 
   createSessionBtn.addEventListener("click", () => {
-    const folder = folderInput.value.trim();
+    const folder = "~";
     const tool = toolSelect.value;
-    if (!folder) {
-      folderInput.focus();
-      return;
-    }
     wsSend({ action: "create", folder, tool });
     newSessionModal.classList.remove("open");
 

@@ -85,11 +85,12 @@ function handleMessage(ws, msg, ctx) {
     }
 
     case 'create': {
-      if (!msg.folder || !msg.tool) {
-        wsSend(ws, { type: 'error', message: 'folder and tool are required' });
+      if (!msg.tool) {
+        wsSend(ws, { type: 'error', message: 'tool is required' });
         return;
       }
-      const session = createSession(msg.folder, msg.tool, msg.name || '');
+      const folder = msg.folder || '~';
+      const session = createSession(folder, msg.tool, msg.name || '');
       wsSend(ws, { type: 'session', session });
       break;
     }

@@ -8,6 +8,7 @@ import { messageEvent, statusEvent } from './normalizer.mjs';
 import { triggerSummary, removeSidebarEntry } from './summarizer.mjs';
 import { isProgressEnabled } from './settings.mjs';
 import { sendCompletionPush } from './push.mjs';
+import { buildSystemContext } from './system-prompt.mjs';
 
 const MIME_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
 
@@ -319,6 +320,13 @@ export function sendMessage(sessionId, text, images, options = {}) {
   if (live.compactContext) {
     actualText = `${live.compactContext}\n\n---\n\n${text}`;
     live.compactContext = undefined;
+  }
+
+  // Inject system context on first message (no resume ID = fresh session)
+  const isFirstMessage = !live.claudeSessionId && !live.codexThreadId;
+  if (isFirstMessage) {
+    const systemContext = buildSystemContext();
+    actualText = `${systemContext}\n\n---\n\nUser message:\n${actualText}`;
   }
 
   console.log(`[session-mgr] Spawning tool=${effectiveTool} model=${options.model || 'default'} effort=${options.effort || 'default'} thinking=${!!options.thinking}`);
