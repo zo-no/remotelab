@@ -275,33 +275,6 @@ body {
 }
 .sidebar-collapse-btn:hover { background: var(--bg-tertiary); color: var(--text); }
 
-/* ---- New Session Modal ---- */
-.modal-overlay {
-  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.25);
-  z-index: 200; align-items: center; justify-content: center;
-}
-.modal-overlay.open { display: flex; }
-.modal {
-  background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
-  width: 92%; max-width: 420px; padding: 24px;
-  box-shadow: 0 8px 40px rgba(0,0,0,0.12);
-}
-.modal h3 { margin-bottom: 18px; font-size: 17px; font-weight: 600; }
-.modal label { display: block; font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-bottom: 4px; margin-top: 14px; text-transform: uppercase; letter-spacing: 0.04em; }
-.modal label:first-of-type { margin-top: 0; }
-.modal input, .modal select {
-  width: 100%; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--border);
-  border-radius: 8px; color: var(--text); font-size: 14px; outline: none; font-family: inherit;
-}
-.modal input:focus, .modal select:focus { border-color: var(--border-strong); background: var(--bg); }
-.modal-actions { display: flex; gap: 8px; margin-top: 22px; }
-.modal-actions button {
-  flex: 1; padding: 10px; border: none; border-radius: 8px; font-size: 14px;
-  cursor: pointer; font-weight: 500; font-family: inherit;
-}
-.btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border); }
-.btn-create { background: var(--text); color: var(--bg); }
-
 /* ---- Autocomplete suggestions ---- */
 .ac-suggestions button {
   display: block; width: 100%; text-align: left; padding: 7px 10px;
@@ -709,6 +682,10 @@ body {
   .input-wrapper { width: 70%; margin: 0 auto; }
   .input-resize-handle { margin: 0 0 10px; }
 }
+
+/* ---- Visitor mode: chat-only, no sidebar ---- */
+body.visitor-mode .sidebar-overlay { display: none !important; }
+body.visitor-mode .header #menuBtn { display: none !important; }
 </style>
 </head>
 <body>
@@ -781,20 +758,6 @@ body {
   </main>
 </div>
 
-<!-- New Session Modal -->
-<div class="modal-overlay" id="newSessionModal">
-  <div class="modal">
-    <h3>New Session</h3>
-    <input type="hidden" id="folderInput" value="~">
-    <div class="ac-suggestions" id="folderSuggestions" style="display:none"></div>
-    <label>Tool</label>
-    <select id="toolSelect"></select>
-    <div class="modal-actions">
-      <button class="btn-cancel" id="cancelModal">Cancel</button>
-      <button class="btn-create" id="createSession">Create</button>
-    </div>
-  </div>
-</div>
 
 <script src="/marked.min.js" nonce="{{NONCE}}"></script>
 <script src="/chat.js" nonce="{{NONCE}}"></script>

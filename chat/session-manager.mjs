@@ -52,12 +52,49 @@ function saveSessionsMeta(list) {
   writeFileSync(CHAT_SESSIONS_FILE, JSON.stringify(list, null, 2), 'utf8');
 }
 
+/**
+ * Persist resume IDs (claudeSessionId / codexThreadId) to session metadata on disk.
+ * This ensures context continuity survives server restarts.
+ */
+function persistResumeIds(sessionId, claudeSessionId, codexThreadId) {
+  const metas = loadSessionsMeta();
+  const idx = metas.findIndex(m => m.id === sessionId);
+  if (idx === -1) return;
+  let changed = false;
+  if (claudeSessionId && metas[idx].claudeSessionId !== claudeSessionId) {
+    metas[idx].claudeSessionId = claudeSessionId;
+    changed = true;
+  }
+  if (codexThreadId && metas[idx].codexThreadId !== codexThreadId) {
+    metas[idx].codexThreadId = codexThreadId;
+    changed = true;
+  }
+  if (changed) {
+    saveSessionsMeta(metas);
+    console.log(`[session-mgr] Persisted resume IDs to disk for session ${sessionId.slice(0,8)}`);
+  }
+}
+
+/**
+ * Clear persisted resume IDs (used after compact or drop-tools resets).
+ */
+function clearPersistedResumeIds(sessionId) {
+  const metas = loadSessionsMeta();
+  const idx = metas.findIndex(m => m.id === sessionId);
+  if (idx === -1) return;
+  delete metas[idx].claudeSessionId;
+  delete metas[idx].codexThreadId;
+  saveSessionsMeta(metas);
+  console.log(`[session-mgr] Cleared persisted resume IDs for session ${sessionId.slice(0,8)}`);
+}
+
 // ---- Public API ----
 
-export function listSessions() {
+export function listSessions({ includeVisitor = false } = {}) {
   const metas = loadSessionsMeta();
   return metas
     .filter(m => !m.archived)
+    .filter(m => includeVisitor || !m.visitorId)
     .map(m => ({
       ...m,
       status: liveSessions.has(m.id)
@@ -84,7 +121,7 @@ export function getSession(id) {
   };
 }
 
-export function createSession(folder, tool, name = 'new session') {
+export function createSession(folder, tool, name = 'new session', extra = {}) {
   const id = generateId();
   const session = {
     id,
@@ -93,6 +130,11 @@ export function createSession(folder, tool, name = 'new session') {
     name: name || 'new session',
     created: new Date().toISOString(),
   };
+
+  // App-related metadata
+  if (extra.appId) session.appId = extra.appId;
+  if (extra.visitorId) session.visitorId = extra.visitorId;
+  if (extra.systemPrompt) session.systemPrompt = extra.systemPrompt;
 
   const metas = loadSessionsMeta();
   metas.push(session);
@@ -204,6 +246,15 @@ export function sendMessage(sessionId, text, images, options = {}) {
   let live = liveSessions.get(sessionId);
   if (!live) {
     live = { status: 'idle', runner: null, listeners: new Set() };
+    // Rehydrate resume IDs from persisted metadata (survives server restarts)
+    if (session.claudeSessionId) {
+      live.claudeSessionId = session.claudeSessionId;
+      console.log(`[session-mgr] Rehydrated claudeSessionId=${session.claudeSessionId} from disk for session ${sessionId.slice(0,8)}`);
+    }
+    if (session.codexThreadId) {
+      live.codexThreadId = session.codexThreadId;
+      console.log(`[session-mgr] Rehydrated codexThreadId=${session.codexThreadId} from disk for session ${sessionId.slice(0,8)}`);
+    }
     liveSessions.set(sessionId, live);
   }
 
@@ -214,6 +265,7 @@ export function sendMessage(sessionId, text, images, options = {}) {
     console.log(`[session-mgr] Tool switched from ${session.tool} to ${effectiveTool}, clearing resume IDs`);
     live.claudeSessionId = undefined;
     live.codexThreadId = undefined;
+    clearPersistedResumeIds(sessionId);
   }
 
   // If a process is still running, cancel it (all modes are oneshot now)
@@ -252,6 +304,10 @@ export function sendMessage(sessionId, text, images, options = {}) {
         l.codexThreadId = l.runner.codexThreadId;
         console.log(`[session-mgr] Saved codexThreadId=${l.codexThreadId} for session ${sessionId.slice(0,8)}`);
       }
+      // Persist resume IDs to disk so they survive server restarts
+      if (l.claudeSessionId || l.codexThreadId) {
+        persistResumeIds(sessionId, l.claudeSessionId, l.codexThreadId);
+      }
       l.status = 'idle';
       l.runner = null;
     }
@@ -270,6 +326,8 @@ export function sendMessage(sessionId, text, images, options = {}) {
         const summary = match ? match[1].trim() : lastAssistant.content;
         l.claudeSessionId = undefined;
         l.codexThreadId = undefined;
+        // Clear persisted resume IDs on disk too
+        clearPersistedResumeIds(sessionId);
         l.compactContext = `[Conversation summary]\n\n${summary}`;
       }
       const compactEvt = statusEvent('Context compacted — next message will resume from summary');
@@ -282,11 +340,19 @@ export function sendMessage(sessionId, text, images, options = {}) {
     const needsRename = !session.name || session.name === 'new session';
     const needsProgress = isProgressEnabled();
     if (needsRename || needsProgress) {
-      triggerSummary(
+      const summaryDone = triggerSummary(
         { id: sessionId, folder: session.folder, name: session.name || '' },
         (newName) => renameSession(sessionId, newName),
         { updateSidebar: needsProgress },
       );
+      if (needsRename) {
+        // Wait for auto-rename before sending push so notification shows the real name
+        summaryDone.then(() => {
+          const updated = getSession(sessionId);
+          sendCompletionPush({ ...(updated || session), id: sessionId }).catch(() => {});
+        });
+        return;
+      }
     }
     // Send web push notification (non-blocking)
     sendCompletionPush({ ...session, id: sessionId }).catch(() => {});
@@ -326,7 +392,12 @@ export function sendMessage(sessionId, text, images, options = {}) {
   const isFirstMessage = !live.claudeSessionId && !live.codexThreadId;
   if (isFirstMessage) {
     const systemContext = buildSystemContext();
-    actualText = `${systemContext}\n\n---\n\nUser message:\n${actualText}`;
+    let preamble = systemContext;
+    // For app sessions, inject the app's system prompt
+    if (session.systemPrompt) {
+      preamble += `\n\n---\n\nApp instructions (follow these for this session):\n${session.systemPrompt}`;
+    }
+    actualText = `${preamble}\n\n---\n\nUser message:\n${actualText}`;
   }
 
   console.log(`[session-mgr] Spawning tool=${effectiveTool} model=${options.model || 'default'} effort=${options.effort || 'default'} thinking=${!!options.thinking}`);
@@ -385,6 +456,7 @@ export function dropToolUse(sessionId) {
 
   live.claudeSessionId = undefined;
   live.codexThreadId = undefined;
+  clearPersistedResumeIds(sessionId);
 
   if (transcript.trim()) {
     live.compactContext = `[Previous conversation — tool results removed]\n\n${transcript}`;

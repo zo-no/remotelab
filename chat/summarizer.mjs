@@ -102,9 +102,9 @@ function formatTurnForPrompt(events) {
  */
 export function triggerSummary(sessionMeta, onRename, options = {}) {
   console.log(`[summarizer] triggerSummary called for session ${sessionMeta.id?.slice(0, 8)}`);
-  setImmediate(() => runSummary(sessionMeta, onRename, options).catch(err => {
+  return runSummary(sessionMeta, onRename, options).catch(err => {
     console.error(`[summarizer] Unexpected error for ${sessionMeta.id?.slice(0, 8)}: ${err.message}`);
-  }));
+  });
 }
 
 async function runSummary(sessionMeta, onRename, options = {}) {

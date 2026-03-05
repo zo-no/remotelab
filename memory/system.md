@@ -12,4 +12,8 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 
 ## Learnings
 
-(Entries will be added here as the system accumulates experience across sessions.)
+### Context Continuity Across Restarts (2026-03-06)
+- Claude Code's `--resume <session_id>` flag is the ONLY mechanism for conversation continuity. Without it, every spawn starts a completely fresh session regardless of what the UI shows.
+- Any in-memory state critical for continuity (session IDs, thread IDs) MUST be persisted to disk. In-memory Maps are wiped on process restart.
+- The UI chat history (stored in JSON files) and the AI's actual context (controlled by `--resume`) are completely independent. Users will see old messages but the AI won't remember them — a confusing UX failure mode.
+- Fix: persist `claudeSessionId`/`codexThreadId` in the session metadata JSON, rehydrate into memory when the session is first used after restart.

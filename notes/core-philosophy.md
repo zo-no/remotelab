@@ -84,47 +84,95 @@ Skills 是对模型能力的额外补充，是"晶体智力"（crystallized inte
 
 ---
 
-## 三、App 概念
+## 三、身份与访问控制
 
-### App = 预配置的会话模板
+### 双角色模型
 
-一个 App 定义了：
-- 一组 skills 的组合
-- 初始 system prompt / 角色设定
-- 可选的 UI 定制（通过 markdown/XML 扩展）
+RemoteLab 采用 Owner / Visitor 双角色模型：
 
-### App 的创建：自举（Self-bootstrapping）
+| 角色 | 认证方式 | 权限 |
+|------|----------|------|
+| **Owner** | 主 Token 或用户名密码登录 | 完整权限：管理会话、管理 App、所有功能 |
+| **Visitor** | App 分享链接（scoped share token） | 仅可使用被分享的 App，自动创建专属会话 |
 
-创建 App 本身就是一个 App（或 Skill）。流程：
+**核心原则**：这不是多用户系统。只有一个 Owner。Visitor 是 App 的使用者，权限严格限定在被分享的 App 范围内。
 
-1. 用户进入"创建 App"这个内置 App
-2. 看到一条预设的模型消息（引导用户描述需求）
-3. 通过交互式对话逐步确立 SOP
-4. 模型自动创建 App 配置文件
+### 实现机制
 
-**不需要专门的创建 UI**。对话即创建流程。
-
-### App 的分享
-
-需要一个固化的 UI 组件（弹窗）：
-- 展示已创建的 App 列表
-- 选择要分享的 App
-- 生成分享链接 + 复制功能
-
-这是少数需要硬编码 UI 的地方。
-
-### App 的管理（长期 TODO）
-
-RemoteLab 服务本身作为一个 skill 或 MCP server，提供：
-- App 列表查询接口
-- App 元数据查询
-- 供模型在对话中直接调用
-
-第一期：模型手动读写文件管理 App，够用即可。
+- 认证会话（auth session）增加 `role` 字段：`"owner"` 或 `"visitor"`
+- Owner 登录沿用现有 Token/密码机制，`role` 自动设为 `"owner"`
+- Visitor 通过 `/app/{shareToken}` 入口认证，`role` 设为 `"visitor"`，同时绑定 `appId`
+- 前端根据 `role` 决定 UI 展示：Owner 看到完整界面，Visitor 只看到 Chat UI
 
 ---
 
-## 四、品牌与命名
+## 四、App 概念
+
+### App = 会话模板（非会话本身）
+
+App 是一个轻量元数据记录，定义了如何创建会话：
+
+```json
+{
+  "id": "app_xxxx",
+  "name": "Commit Helper",
+  "systemPrompt": "You are a commit message writing assistant...",
+  "skills": ["git-conventions"],
+  "tool": "claude",
+  "shareToken": "share_xxxx",
+  "createdAt": "2026-03-06T..."
+}
+```
+
+**App 不是 Session**。App 是模板/工厂，每次使用（无论 Owner 还是 Visitor）都创建一个新的独立 Session。Session 通过可选的 `appId` 字段关联回 App。
+
+这保持了 Session 抽象的统一性 —— 所有交互（Owner 自己的对话、App 测试、Visitor 使用）最终都产生普通 Session。
+
+### App 的创建与管理：Agent 驱动
+
+第一期不做专门的管理 UI。App 的创建、列表、分享链接生成全部通过对话完成：
+
+1. Owner 在任意会话中说 "帮我创建一个 App"
+2. Agent 引导 Owner 描述需求，确定 system prompt 和 skills
+3. Agent 调用 App CRUD API 完成创建
+4. Agent 返回分享链接
+
+**理由**：App 管理是低频操作，对话驱动足够。如果未来场景变得高频且数据展示复杂，再考虑专门 UI。
+
+### App 的使用（Visitor 流程）
+
+1. Visitor 点击分享链接 `/app/{shareToken}`
+2. 服务端验证 shareToken，找到对应 App
+3. 为 Visitor 创建一个新 Session（注入 App 的 systemPrompt）
+4. 认证 Visitor（种 Cookie，role=visitor，绑定 appId）
+5. 重定向到 Chat UI（visitor mode：隐藏侧边栏，只展示对话）
+
+### Visitor Session 存储
+
+Visitor 创建的 Session 存储在同一个 `chat-sessions.json` 中，但带有额外字段：
+
+```json
+{
+  "id": "sess_xxxx",
+  "appId": "app_xxxx",
+  "visitorId": "visitor_xxxx",
+  "tool": "claude",
+  "name": "Commit Helper",
+  "created": "2026-03-06T..."
+}
+```
+
+Owner 的会话列表默认不展示 Visitor Session。但数据完整保留，供后续分析使用。
+
+### App 分享
+
+分享链接格式：`https://{domain}/app/{shareToken}`
+
+每个 App 有唯一的 `shareToken`（256-bit hex）。同一个 App 的所有 Visitor 共享同一个 shareToken，但每人获得独立 Session —— 就像同一个服务，每个客户有自己的会话。
+
+---
+
+## 五、品牌与命名
 
 - 产品名：**RemoteLab**
 - 所有路径、配置、域名优先使用 `remotelab` 相关命名
@@ -133,7 +181,7 @@ RemoteLab 服务本身作为一个 skill 或 MCP server，提供：
 
 ---
 
-## 五、技术架构演进方向
+## 六、技术架构演进方向
 
 ### 当前状态（v1）
 ```
@@ -163,35 +211,36 @@ RemoteLab 服务本身作为一个 skill 或 MCP server，提供：
 
 ---
 
-## 六、实施优先级
+## 七、实施优先级
 
-### P0 - 最小可用（当前迭代）
-- [ ] 去掉 folder 依赖，Agent 默认 home 目录启动
-- [ ] Skills 基础框架（文件存储 + 加载机制）
-- [ ] Session metadata 增强（用户标识符）
-- [ ] 前端精简（移除 folder 选择等 UI）
+### P0 - 当前迭代（Identity + App v1）
+- [x] 身份系统：Owner/Visitor 双角色
+- [x] App 数据模型与 CRUD API
+- [x] Share token 认证流程
+- [x] Visitor 前端模式（chat-only view）
+- [ ] App 管理 Skill（agent 驱动创建/分享）
 
 ### P1 - 核心体验
-- [ ] App 概念实现（预配置会话模板）
-- [ ] "创建 App" 内置 App
-- [ ] App 分享 UI
+- [ ] 去掉 folder 依赖，Agent 默认 home 目录启动
+- [ ] Skills 基础框架（文件存储 + 加载机制）
+- [ ] Session metadata 增强
 
 ### P2 - 长期演进
+- [ ] 自主执行（Autonomous Execution）：Session 后台持续运行、事件触发、主动推消息
 - [ ] RemoteLab 服务作为 model-callable server
 - [ ] 路径迁移：`claude-web` → `remotelab`
-- [ ] Deferred triggers（AI 主动发起）
-- [ ] 多用户支持
 
 ---
 
-## 七、不变的约束
+## 八、不变的约束
 
-1. **单用户，速度优先** —— 不做多用户鉴权体系
+1. **单 Owner** —— 不做多用户鉴权体系。Visitor 是受限访客，不是独立用户
 2. **无外部框架** —— Node.js 内置模块 + ws
 3. **三服务架构** —— 生产 + 测试 + 终端应急
 4. **终端服务冻结** —— 不做改动
 5. **每次改动立即 commit** —— 不用 amend
 6. **Vanilla JS 前端** —— 无构建工具，无框架
+7. **Agent 驱动优先** —— 新功能优先通过对话/Skill 实现，只在高频+复杂展示场景才做专门 UI
 
 ---
 

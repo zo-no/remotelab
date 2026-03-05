@@ -10,12 +10,6 @@
   const collapseBtn = document.getElementById("collapseBtn");
   const sessionList = document.getElementById("sessionList");
   const newSessionBtn = document.getElementById("newSessionBtn");
-  const newSessionModal = document.getElementById("newSessionModal");
-  const folderInput = document.getElementById("folderInput");
-  const folderSuggestions = document.getElementById("folderSuggestions");
-  const toolSelect = document.getElementById("toolSelect");
-  const cancelModal = document.getElementById("cancelModal");
-  const createSessionBtn = document.getElementById("createSession");
   const messagesEl = document.getElementById("messages");
   const messagesInner = document.getElementById("messagesInner");
   const emptyState = document.getElementById("emptyState");
@@ -48,6 +42,8 @@
   let reconnectTimer = null;
   let sessions = [];
   let archivedSessions = []; // sessions sorted by archivedAt desc
+  let visitorMode = false;
+  let visitorSessionId = null;
   let pendingSummary = new Set(); // sessionIds awaiting summary generation
   let finishedUnread = new Set(); // sessionIds finished but not yet opened
   let lastSidebarUpdatedAt = {}; // sessionId -> last known updatedAt
@@ -294,12 +290,18 @@
 
     ws.onopen = () => {
       updateStatus("connected", "idle");
-      ws.send(JSON.stringify({ action: "list" }));
-      ws.send(JSON.stringify({ action: "list_archived" }));
-      if (currentSessionId) {
-        ws.send(
-          JSON.stringify({ action: "attach", sessionId: currentSessionId }),
-        );
+      if (visitorMode && visitorSessionId) {
+        // Visitor: skip session list, directly attach to assigned session
+        currentSessionId = visitorSessionId;
+        ws.send(JSON.stringify({ action: "attach", sessionId: visitorSessionId }));
+      } else {
+        ws.send(JSON.stringify({ action: "list" }));
+        ws.send(JSON.stringify({ action: "list_archived" }));
+        if (currentSessionId) {
+          ws.send(
+            JSON.stringify({ action: "attach", sessionId: currentSessionId }),
+          );
+        }
       }
       // Flush messages queued while disconnected
       for (const m of messageQueue) {
@@ -790,15 +792,7 @@
       header.querySelector(".folder-add-btn").addEventListener("click", (e) => {
         e.stopPropagation();
         const tool = selectedTool || toolsList[0]?.id;
-        if (!tool) {
-          // No tool loaded yet — fallback to modal
-          if (!isDesktop) closeSidebarFn();
-          newSessionModal.classList.add("open");
-          loadTools();
-          folderInput.value = folder;
-          folderSuggestions.innerHTML = "";
-          return;
-        }
+        if (!tool) return;
         if (!isDesktop) closeSidebarFn();
         wsSend({ action: "create", folder, tool });
         const handler = (evt) => {
@@ -1003,33 +997,15 @@
     if (e.target === sidebarOverlay && !isDesktop) closeSidebarFn();
   });
 
-  // ---- New Session Modal ----
+  // ---- New Session ----
   newSessionBtn.addEventListener("click", () => {
     if (!isDesktop) closeSidebarFn();
-    newSessionModal.classList.add("open");
-    loadTools();
-  });
-
-  cancelModal.addEventListener("click", () =>
-    newSessionModal.classList.remove("open"),
-  );
-  newSessionModal.addEventListener("click", (e) => {
-    if (e.target === newSessionModal) newSessionModal.classList.remove("open");
-  });
-
-  createSessionBtn.addEventListener("click", () => {
-    const folder = "~";
-    const tool = toolSelect.value;
-    wsSend({ action: "create", folder, tool });
-    newSessionModal.classList.remove("open");
-
+    const tool = selectedTool || toolsList[0]?.id;
+    if (!tool) return;
+    wsSend({ action: "create", folder: "~", tool });
     const handler = (e) => {
       let msg;
-      try {
-        msg = JSON.parse(e.data);
-      } catch {
-        return;
-      }
+      try { msg = JSON.parse(e.data); } catch { return; }
       if (msg.type === "session" && msg.session) {
         ws.removeEventListener("message", handler);
         attachSession(msg.session.id, msg.session);
@@ -1037,49 +1013,6 @@
       }
     };
     ws.addEventListener("message", handler);
-  });
-
-  async function loadTools() {
-    try {
-      const res = await fetch("/api/tools");
-      const data = await res.json();
-      toolSelect.innerHTML = "";
-      for (const t of data.tools || []) {
-        if (!t.available) continue;
-        const opt = document.createElement("option");
-        opt.value = t.id;
-        opt.textContent = t.name;
-        toolSelect.appendChild(opt);
-      }
-    } catch {}
-  }
-
-  // Folder autocomplete
-  let acTimer = null;
-  folderInput.addEventListener("input", () => {
-    clearTimeout(acTimer);
-    acTimer = setTimeout(async () => {
-      const q = folderInput.value.trim();
-      if (q.length < 2) {
-        folderSuggestions.innerHTML = "";
-        return;
-      }
-      try {
-        const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(q)}`);
-        const data = await res.json();
-        folderSuggestions.innerHTML = "";
-        for (const s of (data.suggestions || []).slice(0, 5)) {
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.textContent = s.replace(/^\/Users\/[^/]+/, "~");
-          btn.onclick = () => {
-            folderInput.value = s;
-            folderSuggestions.innerHTML = "";
-          };
-          folderSuggestions.appendChild(btn);
-        }
-      } catch {}
-    }, 200);
   });
 
   // ---- Image handling ----
@@ -1632,8 +1565,49 @@
     }
   }
 
+  // ---- Visitor mode setup ----
+  function applyVisitorMode() {
+    visitorMode = true;
+    document.body.classList.add("visitor-mode");
+    // Hide sidebar toggle, new session button, and management UI
+    if (menuBtn) menuBtn.style.display = "none";
+    if (newSessionBtn) newSessionBtn.style.display = "none";
+    if (collapseBtn) collapseBtn.style.display = "none";
+    // Hide tool/model selectors and context management (visitors use defaults)
+    if (inlineToolSelect) inlineToolSelect.style.display = "none";
+    if (inlineModelSelect) inlineModelSelect.style.display = "none";
+    if (effortSelect) effortSelect.style.display = "none";
+    if (thinkingToggle) thinkingToggle.style.display = "none";
+    if (compactBtn) compactBtn.style.display = "none";
+    if (dropToolsBtn) dropToolsBtn.style.display = "none";
+    if (contextTokens) contextTokens.style.display = "none";
+  }
+
   // ---- Init ----
   initResponsiveLayout();
-  loadInlineTools();
-  connect();
+
+  // Check if visitor mode via URL param or auth endpoint
+  const urlParams = new URLSearchParams(location.search);
+  if (urlParams.has("visitor")) {
+    // Fetch visitor session info, then connect
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((info) => {
+        if (info.role === "visitor" && info.sessionId) {
+          visitorSessionId = info.sessionId;
+          applyVisitorMode();
+          // Clean URL
+          history.replaceState(null, "", "/");
+        }
+        loadInlineTools();
+        connect();
+      })
+      .catch(() => {
+        loadInlineTools();
+        connect();
+      });
+  } else {
+    loadInlineTools();
+    connect();
+  }
 })();

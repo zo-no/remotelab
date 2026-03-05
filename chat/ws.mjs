@@ -1,5 +1,5 @@
 import { WebSocketServer } from 'ws';
-import { isAuthenticated, parseCookies } from '../lib/auth.mjs';
+import { isAuthenticated, getAuthSession, parseCookies } from '../lib/auth.mjs';
 import {
   createSession, getSession, listSessions, listArchivedSessions,
   archiveSession, unarchiveSession,
@@ -29,13 +29,17 @@ export function attachWebSocket(server) {
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
+      // Attach auth session info to the ws object for role checks
+      ws._authSession = getAuthSession(req);
       wss.emit('connection', ws, req);
     });
   });
 
   wss.on('connection', (ws) => {
     let attachedSessionId = null;
-    console.log('[ws] Client connected');
+    const authSession = ws._authSession || {};
+    const role = authSession.role || 'owner';
+    console.log(`[ws] Client connected (role=${role})`);
 
     ws.on('message', (raw) => {
       let msg;
@@ -52,6 +56,8 @@ export function attachWebSocket(server) {
         handleMessage(ws, msg, {
           getAttached: () => attachedSessionId,
           setAttached: (id) => { attachedSessionId = id; },
+          role,
+          authSession,
         });
       } catch (err) {
         console.error(`[ws] handleMessage error: ${err.message}`);
@@ -76,7 +82,25 @@ function wsSend(ws, data) {
   }
 }
 
+// Actions allowed for visitors (scoped to their assigned session)
+const VISITOR_ALLOWED = new Set(['attach', 'send', 'cancel']);
+
 function handleMessage(ws, msg, ctx) {
+  const { role, authSession } = ctx;
+
+  // Visitor access control: restrict actions and session scope
+  if (role === 'visitor') {
+    if (!VISITOR_ALLOWED.has(msg.action)) {
+      wsSend(ws, { type: 'error', message: 'Not allowed in visitor mode' });
+      return;
+    }
+    // Visitors can only attach to their assigned session
+    if (msg.action === 'attach' && msg.sessionId !== authSession.sessionId) {
+      wsSend(ws, { type: 'error', message: 'Access denied' });
+      return;
+    }
+  }
+
   switch (msg.action) {
     case 'list': {
       const sessions = listSessions();

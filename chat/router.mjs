@@ -7,6 +7,7 @@ import {
   sessions, saveAuthSessions,
   verifyToken, verifyPassword, generateToken,
   parseCookies, setCookie, clearCookie,
+  getAuthSession,
 } from '../lib/auth.mjs';
 import { getAvailableTools } from '../lib/tools.mjs';
 import { listSessions, listArchivedSessions, getSession, createSession, archiveSession, unarchiveSession } from './session-manager.mjs';
@@ -14,6 +15,7 @@ import { getSidebarState } from './summarizer.mjs';
 import { getPublicKey, addSubscription } from './push.mjs';
 import { getModelsForTool } from './models.mjs';
 import { getSettings, updateSettings } from './settings.mjs';
+import { listApps, getApp, getAppByShareToken, createApp, updateApp, deleteApp } from './apps.mjs';
 import { readBody } from '../lib/utils.mjs';
 import {
   getClientIp, isRateLimited, recordFailedAttempt, clearFailedAttempts,
@@ -68,7 +70,7 @@ export async function handleRequest(req, res) {
     if (verifyToken(queryToken)) {
       clearFailedAttempts(ip);
       const sessionToken = generateToken();
-      sessions.set(sessionToken, { expiry: Date.now() + SESSION_EXPIRY });
+      sessions.set(sessionToken, { expiry: Date.now() + SESSION_EXPIRY, role: 'owner' });
       saveAuthSessions();
       res.writeHead(302, { 'Location': '/', 'Set-Cookie': setCookie(sessionToken) });
       res.end();
@@ -101,7 +103,7 @@ export async function handleRequest(req, res) {
     if (valid) {
       clearFailedAttempts(ip);
       const sessionToken = generateToken();
-      sessions.set(sessionToken, { expiry: Date.now() + SESSION_EXPIRY });
+      sessions.set(sessionToken, { expiry: Date.now() + SESSION_EXPIRY, role: 'owner' });
       saveAuthSessions();
       res.writeHead(302, { 'Location': '/', 'Set-Cookie': setCookie(sessionToken) });
     } else {
@@ -133,6 +135,45 @@ export async function handleRequest(req, res) {
     const token = cookies.session_token;
     if (token) { sessions.delete(token); saveAuthSessions(); }
     res.writeHead(302, { 'Location': '/login', 'Set-Cookie': clearCookie() });
+    res.end();
+    return;
+  }
+
+  // ---- App visitor entry point (before auth check — visitors aren't authenticated yet) ----
+  if (pathname.startsWith('/app/') && req.method === 'GET') {
+    const shareToken = pathname.slice('/app/'.length);
+    if (!shareToken) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+      return;
+    }
+    const app = getAppByShareToken(shareToken);
+    if (!app) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('App not found');
+      return;
+    }
+    // Create a visitor auth session + a new chat session from the app template
+    const visitorId = 'visitor_' + generateToken().slice(0, 16);
+    const chatSession = createSession(
+      '~',
+      app.tool || 'claude',
+      app.name,
+      { appId: app.id, visitorId, systemPrompt: app.systemPrompt }
+    );
+    const sessionToken = generateToken();
+    sessions.set(sessionToken, {
+      expiry: Date.now() + SESSION_EXPIRY,
+      role: 'visitor',
+      appId: app.id,
+      visitorId,
+      sessionId: chatSession.id,
+    });
+    saveAuthSessions();
+    res.writeHead(302, {
+      'Location': '/?visitor=1',
+      'Set-Cookie': setCookie(sessionToken),
+    });
     res.end();
     return;
   }
@@ -362,6 +403,114 @@ export async function handleRequest(req, res) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid subscription' }));
     }
+    return;
+  }
+
+  // ---- App CRUD APIs (owner only) ----
+
+  if (pathname === '/api/apps' && req.method === 'GET') {
+    const authSession = getAuthSession(req);
+    if (authSession?.role !== 'owner') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Owner access required' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ apps: listApps() }));
+    return;
+  }
+
+  if (pathname === '/api/apps' && req.method === 'POST') {
+    const authSession = getAuthSession(req);
+    if (authSession?.role !== 'owner') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Owner access required' }));
+      return;
+    }
+    let body;
+    try { body = await readBody(req, 10240); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Bad request' }));
+      return;
+    }
+    try {
+      const { name, systemPrompt, skills, tool } = JSON.parse(body);
+      const app = createApp({ name, systemPrompt, skills, tool });
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ app }));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid request body' }));
+    }
+    return;
+  }
+
+  if (pathname.startsWith('/api/apps/') && req.method === 'PATCH') {
+    const authSession = getAuthSession(req);
+    if (authSession?.role !== 'owner') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Owner access required' }));
+      return;
+    }
+    const id = pathname.split('/').pop();
+    let body;
+    try { body = await readBody(req, 10240); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Bad request' }));
+      return;
+    }
+    try {
+      const updates = JSON.parse(body);
+      const updated = updateApp(id, updates);
+      if (updated) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ app: updated }));
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'App not found' }));
+      }
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid request body' }));
+    }
+    return;
+  }
+
+  if (pathname.startsWith('/api/apps/') && req.method === 'DELETE') {
+    const authSession = getAuthSession(req);
+    if (authSession?.role !== 'owner') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Owner access required' }));
+      return;
+    }
+    const id = pathname.split('/').pop();
+    const ok = deleteApp(id);
+    if (ok) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'App not found' }));
+    }
+    return;
+  }
+
+  // ---- Auth info endpoint ----
+  if (pathname === '/api/auth/me' && req.method === 'GET') {
+    const authSession = getAuthSession(req);
+    if (!authSession) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not authenticated' }));
+      return;
+    }
+    const info = { role: authSession.role || 'owner' };
+    if (authSession.role === 'visitor') {
+      info.appId = authSession.appId;
+      info.sessionId = authSession.sessionId;
+      info.visitorId = authSession.visitorId;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(info));
     return;
   }
 
