@@ -3,6 +3,11 @@
 self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch {}
+  const target = {
+    sessionId: data.sessionId || null,
+    tab: data.tab || 'sessions',
+    url: data.url || '/',
+  };
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
@@ -16,6 +21,7 @@ self.addEventListener('push', (event) => {
         badge: '/apple-touch-icon.png',
         tag: 'remotelab-done',
         renotify: true,
+        data: target,
       });
     })
   );
@@ -23,12 +29,24 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  const target = {
+    sessionId: event.notification.data?.sessionId || null,
+    tab: event.notification.data?.tab || 'sessions',
+    url: event.notification.data?.url || '/',
+  };
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
+      const client = clientList[0];
+      if (client) {
+        client.postMessage({
+          type: 'remotelab:open-session',
+          sessionId: target.sessionId,
+          tab: target.tab,
+          url: target.url,
+        });
         if ('focus' in client) return client.focus();
       }
-      return self.clients.openWindow('/');
+      return self.clients.openWindow(target.url);
     })
   );
 });

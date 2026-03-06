@@ -70,10 +70,15 @@ export function generateNonce() {
 
 /**
  * Returns true if the request is authenticated.
- * If not, writes a 302 redirect to /login and returns false.
+ * If not, writes a 401 JSON response for API routes or a 302 redirect for pages.
  */
 export function requireAuth(req, res) {
   if (isAuthenticated(req)) return true;
+  if ((req.url || '').startsWith('/api/')) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not authenticated' }));
+    return false;
+  }
   res.writeHead(302, { 'Location': '/login' });
   res.end();
   return false;

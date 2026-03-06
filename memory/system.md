@@ -12,6 +12,10 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 
 ## Learnings
 
+### Memory Bootstrap Hygiene (2026-03-06)
+- Fresh or partially initialized RemoteLab setups may be missing `~/.remotelab/memory/skills.md`.
+- If session startup expects that file, create a minimal placeholder index instead of treating the absence as a hard failure.
+
 ### Context Continuity Across Restarts (2026-03-06)
 - Claude Code's `--resume <session_id>` flag is the ONLY mechanism for conversation continuity. Without it, every spawn starts a completely fresh session regardless of what the UI shows.
 - Any in-memory state critical for continuity (session IDs, thread IDs) MUST be persisted to disk. In-memory Maps are wiped on process restart.
@@ -22,6 +26,10 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 ### Testing Strategy for Self-Hosted Services (2026-03-06)
 - Never restart the server you're running on to test restart-survival features. Spin up a separate instance on a different port (e.g., 7694) and run the full test cycle there.
 - Use node WebSocket client for API testing — match the actual protocol (`action` field, attach-before-send flow).
+
+### Project Path Persistence (2026-03-06)
+- When a user has already confirmed a repo path for an active task, persist that path immediately into user-level memory or a task note.
+- On later turns, check memory before doing broad filesystem searches; repeated rediscovery wastes time and breaks continuity.
 
 ### Tool Selection State Must Be Split (2026-03-06)
 - If the UI supports switching tools mid-session (e.g. Claude → Codex), the session metadata on disk MUST be updated when the switch happens. Otherwise reload/reattach paths snap the selector back to the stale `session.tool`.
@@ -87,6 +95,12 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - Persist an explicit boolean like `autoRenamePending`; otherwise a temporary draft title blocks the later AI rename, and a late AI callback can overwrite a user's manual rename.
 - The rename callback itself should re-check that pending flag at execution time, not just when the background summary job started.
 
+### Active Session Restore Should Share One Deep-Link Contract (2026-03-06)
+- Refresh restore, sidebar tab restore, and notification-open behavior should not each pick their own session separately; drive all three from the same `session`/`tab` deep-link contract plus one persisted local fallback.
+- Good precedence is: explicit notification/URL target first, then last locally active session, then most recently updated session.
+- Push notifications should carry the target session URL in their payload, and existing app windows should receive an in-page message to switch sessions without a forced reload. Fresh windows can fall back to `openWindow(url)`.
+- To make "latest session" meaningful, persist a session-level recency field like `updatedAt` and sort session listings/fallback selection by it.
+
 ### Open Local Config Should Fail Per Record, Not Per File (2026-03-06)
 - Once provider/tool extensibility relies on user-editable local JSON, a single bad record must be skipped with a clear log instead of breaking the entire picker/API response.
 - Treat malformed config files and unsupported provider fields as operator mistakes to isolate, not reasons to take down unrelated valid tools.
@@ -106,3 +120,25 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 ### Hidden Markdown Blocks Work Best As Parser Extensions (2026-03-06)
 - For `marked`, custom block + inline extensions are a clean way to consume tags like `<private>...</private>` and `<hide>...</hide>` so the UI hides them while the raw message text stays intact for history and model context.
 - After rendering, skip empty assistant bubbles; otherwise a response that only contains hidden blocks still leaves blank UI chrome behind.
+
+### Private Skill Knowledge Stays Out Of Shared Memory (2026-03-06)
+- Repo-shared system memory must not store operational notes for private or org-specific skills/integrations, even if the pattern feels broadly useful inside one company's environment.
+- Put that knowledge in the skill's own docs when the skill is private/local, or in user-level memory on the relevant machine if it is an operator-specific workaround.
+- Reserve shared system memory for truths that still help a generic RemoteLab deployment with no access to the private skill at all.
+
+### Always-On Memory Should Be Tiny And Ranked (2026-03-06)
+- If hard rules, user preferences, long memory notes, skill catalogs, and operator guidance are all injected at session start, important constraints lose salience and the model falls back to generic heuristics.
+- Split context into tiers: a tiny always-on contract for non-negotiables, a short session note for the active task, a lightweight capability index, and on-demand retrieval for detailed memory/skill docs.
+- Prefer promoting only durable constraints into always-on context; demote examples, edge cases, long explanations, and rare workflows into indexed reference material.
+
+### Task Scope Must Gate Memory Retrieval (2026-03-06)
+- Do not preload unrelated project/task memory for generic conversations just because those files exist on disk.
+- Memory retrieval should follow a gated flow: bootstrap contract first, then identify/confirm the current task scope, then load only the matching task notes, skills, and domain docs.
+- Project-specific notes are retrieval candidates, not mandatory startup context. For example, an `intelligent-app` task note should stay out of a general conversation unless the user clearly moves into that task.
+- A startup rule like "read all memory files at the start of every session" is an architectural mismatch if the product goal is focus and bounded context; it turns retrieval into unconditional preload.
+
+### Memory Writeback Must Be Sparse And Pruned (2026-03-06)
+- Reflection is valuable, but memory writes should be rare and selective. Persist only durable lessons with clear expected reuse.
+- Prefer editing, merging, or deleting existing memory instead of appending near-duplicate notes.
+- Memory hygiene should happen on a light cadence: daily during intense debugging or weekly otherwise.
+- Archive or trim stale task notes once they stop improving future execution.

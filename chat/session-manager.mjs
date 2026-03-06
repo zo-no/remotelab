@@ -10,6 +10,7 @@ import { isProgressEnabled } from './settings.mjs';
 import { sendCompletionPush } from './push.mjs';
 import { buildSystemContext } from './system-prompt.mjs';
 import { buildSessionContinuationContext } from './session-continuation.mjs';
+import { broadcastOwners } from './ws-clients.mjs';
 import {
   buildTemporarySessionName,
   isSessionAutoRenamePending,
@@ -77,6 +78,20 @@ function updateSessionMeta(sessionId, updater) {
   metas[idx] = next;
   saveSessionsMeta(metas);
   return next;
+}
+
+function touchSessionMeta(sessionId, extra = {}) {
+  return updateSessionMeta(sessionId, (session) => {
+    session.updatedAt = new Date().toISOString();
+    Object.assign(session, extra);
+    return session;
+  });
+}
+
+function getSessionSortTime(meta) {
+  const stamp = meta?.updatedAt || meta?.created || '';
+  const time = new Date(stamp).getTime();
+  return Number.isFinite(time) ? time : 0;
 }
 
 /**
@@ -176,7 +191,7 @@ function setRenameState(sessionId, renameState, renameError = '') {
   else delete live.renameError;
   const updated = getSession(sessionId);
   if (updated) {
-    broadcast(sessionId, { type: 'session', session: updated });
+    broadcastSessionUpdate(sessionId, updated);
   }
   return updated;
 }
@@ -192,6 +207,7 @@ export function listSessions({ includeVisitor = false } = {}) {
   return metas
     .filter(m => !m.archived)
     .filter(m => includeVisitor || !m.visitorId)
+    .sort((a, b) => getSessionSortTime(b) - getSessionSortTime(a))
     .map(enrichSessionMeta);
 }
 
@@ -212,13 +228,15 @@ export function getSession(id) {
 export function createSession(folder, tool, name, extra = {}) {
   const id = generateId();
   const initialNaming = resolveInitialSessionName(name);
+  const now = new Date().toISOString();
   const session = {
     id,
     folder,
     tool,
     name: initialNaming.name,
     autoRenamePending: initialNaming.autoRenamePending,
-    created: new Date().toISOString(),
+    created: now,
+    updatedAt: now,
   };
 
   // App-related metadata
@@ -257,6 +275,7 @@ export function unarchiveSession(id) {
   if (idx === -1) return null;
   delete metas[idx].archived;
   delete metas[idx].archivedAt;
+  metas[idx].updatedAt = new Date().toISOString();
   saveSessionsMeta(metas);
   return { ...metas[idx], status: 'idle' };
 }
@@ -274,11 +293,12 @@ export function renameSession(id, name, options = {}) {
   if (idx === -1) return null;
   metas[idx].name = nextName;
   metas[idx].autoRenamePending = !!options.preserveAutoRename;
+  metas[idx].updatedAt = new Date().toISOString();
   clearRenameState(id);
   saveSessionsMeta(metas);
   renameSidebarEntry(id, nextName);
   const updated = enrichSessionMeta(metas[idx]);
-  broadcast(id, { type: 'session', session: updated });
+  broadcastSessionUpdate(id, updated);
   return updated;
 }
 
@@ -287,9 +307,10 @@ export function updateSessionTool(id, tool) {
   const idx = metas.findIndex(m => m.id === id);
   if (idx === -1) return null;
   metas[idx].tool = tool;
+  metas[idx].updatedAt = new Date().toISOString();
   saveSessionsMeta(metas);
   const updated = enrichSessionMeta(metas[idx]);
-  broadcast(id, { type: 'session', session: updated });
+  broadcastSessionUpdate(id, updated);
   return updated;
 }
 
@@ -328,6 +349,14 @@ function broadcast(sessionId, msg) {
   }
 }
 
+function broadcastSessionUpdate(sessionId, session) {
+  const msg = { type: 'session', session };
+  broadcast(sessionId, msg);
+  if (!session?.visitorId) {
+    broadcastOwners(msg);
+  }
+}
+
 /**
  * Send a user message to a session. Spawns a new process if needed.
  */
@@ -362,6 +391,10 @@ export function sendMessage(sessionId, text, images, options = {}) {
     liveSessions.set(sessionId, live);
   }
   clearRenameState(sessionId);
+  const touchedSession = touchSessionMeta(sessionId);
+  if (touchedSession) {
+    session = enrichSessionMeta(touchedSession);
+  }
 
   if (isFirstRecordedUserMessage && isSessionAutoRenamePending(session)) {
     const draftName = buildTemporarySessionName(text);
@@ -424,9 +457,9 @@ export function sendMessage(sessionId, text, images, options = {}) {
     effort: options.effort || null,
     thinking: !!options.thinking,
   });
-  broadcast(sessionId, {
-    type: 'session',
-    session: { ...(getSession(sessionId) || session), status: 'running' },
+  broadcastSessionUpdate(sessionId, {
+    ...(getSession(sessionId) || session),
+    status: 'running',
   });
 
   const onEvent = (evt) => {
@@ -456,9 +489,14 @@ export function sendMessage(sessionId, text, images, options = {}) {
       l.runner = null;
     }
     clearActiveRun(sessionId);
-    broadcast(sessionId, {
-      type: 'session',
-      session: { ...(getSession(sessionId) || session), status: 'idle', recoverable: false },
+    const touchedAfterExit = touchSessionMeta(sessionId);
+    if (touchedAfterExit) {
+      session = enrichSessionMeta(touchedAfterExit);
+    }
+    broadcastSessionUpdate(sessionId, {
+      ...(getSession(sessionId) || session),
+      status: 'idle',
+      recoverable: false,
     });
 
     // Handle compact completion: extract summary, reset session
@@ -660,10 +698,7 @@ export function cancelSession(sessionId) {
     live.status = 'idle';
     clearActiveRun(sessionId);
     const session = getSession(sessionId);
-    broadcast(sessionId, {
-      type: 'session',
-      session: { ...session, status: 'idle' },
-    });
+    broadcastSessionUpdate(sessionId, { ...session, status: 'idle' });
     const evt = statusEvent('cancelled');
     appendEvent(sessionId, evt);
     broadcast(sessionId, { type: 'event', event: evt });

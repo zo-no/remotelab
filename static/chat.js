@@ -59,7 +59,14 @@
 
   let ws = null;
   let pendingImages = [];
-  let currentSessionId = null;
+  const ACTIVE_SESSION_STORAGE_KEY = "activeSessionId";
+  const ACTIVE_SIDEBAR_TAB_STORAGE_KEY = "activeSidebarTab";
+  let pendingNavigationState = readNavigationStateFromLocation();
+  let currentSessionId =
+    pendingNavigationState.sessionId ||
+    localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY) ||
+    null;
+  let hasAttachedSession = false;
   let sessionStatus = "idle";
   let reconnectTimer = null;
   let sessions = [];
@@ -156,6 +163,181 @@
 
   registerHiddenMarkdownExtensions();
 
+  function normalizeSidebarTab(tab) {
+    return tab === "progress" ? "progress" : "sessions";
+  }
+
+  function normalizeNavigationState(raw) {
+    let sessionId = null;
+    let tab = null;
+
+    if (raw && typeof raw === "object") {
+      if (typeof raw.sessionId === "string") sessionId = raw.sessionId;
+      if (typeof raw.tab === "string") tab = raw.tab;
+      if (raw.url) {
+        try {
+          const url = new URL(raw.url, window.location.origin);
+          if (!sessionId) sessionId = url.searchParams.get("session") || null;
+          if (!tab) tab = url.searchParams.get("tab") || null;
+        } catch {}
+      }
+    }
+
+    return {
+      sessionId:
+        typeof sessionId === "string" && sessionId.trim()
+          ? sessionId.trim()
+          : null,
+      tab: tab ? normalizeSidebarTab(tab) : null,
+    };
+  }
+
+  function readNavigationStateFromLocation() {
+    return normalizeNavigationState({
+      sessionId: new URLSearchParams(window.location.search).get("session"),
+      tab: new URLSearchParams(window.location.search).get("tab"),
+    });
+  }
+
+  function persistActiveSessionId(sessionId) {
+    if (visitorMode) return;
+    if (sessionId) {
+      localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+    } else {
+      localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+    }
+  }
+
+  function persistActiveSidebarTab(tab) {
+    if (visitorMode) return;
+    localStorage.setItem(
+      ACTIVE_SIDEBAR_TAB_STORAGE_KEY,
+      normalizeSidebarTab(tab),
+    );
+  }
+
+  function buildNavigationUrl(state = {}) {
+    const nextSessionId =
+      state.sessionId === undefined ? currentSessionId : state.sessionId;
+    const nextTab = normalizeSidebarTab(
+      state.tab === undefined ? activeTab : state.tab,
+    );
+    const url = new URL(window.location.href);
+    url.searchParams.delete("visitor");
+    url.searchParams.delete("source");
+    if (nextSessionId) url.searchParams.set("session", nextSessionId);
+    else url.searchParams.delete("session");
+    if (nextTab === "progress") url.searchParams.set("tab", nextTab);
+    else url.searchParams.delete("tab");
+    return `${url.pathname}${url.search}`;
+  }
+
+  function syncBrowserState(state = {}) {
+    if (visitorMode) return;
+    const nextSessionId =
+      state.sessionId === undefined ? currentSessionId : state.sessionId;
+    const nextTab = normalizeSidebarTab(
+      state.tab === undefined ? activeTab : state.tab,
+    );
+    persistActiveSessionId(nextSessionId);
+    persistActiveSidebarTab(nextTab);
+    const nextUrl = buildNavigationUrl({
+      sessionId: nextSessionId,
+      tab: nextTab,
+    });
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    if (nextUrl !== currentUrl) {
+      history.replaceState(null, "", nextUrl);
+    }
+  }
+
+  function getSessionSortTime(session) {
+    const stamp = session?.updatedAt || session?.created || "";
+    const time = new Date(stamp).getTime();
+    return Number.isFinite(time) ? time : 0;
+  }
+
+  function sortSessionsInPlace() {
+    sessions.sort((a, b) => getSessionSortTime(b) - getSessionSortTime(a));
+  }
+
+  function getLatestSession() {
+    return sessions[0] || null;
+  }
+
+  function resolveRestoreTargetSession() {
+    if (pendingNavigationState?.sessionId) {
+      const requested = sessions.find(
+        (session) => session.id === pendingNavigationState.sessionId,
+      );
+      if (requested) return requested;
+    }
+    if (currentSessionId) {
+      const current = sessions.find((session) => session.id === currentSessionId);
+      if (current) return current;
+    }
+    return getLatestSession();
+  }
+
+  function applyNavigationState(rawState) {
+    const next = normalizeNavigationState(rawState);
+    if (next.tab) {
+      switchTab(next.tab, { syncState: false });
+    }
+    pendingNavigationState = next.sessionId ? next : null;
+    if (next.sessionId) {
+      const target = sessions.find((session) => session.id === next.sessionId);
+      if (target) {
+        attachSession(target.id, target);
+        pendingNavigationState = null;
+      } else if (ws && ws.readyState === WebSocket.OPEN) {
+        wsSend({ action: "list" });
+      }
+      syncBrowserState({
+        sessionId: next.sessionId,
+        tab: next.tab || activeTab,
+      });
+      return;
+    }
+    syncBrowserState({ tab: next.tab || activeTab });
+  }
+
+  function restoreOwnerSessionSelection() {
+    if (visitorMode) return;
+
+    const requestedTab = pendingNavigationState?.tab || activeTab;
+    if (requestedTab !== activeTab) {
+      switchTab(requestedTab, { syncState: false });
+    }
+
+    const targetSession = resolveRestoreTargetSession();
+    if (!targetSession) {
+      currentSessionId = null;
+      hasAttachedSession = false;
+      persistActiveSessionId(null);
+      syncBrowserState({ sessionId: null, tab: activeTab });
+      showEmpty();
+      updateStatus("connected", "idle");
+      pendingNavigationState = null;
+      return;
+    }
+
+    if (!hasAttachedSession || currentSessionId !== targetSession.id) {
+      attachSession(targetSession.id, targetSession);
+    } else {
+      syncBrowserState();
+    }
+    pendingNavigationState = null;
+  }
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data?.type !== "remotelab:open-session") return;
+      applyNavigationState(event.data);
+      window.focus();
+    });
+  }
+
   function notifyCompletion(session) {
     if (!("Notification" in window) || Notification.permission !== "granted")
       return;
@@ -168,6 +350,7 @@
     });
     n.onclick = () => {
       window.focus();
+      applyNavigationState({ sessionId: session?.id, tab: "sessions" });
       n.close();
     };
   }
@@ -182,6 +365,38 @@
     for (let i = 0; i < rawData.length; i++)
       outputArray[i] = rawData.charCodeAt(i);
     return outputArray;
+  }
+
+  function redirectToLogin() {
+    if (window.location.pathname !== "/login") {
+      window.location.href = "/login";
+    }
+  }
+
+  async function fetchJsonOrRedirect(url, options) {
+    const res = await fetch(url, options);
+    const redirectedToLogin =
+      res.redirected && new URL(res.url, window.location.href).pathname === "/login";
+
+    if (res.status === 401 || redirectedToLogin) {
+      redirectToLogin();
+      throw new Error("Authentication required");
+    }
+
+    const contentType = res.headers.get("content-type") || "";
+    const data = contentType.includes("application/json")
+      ? await res.json().catch(() => ({}))
+      : null;
+
+    if (!res.ok) {
+      throw new Error(data?.error || `Request failed (${res.status})`);
+    }
+
+    if (!data) {
+      throw new Error("Expected JSON response");
+    }
+
+    return data;
   }
 
   async function setupPushNotifications() {
@@ -429,15 +644,11 @@
     setAddToolStatus("Saving and refreshing picker...");
 
     try {
-      const res = await fetch("/api/tools", {
+      const data = await fetchJsonOrRedirect("/api/tools", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(draft),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to save tool config");
-      }
 
       const savedTool = data.tool;
       if (savedTool?.id) {
@@ -470,14 +681,14 @@
     }
   }
 
-  function renderInlineToolOptions(selectedValue) {
+  function renderInlineToolOptions(selectedValue, emptyMessage = "No agents found") {
     inlineToolSelect.disabled = visitorMode;
     inlineToolSelect.innerHTML = "";
 
     if (toolsList.length === 0) {
       const emptyOpt = document.createElement("option");
       emptyOpt.value = "";
-      emptyOpt.textContent = "No agents found";
+      emptyOpt.textContent = emptyMessage;
       emptyOpt.disabled = true;
       emptyOpt.selected = true;
       inlineToolSelect.appendChild(emptyOpt);
@@ -511,8 +722,7 @@
       return;
     }
     try {
-      const res = await fetch("/api/tools");
-      const data = await res.json();
+      const data = await fetchJsonOrRedirect("/api/tools");
       toolsList = (data.tools || []).filter((t) => t.available);
       const initialTool = [selectedTool, preferredTool, toolsList[0]?.id].find(
         (toolId) => toolId && toolsList.some((t) => t.id === toolId),
@@ -526,9 +736,10 @@
         }
       }
       await loadModelsForCurrentTool();
-    } catch {
+    } catch (err) {
       toolsList = [];
-      renderInlineToolOptions("");
+      console.warn("[tools] Failed to load tools:", err.message);
+      renderInlineToolOptions("", "Failed to load agents");
     }
   }
 
@@ -578,8 +789,7 @@
       return;
     }
     try {
-      const res = await fetch(`/api/models?tool=${encodeURIComponent(selectedTool)}`);
-      const data = await res.json();
+      const data = await fetchJsonOrRedirect(`/api/models?tool=${encodeURIComponent(selectedTool)}`);
       currentToolModels = data.models || [];
       currentToolReasoningKind =
         data.reasoning?.kind || (data.effortLevels ? "enum" : "toggle");
@@ -738,11 +948,12 @@
       if (visitorMode && visitorSessionId) {
         // Visitor: skip session list, directly attach to assigned session
         currentSessionId = visitorSessionId;
+        hasAttachedSession = true;
         ws.send(JSON.stringify({ action: "attach", sessionId: visitorSessionId }));
       } else {
         ws.send(JSON.stringify({ action: "list" }));
         ws.send(JSON.stringify({ action: "list_archived" }));
-        if (currentSessionId) {
+        if (currentSessionId && hasAttachedSession) {
           ws.send(
             JSON.stringify({ action: "attach", sessionId: currentSessionId }),
           );
@@ -791,6 +1002,14 @@
     return sessions.find((s) => s.id === currentSessionId) || null;
   }
 
+  function normalizeSessionStatus(incomingStatus, previousStatus) {
+    if (incomingStatus !== "idle") return incomingStatus;
+    if (previousStatus === "running" || previousStatus === "done") {
+      return "done";
+    }
+    return "idle";
+  }
+
   function updateResumeButton() {
     const session = getCurrentSession();
     const canResume = !!session && session.status === "interrupted" && session.recoverable;
@@ -801,8 +1020,19 @@
   function handleWsMessage(msg) {
     switch (msg.type) {
       case "sessions":
-        sessions = msg.sessions || [];
+        sessions = (msg.sessions || []).map((session) => {
+          const prevEntry = sessions.find((s) => s.id === session.id);
+          return {
+            ...session,
+            status: normalizeSessionStatus(
+              session.status || "idle",
+              prevEntry?.status || "idle",
+            ),
+          };
+        });
+        sortSessionsInPlace();
         renderSessionList();
+        restoreOwnerSessionSelection();
         break;
 
       case "session":
@@ -811,25 +1041,31 @@
           const wasRunning = prevEntry?.status === "running";
           const isCurrentSession = msg.session.id === currentSessionId;
           const prevStatus = isCurrentSession ? sessionStatus : prevEntry?.status || "idle";
+          const nextStatus = normalizeSessionStatus(
+            msg.session.status || "idle",
+            prevEntry?.status || "idle",
+          );
+          const normalizedSession = { ...msg.session, status: nextStatus };
           const idx = sessions.findIndex((s) => s.id === msg.session.id);
-          if (idx >= 0) sessions[idx] = msg.session;
-          else sessions.push(msg.session);
+          if (idx >= 0) sessions[idx] = normalizedSession;
+          else sessions.push(normalizedSession);
+          sortSessionsInPlace();
           if (isCurrentSession) {
             const displayName =
-              msg.session.name || msg.session.folder?.split("/").pop() || "Session";
+              normalizedSession.name || normalizedSession.folder?.split("/").pop() || "Session";
             headerTitle.textContent = displayName;
-            sessionStatus = msg.session.status || "idle";
-            updateStatus("connected", sessionStatus, msg.session.renameState);
+            sessionStatus = normalizedSession.status || "idle";
+            updateStatus("connected", sessionStatus, normalizedSession.renameState);
           }
           if (
             isCurrentSession &&
             prevStatus === "running" &&
-            sessionStatus === "idle"
+            sessionStatus === "done"
           ) {
-            notifyCompletion(msg.session);
+            notifyCompletion(normalizedSession);
           }
           // Mark finished-unread for sessions that completed without being viewed
-          if (wasRunning && msg.session.status === "idle") {
+          if (wasRunning && nextStatus === "done") {
             const isActiveAndVisible =
               msg.session.id === currentSessionId &&
               document.visibilityState === "visible";
@@ -837,8 +1073,8 @@
               finishedUnread.add(msg.session.id);
             }
           }
-          // Mark as pending summary when any session goes running → idle (only if progress enabled)
-          if (wasRunning && msg.session.status === "idle" && progressEnabled) {
+          // Mark as pending summary when any session completes (only if progress enabled)
+          if (wasRunning && nextStatus === "done" && progressEnabled) {
             pendingSummary.add(msg.session.id);
             if (activeTab === "progress") renderProgressPanel(lastProgressState);
           }
@@ -878,10 +1114,11 @@
         if (currentSessionId === msg.sessionId) {
           messageQueue = [];
           currentSessionId = null;
+          hasAttachedSession = false;
           clearMessages();
-          showEmpty();
         }
         renderSessionList();
+        restoreOwnerSessionSelection();
         wsSend({ action: "list_archived" });
         break;
 
@@ -895,6 +1132,7 @@
           archivedSessions = archivedSessions.filter((s) => s.id !== msg.session.id);
           const exists = sessions.find((s) => s.id === msg.session.id);
           if (!exists) sessions.push(msg.session);
+          sortSessionsInPlace();
           renderSessionList();
           renderArchivedSection();
         }
@@ -940,12 +1178,16 @@
     }
     sessionStatus = sessState;
     const isRunning = sessState === "running";
+    const isDone = sessState === "done";
     const isInterrupted = sessState === "interrupted";
     const isRenaming = renameState === "pending";
     const renameFailed = renameState === "failed";
     if (isRunning) {
       statusDot.className = "status-dot running";
       statusText.textContent = "running";
+    } else if (isDone) {
+      statusDot.className = "status-dot done";
+      statusText.textContent = "done";
     } else if (isInterrupted) {
       statusDot.className = "status-dot interrupted";
       statusText.textContent = "interrupted";
@@ -1388,12 +1630,12 @@
         if (s.name && s.tool) metaParts.push(s.tool);
         if (s.status === "running") metaParts.push("●&nbsp;running");
         const renameReason = s.renameError ? ` title="${esc(s.renameError)}"` : "";
-        const metaHtml = s.renameState === "pending"
+        const metaHtml = s.status === "done" || finishedUnread.has(s.id)
+          ? `<span class="status-done">● done</span>`
+          : s.renameState === "pending"
           ? `<span class="status-renaming">● renaming</span>`
           : s.renameState === "failed"
             ? `<span class="status-rename-failed"${renameReason}>● rename failed</span>`
-          : finishedUnread.has(s.id)
-          ? `<span class="status-done">● done</span>`
           : s.status === "running"
             ? `<span class="status-running">● running</span>`
             : s.status === "interrupted"
@@ -1523,14 +1765,18 @@
   }
 
   function attachSession(id, session) {
+    const shouldReattach = !hasAttachedSession || currentSessionId !== id;
     currentSessionId = id;
+    hasAttachedSession = true;
     currentTokens = 0;
     contextTokens.style.display = "none";
     compactBtn.style.display = "none";
     dropToolsBtn.style.display = "none";
     finishedUnread.delete(id);
-    clearMessages();
-    wsSend({ action: "attach", sessionId: id });
+    if (shouldReattach) {
+      clearMessages();
+      wsSend({ action: "attach", sessionId: id });
+    }
 
     const displayName =
       session?.name || session?.folder?.split("/").pop() || "Session";
@@ -1557,6 +1803,7 @@
     msgInput.focus();
     renderSessionList();
     updateResumeButton();
+    syncBrowserState();
   }
 
   // ---- Sidebar ----
@@ -1906,7 +2153,11 @@
   }
 
   // ---- Progress sidebar ----
-  let activeTab = "sessions"; // "sessions" | "progress"
+  let activeTab = normalizeSidebarTab(
+    pendingNavigationState.tab ||
+      localStorage.getItem(ACTIVE_SIDEBAR_TAB_STORAGE_KEY) ||
+      "sessions",
+  ); // "sessions" | "progress"
   let progressPollTimer = null;
   let lastProgressState = { sessions: {} };
   let progressEnabled = false; // loaded from backend, default off
@@ -1914,21 +2165,19 @@
   async function fetchSettings() {
     if (visitorMode) return;
     try {
-      const res = await fetch("/api/settings");
-      if (!res.ok) return;
-      const s = await res.json();
+      const s = await fetchJsonOrRedirect("/api/settings");
       progressEnabled = s.progressEnabled === true;
     } catch {}
   }
 
-  function switchTab(tab) {
-    activeTab = tab;
-    tabSessions.classList.toggle("active", tab === "sessions");
-    tabProgress.classList.toggle("active", tab === "progress");
-    sessionList.style.display = tab === "sessions" ? "" : "none";
-    progressPanel.classList.toggle("visible", tab === "progress");
-    newSessionBtn.classList.toggle("hidden", tab === "progress");
-    if (tab === "progress") {
+  function switchTab(tab, { syncState = true } = {}) {
+    activeTab = normalizeSidebarTab(tab);
+    tabSessions.classList.toggle("active", activeTab === "sessions");
+    tabProgress.classList.toggle("active", activeTab === "progress");
+    sessionList.style.display = activeTab === "sessions" ? "" : "none";
+    progressPanel.classList.toggle("visible", activeTab === "progress");
+    newSessionBtn.classList.toggle("hidden", activeTab === "progress");
+    if (activeTab === "progress") {
       fetchSidebarState();
       if (progressEnabled && !progressPollTimer) {
         progressPollTimer = setInterval(fetchSidebarState, 30_000);
@@ -1937,10 +2186,14 @@
       clearInterval(progressPollTimer);
       progressPollTimer = null;
     }
+    if (syncState) {
+      syncBrowserState();
+    }
   }
 
   tabSessions.addEventListener("click", () => switchTab("sessions"));
   tabProgress.addEventListener("click", () => switchTab("progress"));
+  switchTab(activeTab, { syncState: false });
 
   function relativeTime(ts) {
     const diff = Date.now() - ts;
@@ -1964,7 +2217,7 @@
     toggleBtn.addEventListener("click", async () => {
       progressEnabled = !progressEnabled;
       try {
-        await fetch("/api/settings", {
+        await fetchJsonOrRedirect("/api/settings", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ progressEnabled }),
@@ -2079,9 +2332,7 @@
   async function fetchSidebarState() {
     if (visitorMode) return;
     try {
-      const res = await fetch("/api/sidebar");
-      if (!res.ok) return;
-      const state = await res.json();
+      const state = await fetchJsonOrRedirect("/api/sidebar");
       // Clear pending flag for sessions whose summary just arrived or updated
       for (const [sessionId, entry] of Object.entries(state.sessions || {})) {
         if (pendingSummary.has(sessionId)) {
@@ -2175,20 +2426,18 @@
   initResponsiveLayout();
 
   async function initApp() {
-    const urlParams = new URLSearchParams(location.search);
     try {
-      const res = await fetch("/api/auth/me");
-      if (res.ok) {
-        const info = await res.json();
-        if (info.role === "visitor" && info.sessionId) {
-          visitorSessionId = info.sessionId;
-          applyVisitorMode();
-        }
+      const info = await fetchJsonOrRedirect("/api/auth/me");
+      if (info.role === "visitor" && info.sessionId) {
+        visitorSessionId = info.sessionId;
+        applyVisitorMode();
       }
     } catch {}
 
-    if (urlParams.has("visitor")) {
-      history.replaceState(null, "", "/");
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("visitor")) {
+      url.searchParams.delete("visitor");
+      history.replaceState(null, "", `${url.pathname}${url.search}`);
     }
 
     syncAddToolModal();

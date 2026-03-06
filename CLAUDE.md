@@ -178,9 +178,15 @@ Reusable AI workflows shareable via link. Each App defines: name, systemPrompt, 
 ### Sidebar (Progress Tracking)
 Shows all active sessions' status at a glance. Powered by `summarizer.mjs` — after each AI turn completes (`onExit`), a separate one-shot LLM call summarizes the session state into `sidebar-state.json`. UI polls every 30s.
 
-### Memory System (Two-Tier)
-1. **System-level** (`memory/system.md` in repo): Universal learnings shared across deployments
-2. **User-level** (`~/.remotelab/memory/`): Machine-specific knowledge, private
+### Memory System (Pointer-First)
+- **Storage tiers** still matter:
+  - System-level (`memory/system.md` in repo): universal learnings shared across deployments
+  - User-level (`~/.remotelab/memory/`): machine-specific knowledge, private
+- **Activation layers** matter just as much:
+  - `bootstrap.md`: tiny startup index
+  - `projects.md`: project pointer catalog
+  - `tasks/` and deeper docs: load only after task scope is clear
+- Goal: large total memory on disk, small relevant context in-session
 
 ---
 
@@ -244,6 +250,7 @@ Shows all active sessions' status at a glance. Powered by `summarizer.mjs` — a
 | Product Vision | `notes/product-vision.md` | Sidebar design rationale, cognitive load thesis, App status tracking |
 | AI-Driven Interaction | `notes/ai-driven-interaction.md` | Deferred triggers design, session metadata schema, future phases |
 | Autonomous Execution | `notes/autonomous-execution.md` | P2 background execution vision |
+| Memory Activation Architecture | `notes/memory-activation-architecture.md` | Pointer-first memory loading, routing layers, pruning rules |
 | UX Issues | `notes/体验问题与需求思考.md` | Known UX problems, mobile pain points |
 | Creating Apps | `docs/creating-apps.md` | User-facing guide for App creation |
 | Setup Guide | `docs/setup.md` | Installation, service setup (LaunchAgent/systemd) |

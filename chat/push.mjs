@@ -57,6 +57,14 @@ export function addSubscription(sub) {
   console.log(`[push] Subscription saved (total: ${subs.length})`);
 }
 
+function buildSessionUrl(session) {
+  const params = new URLSearchParams();
+  if (session?.id) params.set('session', session.id);
+  params.set('tab', 'sessions');
+  const query = params.toString();
+  return query ? `/?${query}` : '/';
+}
+
 export async function sendCompletionPush(session) {
   init();
   const subs = loadSubs();
@@ -64,7 +72,13 @@ export async function sendCompletionPush(session) {
 
   const folder = (session?.folder || '').split('/').pop() || 'Session';
   const name = session?.name || folder;
-  const payload = JSON.stringify({ title: 'RemoteLab', body: `${name} — task completed` });
+  const payload = JSON.stringify({
+    title: 'RemoteLab',
+    body: `${name} — task completed`,
+    sessionId: session?.id || null,
+    tab: 'sessions',
+    url: buildSessionUrl(session),
+  });
 
   const stale = new Set();
   await Promise.allSettled(subs.map(async (sub, i) => {
