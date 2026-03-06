@@ -65,6 +65,7 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - A public repo is only appropriate if the portable layer is intentionally curated as publishable and is audited for machine-local or secret-like content before push.
 - If the sync repo is private, include bootstrap/helper scripts in the repo as well so a newly provisioned machine can clone once and self-bootstrap without relying on an out-of-band bundle.
 - Bootstrap flows for active development should pin an explicit source branch when the desired code is ahead of the repo's default branch; otherwise fresh machines silently install stale code.
+- When a user says another machine should "just use the latest updates," verify whether those commits only live on a feature branch; either fast-forward the default branch or communicate the exact branch to pull.
 - Any constraint that must apply from the very first assistant turn (for example output language or branch selection) must be stated in the bootstrap handoff prompt itself, not only in memory that gets imported later.
 
 ### Browser-Only Frontend Validation Without A Test Harness (2026-03-06)
