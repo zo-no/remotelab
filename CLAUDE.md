@@ -238,6 +238,7 @@ Shows all active sessions' status at a glance. Powered by `summarizer.mjs` — a
 - [ ] Deferred triggers (AI-initiated actions, scheduled follow-ups)
 - [ ] Autonomous execution (background sessions, event-driven resumption)
 - [ ] Post-LLM output processing (layered output: decision / summary / details)
+- [ ] Revisit product naming/brand and possible repo rename after the product philosophy is more mature; treat this as intentionally deferred while the product itself is still taking shape
 
 ---
 

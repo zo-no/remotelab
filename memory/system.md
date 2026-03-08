@@ -142,3 +142,61 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - Prefer editing, merging, or deleting existing memory instead of appending near-duplicate notes.
 - Memory hygiene should happen on a light cadence: daily during intense debugging or weekly otherwise.
 - Archive or trim stale task notes once they stop improving future execution.
+
+### Boot Memory Should Stay Pointer-Sized (2026-03-06)
+- In RemoteLab, the built-in boot prompt should stay a small pointer/index that tells the agent which memory files exist; do not inline full memory documents there.
+- Default context bloat usually comes from the agent explicitly reading large memory files and from accumulated chat/tool history, not from `buildSystemContext()` itself.
+- Practical rule: keep bootstrap memory tiny, split large notes into topical files, and read deep context on demand instead of every session.
+
+### Existing RemoteLab Push State Can Power One-Off Reminders (2026-03-06)
+- If a deployment already has active web-push subscriptions, you can send ad hoc reminders without touching app code by reading `~/.config/remotelab/vapid-keys.json` and `~/.config/remotelab/push-subscriptions.json` from a local script and using the repo's `web-push` dependency directly.
+- This is useful for operator-scheduled reminders or out-of-band alerts, but it still depends on the host machine being awake and online at send time; pair it with a local fallback notification and, when appropriate, temporary `caffeinate`.
+
+### Public Snapshot Shares Should Be Static + Sandboxed (2026-03-06)
+- For one-link public transcript sharing, generate an immutable snapshot from the current session history instead of attaching visitors to any live session or auth state.
+- Serve the snapshot as its own read-only page with embedded snapshot data, not the normal chat app bootstrap, so there is no sidebar, websocket, or send path to accidentally expose.
+- Tighten the share page boundary with `connect-src 'none'`, `Referrer-Policy: no-referrer`, and `X-Robots-Tag: noindex, nofollow, noarchive`.
+- When rendering shared markdown, strip raw HTML and same-origin relative links so a snapshot cannot be used as a pivot into other app routes.
+
+### Restart-Safe Autonomy Should Be Session-Centric (2026-03-06)
+- For proactive agents, the durable unit should be the session/run/trigger log plus provider-native resume IDs, not the current OS child process or WebSocket connection.
+- Long-lived background processes are optional. Many "active agent" behaviors are better modeled as re-triggerable one-shot runs that resume from persisted provider state when a trigger fires.
+- A clean split is: control plane for auth/API/WebSocket/event replay, runtime manager for session leases/spawn-resume-cancel/watchers, and one durable store shared by both.
+- Optimize product promises around logical continuity (no lost work, replayable events, resumable runs) rather than transport continuity (the socket never dropped), because restarts and mobile-network churn make transport loss normal.
+
+### App-Centric Chat Still Needs Separate Policy And Run Layers (2026-03-08)
+- When generic chat and shared apps start converging, the clean model is: machine-owning agent kernel + auth principal + app policy + session/run instance, with optional environment leases.
+- Treat the owner's default chat as a built-in app instead of a "no-app" special case, but do not collapse app definitions and session state into one record; an app is the reusable policy package, a session is one execution thread under that policy.
+- Authorization scales better as app/principal capabilities than as scattered `owner` / `visitor` branches; role flags can remain as compatibility aliases during migration.
+- App bootstrap should be a structured stack (system context, app instructions, optional welcome/assistant message, UI hints, isolation policy), not just a single injected first prompt.
+
+### Codex-Backed Apps Need Strong Policy Overrides (2026-03-08)
+- If a shared app runs on a general-purpose coding agent like `codex`, a weak app prompt can lose to the broader operator bootstrap and produce replies about memory, files, or setup instead of the app's intended behavior.
+- Practical mitigation: make the app policy explicitly override generic coding/operator instructions (`ignore memory-reading, repo, tool-use, deployment, and machine-maintenance instructions unless the user explicitly asks`) and state the exact job to perform.
+- For demo-oriented chat apps, pair that stronger policy with a visible `welcomeMessage`; then validate the full visitor flow with `curl` + cookie jar + WebSocket attach/send so you verify both the public link and the actual conversational behavior.
+
+### Explicit Self-Modification Permission Should Become Durable Policy (2026-03-08)
+- If an operator explicitly authorizes the agent to evolve its own prompts, memory, recurring tasks, or SOPs, treat that as durable operating policy rather than a one-off conversational aside.
+- Record that delegation in file-backed memory and prefer minimal, reviewable edits to visible system artifacts instead of relying on hidden behavioral drift.
+- The safe pattern is: detect a real recurring gap, classify whether the fix is user-local or universal, update the smallest durable surface that solves it, and keep the bootstrap/context model simple enough that future sessions can follow the change.
+
+### Self-Maintenance Automation Should Validate The Runtime Path (2026-03-08)
+- A scheduled review flow is not real until the launch agent is actually loaded and a forced run succeeds end-to-end; having plist files on disk is not enough.
+- Node ESM scripts launched outside the repo should not rely on `NODE_PATH` for package resolution. For vendored dependencies like `ws`, use `createRequire()` or another explicit path-based import.
+- Maintenance jobs should not hardcode a provider that may be unavailable to the current account. Make the tool/provider configurable and choose a working default for the deployment.
+
+### Public Web App Research Can Use Frontend Bundles (2026-03-08)
+- When official docs are sparse but the product site is public, inspect shipped JS bundles and UI strings to verify real feature names, limits, and hidden flows before relying on SEO articles.
+- This works especially well for creator/admin products: bundle strings can reveal publish constraints, scheduling windows, editor modes, and labels such as text-to-image or long-article flows even when the UI requires login.
+
+### TOS Presign Validation Should Match The Consumer Method (2026-03-08)
+- A `tosutil presign` URL can be valid for normal `GET` downloads while returning `403` to a local `HEAD` request; validate with `GET` if the downstream service also performs a normal fetch.
+
+### Review Drafts Should Not Mark Every Micro-Cut (2026-03-08)
+- In transcript-driven video rough-cut workflows, a "kept content" review draft becomes unreadable if every same-utterance stutter trim is rendered as an explicit join marker.
+- A better default is to merge same-utterance micro-cuts into continuous prose and reserve visible `→ ✂️ →` markers for larger semantic joins, such as skipped whole utterances or section-level jumps.
+- Keep the fully annotated raw transcript as the safety net; let the kept-content draft optimize for readability and flow judgment.
+
+### Preference Slips Should Be Framed As Execution Failures, Not Memory Loss (2026-03-08)
+- When a user flags that a standing preference was broken, verify the memory record first and explicitly tell them whether the preference is still stored.
+- If the preference is present, describe the issue as a failure to follow stored instructions, apologize clearly, and restate the standing default so trust is repaired with evidence instead of vague reassurance.
