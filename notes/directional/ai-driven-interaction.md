@@ -2,7 +2,9 @@
 
 _Started: 2026-03-04_
 
-> Current merge point for transport/runtime/autonomy architecture discussion: `notes/message-transport-architecture.md`.
+> Status: directional note for post-request-response interaction design.
+> For the current shipped chat/runtime baseline, use `docs/project-architecture.md`.
+> Use `notes/message-transport-architecture.md` only as background rationale for the runtime discussion.
 
 ---
 
@@ -118,14 +120,14 @@ The model writes to this board. The human reads it.
 
 ### Phase 1 — Task-first session foundation
 - [x] Make `workdir` optional
-- [x] Remove folder-grouped sidebar, flatten to list sorted by lastActivity
-- [ ] Add model-writable presentation / metadata fields (`title`, `group`, `description`, later `project`, `status`)
-- [ ] Expose those fields through session APIs and sidebar rendering
+- [x] Persist model-written presentation fields (`title`/name, `group`, `description`) in session state
+- [ ] Make model-written presentation fields the fully consistent public session-management surface; the UI still falls back to folder grouping when `group` is absent
+- [ ] Extend the same pattern to richer metadata (`project`, `status`, `priority`, `tags`)
 
 ### Phase 2 — AI session control
-- Add `update_session`, `list_sessions`, `create_session` API endpoints
-- Document them in AGENTS.md so the model uses them automatically
-- Model updates its own status/summary after each exchange
+- Expand `PATCH /api/sessions/:id` beyond rename/archive so presentation metadata can be updated through the public session API
+- Document the intended session-management surface in `AGENTS.md` so the model uses it consistently
+- Let the model update richer status/summary metadata after each exchange
 
 ### Phase 3 — Deferred triggers
 - `triggers.json` storage + background delivery loop

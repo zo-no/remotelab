@@ -41,7 +41,7 @@ Phone Browser ──HTTPS──→ Cloudflare Tunnel ──→ chat-server.mjs (
 
 **Dev workflow**: keep two chat-server planes active. Do all coding/conversation work on `7690`, do restart-heavy validation on `7692`, and only restart/reload `7690` after `7692` is verified.
 
-**Self-hosting rule**: maintain two distinct chat-server roles. `7690` is the coding/operator plane where the live development conversation happens; `7692` is the validation plane for restart/test checks and should avoid active coding work. Prefer restarting the other plane, not the one carrying the current conversation. After `7692` looks good, finish the current thought on `7690`, then restart/reload `7690` if needed. Fall back to `7681` only for emergencies. Manual dev instances should use `scripts/chat-instance.sh`. Restarted in-flight turns are recoverable via the UI `Resume` flow when resume metadata was captured. See `notes/self-hosting-dev-restarts.md`.
+**Self-hosting rule**: maintain two distinct chat-server roles. `7690` is the coding/operator plane where the live development conversation happens; `7692` is the validation plane for restart/test checks and should avoid active coding work. Prefer restarting the other plane, not the one carrying the current conversation. After `7692` looks good, finish the current thought on `7690`, then restart/reload `7690` if needed. Fall back to `7681` only for emergencies. Manual dev instances should use `scripts/chat-instance.sh`. Restarted in-flight turns are recoverable via the UI `Resume` flow when resume metadata was captured. See `notes/current/self-hosting-dev-restarts.md`.
 
 ---
 
@@ -236,7 +236,7 @@ Shows all active sessions' status at a glance. Powered by `summarizer.mjs` — a
 
 ### P2 — Future
 - [ ] Deferred triggers (AI-initiated actions, scheduled follow-ups)
-- [ ] Session fork / conversation branching — create a child session from any chosen turn so side topics can continue in parallel without polluting the main thread; keep v1 lineage lightweight instead of adding a full tree UI immediately
+- [ ] Session fork / hard-clone branching — copy a session into a brand-new isolated session with no shared resume/thread state so one good discussion can split into multiple independent follow-up threads; keep v1 lineage lightweight instead of adding a full tree UI immediately
 - [ ] Post-LLM output processing (layered output: decision / summary / details)
 - [ ] Revisit product naming/brand and possible repo rename after the product philosophy is more mature; treat this as intentionally deferred while the product itself is still taking shape
 
@@ -246,18 +246,20 @@ Shows all active sessions' status at a glance. Powered by `summarizer.mjs` — a
 
 | Doc | Path | When to read |
 |-----|------|-------------|
+| Documentation Map | `docs/README.md` | Repo doc taxonomy: what lives in `docs/` vs `notes/` |
+| Notes Map | `notes/README.md` | Note taxonomy: `current` vs `directional` vs `archive` vs `local` |
 | Project Architecture | `docs/project-architecture.md` | Top-down map of the shipped system, code locations, runtime flows, and current-vs-direction split |
+| Core Domain Contract | `notes/current/core-domain-contract.md` | Current domain/refactor baseline when deciding which product objects are canonical |
 | External Message Protocol | `docs/external-message-protocol.md` | Canonical connector contract for email/GitHub/bot integrations using sessions, messages, runs, and events |
-| Core Philosophy | `notes/core-philosophy.md` | Design principles, App concept details, identity model, branding |
-| App-Centric Architecture | `notes/app-centric-architecture.md` | Consolidated architecture direction for treating default chat and shared Apps as one policy model |
-| Provider Architecture | `notes/provider-architecture.md` | Open provider/model abstraction, local JS/JSON extension path, migration plan |
-| Product Vision | `notes/product-vision.md` | Sidebar design rationale, cognitive load thesis, App status tracking |
-| AI-Driven Interaction | `notes/ai-driven-interaction.md` | Deferred triggers design, session metadata schema, future phases |
-| Autonomous Execution | `notes/autonomous-execution.md` | P2 background execution vision |
-| Message Transport Architecture | `notes/message-transport-architecture.md` | Consolidated discussion on thin realtime transport, detached runtime, and durable event storage |
-| HTTP Runtime Phase 1 | `notes/http-runtime-phase1.md` | Concrete implementation spec for the coordinated HTTP/control-plane + runner refactor |
-| Memory Activation Architecture | `notes/memory-activation-architecture.md` | Pointer-first memory loading, routing layers, pruning rules |
-| UX Issues | `notes/体验问题与需求思考.md` | Known UX problems, mobile pain points |
+| Core Philosophy | `notes/directional/core-philosophy.md` | Historical philosophy note; use it for framing, not as the current implementation checklist |
+| App-Centric Architecture | `notes/directional/app-centric-architecture.md` | Historical/consolidated direction note for treating default chat and shared Apps as one policy model |
+| Provider Architecture | `notes/directional/provider-architecture.md` | Open provider/model abstraction, local JS/JSON extension path, migration plan |
+| Product Vision | `notes/directional/product-vision.md` | Product rationale and open questions; not the canonical shipped-status tracker |
+| AI-Driven Interaction | `notes/directional/ai-driven-interaction.md` | Deferred triggers design, session metadata schema, future phases |
+| Autonomous Execution | `notes/directional/autonomous-execution.md` | P2 background execution vision |
+| Message Transport Architecture | `notes/message-transport-architecture.md` | Historical transport/runtime rationale after the HTTP-first architecture landed |
+| HTTP Runtime Phase 1 | `notes/archive/http-runtime-phase1.md` | Concrete implementation spec for the coordinated HTTP/control-plane + runner refactor |
+| Memory Activation Architecture | `notes/current/memory-activation-architecture.md` | Pointer-first memory loading, routing layers, pruning rules |
 | Creating Apps | `docs/creating-apps.md` | User-facing guide for App creation |
 | Setup Guide | `docs/setup.md` | Installation, service setup (LaunchAgent/systemd) |
 | System Memory | `memory/system.md` | Cross-deployment learnings (context continuity, testing strategy) |

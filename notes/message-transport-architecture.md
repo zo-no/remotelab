@@ -1,7 +1,9 @@
 # Message Transport Architecture
 
 > Created 2026-03-09 to consolidate scattered discussion from multiple sessions into one working note.
-> Purpose: park the current message/runtime architecture thinking in one place before a later top-down design session.
+> Status: historical transport/runtime rationale after the HTTP-first detached-runner architecture largely landed.
+> For the current shipped runtime shape, use `docs/project-architecture.md`.
+> For the execution-oriented phase-1 refactor contract, use `notes/archive/http-runtime-phase1.md`.
 
 ---
 
@@ -11,10 +13,8 @@ We have discussed the chat/message architecture in several separate sessions, bu
 
 This note is the temporary merge point for those discussions so a future dedicated session can start from one coherent summary instead of rebuilding context from scattered remarks.
 
-This is **not** yet the final architecture spec.
-It is a consolidated design direction, product assumption set, and open-question list.
-
-For the execution-oriented phase-1 refactor contract, use `notes/http-runtime-phase1.md`.
+This is **not** the canonical current-architecture spec.
+It remains useful as consolidated design rationale, product assumptions, and leftover open-question context.
 
 ---
 
@@ -420,7 +420,7 @@ The existing codebase already contains useful pieces of this model:
 - `chat/session-manager.mjs` writes events before/while broadcasting them.
 - `chat/history.mjs` persists conversation state on disk.
 - `static/chat.js` already has reconnect + re-attach + pending-message recovery behavior.
-- `notes/self-hosting-dev-restarts.md` already identifies detached per-session runners as the first architecture that can honestly claim restart-safe active runs.
+- `notes/current/self-hosting-dev-restarts.md` already identifies detached per-session runners as the first architecture that can honestly claim restart-safe active runs.
 
 So this direction is not a conceptual reset. It is an architectural cleanup and sharpening of the existing trajectory.
 
@@ -853,9 +853,9 @@ The next serious discussion should revisit this note from the top down, decide w
 ## Related files
 
 - `AGENTS.md`
-- `notes/self-hosting-dev-restarts.md`
-- `notes/autonomous-execution.md`
-- `notes/ai-driven-interaction.md`
+- `notes/current/self-hosting-dev-restarts.md`
+- `notes/directional/autonomous-execution.md`
+- `notes/directional/ai-driven-interaction.md`
 - `chat/ws.mjs`
 - `chat/session-manager.mjs`
 - `chat/process-runner.mjs`

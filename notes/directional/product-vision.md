@@ -2,11 +2,15 @@
 
 _Last updated: 2026-03-09_
 
+> 状态：产品动机与开放问题记录，不是当前实现状态总表。
+> 当前 shipped 架构请看 `docs/project-architecture.md`。
+> 当前 domain/refactor 基线请看 `notes/current/core-domain-contract.md`。
+
 ---
 
 ## 核心重构认知
 
-RemoteLab 不是一个"我和 Claude 对话的工具"。
+RemoteLab 不是一个"我和某个模型对话的工具"。
 它是一个**管理 AI 工人的控制台**。
 
 用户不是执行者，是 director。交互模型应该从"对话框"迁移到"工作台"。
@@ -17,7 +21,7 @@ RemoteLab 不是一个"我和 Claude 对话的工具"。
 
 ### 1. 认知负载 vs. Session 并发管理
 
-**问题本质**：用户每个需求创建一个独立 folder/session，当并发 session 增多时，人脑成为整合瓶颈——用户要记住每个 session 在做什么、卡在哪、需要什么决策。这是纯粹的认知开销，不是工作本身。
+**问题本质**：用户每个需求创建一个独立 session，当并发 session 增多时，人脑成为整合瓶颈——用户要记住每个 session 在做什么、卡在哪、需要什么决策。这是纯粹的认知开销，不是工作本身。
 
 **目标**：在不降低管控力的前提下，让用户能够平行处理更多 session，同时脑子里装的东西更少。
 
@@ -188,19 +192,19 @@ _Updated: 2026-03-01 14:32_
 ## Sessions
 
 ### auth-refactor [WAITING]
-Folder: ~/code/remotelab
+Working repo: ~/code/remotelab
 Tool: claude
 Last action: Asked about token expiry strategy — needs user decision
 Key context: Refactoring auth.mjs, token expiry currently hardcoded to 24h
 
 ### chat-layout [WAITING]
-Folder: ~/code/remotelab
+Working repo: ~/code/remotelab
 Tool: claude
 Last action: Proposed two CSS layout options for sidebar, needs approval
 Key context: Implementing CSS grid, has dependency on sidebar-impl
 
 ### sidebar-impl [RUNNING]
-Folder: ~/code/remotelab
+Working repo: ~/code/remotelab
 Tool: claude
 Last action: Writing initial layout structure
 Key context: Brand new session, task is to build the sidebar component
@@ -224,47 +228,21 @@ Completed: Cleaned up env var loading in lib/config.mjs
 
 ---
 
-## 待决策事项
+## 仍然开放的产品问题
 
-- [x] Sidebar v1 的触发机制选哪个方案 — **已选定 onExit 触发，v1 已实现**
-- [ ] 移动端场景优先级（等实际使用数据再定）
-- [ ] 分层输出（Post-LLM 处理）何时排进迭代
-- [ ] 埋点系统是否需要（低优先级，先把产品方向定了）
+- 移动端场景优先级（等实际使用数据再定）
+- 分层输出（Post-LLM 处理）何时排进迭代
+- 埋点系统是否需要（低优先级，先把产品方向定了）
 
 ---
 
-## App 系统实现状态（2026-03-06）
+## App 系统参考入口
 
-App 系统是 RemoteLab 作为 Agent 分发工具的核心——让 Owner 创建可分享的 AI 工作流，Visitor 通过链接使用。
+App / visitor 相关的当前 shipped 行为不再在本文件里维护逐项状态表，以免随代码演进过期。
 
-> Note: this section tracks the currently shipped App system. For the newer consolidation note about the broader app-centric architecture direction, see `notes/app-centric-architecture.md`.
-
-### 已完成
-
-| 能力 | 实现位置 | 状态 |
-|------|----------|------|
-| App 数据模型 (id, name, systemPrompt, skills, tool, shareToken) | `chat/apps.mjs` | ✅ 生产 |
-| App CRUD API (GET/POST/PATCH/DELETE `/api/apps`) | `chat/router.mjs:409-496` | ✅ 生产 |
-| Share token 生成与查找 | `chat/apps.mjs` | ✅ 生产 |
-| Visitor 入口 (`GET /app/{shareToken}`) | `chat/router.mjs:142-179` | ✅ 生产 |
-| Visitor auth session (role=visitor, scoped to appId+sessionId) | `chat/router.mjs` + `lib/auth.mjs` | ✅ 生产 |
-| systemPrompt 注入到首条消息 | `chat/session-manager.mjs:396-404` | ✅ 生产 |
-| 前端 visitor mode (隐藏 sidebar, 自动 attach session) | `static/chat.js` + `templates/chat.html` | ✅ 生产 |
-| Auth info endpoint (`/api/auth/me`) | `chat/router.mjs:499-515` | ✅ 生产 |
-| Owner session list 隐藏 visitor session | `chat/session-manager.mjs:97` | ✅ 生产 |
-
-### 待实现
-
-| 能力 | 优先级 | 备注 |
-|------|--------|------|
-| Visitor "新对话"按钮 | P1 | 当前每次需要重新点击 share link |
-| Owner 的 App 管理 UI | P2 | 目前只能通过 API 或 agent 对话创建 App |
-| 多 App 门户页 | P2 | 如果要分享多个 App，需要一个入口页 |
-| App 使用统计 | P3 | visitor session 数据已保留，但无分析 |
-
-### 验证记录
-
-2026-03-06 在测试服务 (7692) 上创建了 "English Tutor Demo" App，通过 curl 验证了完整 visitor flow：share link → session 创建 → auth cookie → visitor mode redirect → systemPrompt 注入。前端 visitor mode 待真机浏览器验证。
+- 当前 shipped 行为与代码入口：`docs/project-architecture.md`
+- 当前 domain/object 抽象：`notes/current/core-domain-contract.md`
+- 更长线的 app-centric 方向：`notes/directional/app-centric-architecture.md`
 
 ---
 

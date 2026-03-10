@@ -2,7 +2,7 @@
 
 [中文](README.zh.md) | English
 
-Control AI coding tools (Claude Code, Codex, Cline) from your phone mac or any other device! — no SSH, no VPN, just a browser.
+Control AI coding tools (Claude Code, Codex, Cline) from your phone or any other device — no SSH, no VPN, just a browser.
 
 ![Chat UI](docs/demo.gif)
 
@@ -14,7 +14,7 @@ Control AI coding tools (Claude Code, Codex, Cline) from your phone mac or any o
 
 ### What it does
 
-RemoteLab runs a lightweight web server on your **Mac or Linux server**. You point a Cloudflare tunnel at it, get an HTTPS URL, and from any browser (phone, tablet, whatever) you can open a chat interface that talks to Claude Code running on your machine.
+RemoteLab runs a lightweight web server on your **Mac or Linux server**. You point a Cloudflare tunnel at it, get an HTTPS URL, and from any browser (phone, tablet, whatever) you can open a chat interface that talks to the AI tool running on your machine.
 
 Your sessions persist across disconnects. History is kept on disk. Multiple sessions can run in parallel.
 
@@ -83,14 +83,15 @@ remotelab restart chat   # restart just the chat server
 
 ## Architecture
 
-Two services run on your Mac behind a Cloudflare tunnel:
+The default install runs two boot-managed services behind a Cloudflare tunnel. When self-hosting RemoteLab development, add a separate `7692` validation chat plane instead of turning it into another permanent boot service:
 
 | Service | Port | Role |
 |---------|------|------|
 | `chat-server.mjs` | 7690 | **Primary.** HTTP control plane, detached runner supervisor, WS invalidation hints |
 | `auth-proxy.mjs` | 7681 | **Fallback.** Raw terminal via ttyd — for emergencies only |
+| `scripts/chat-instance.sh` → `chat-server.mjs` | 7692 | **Dev-only.** Disposable validation plane for restart-heavy checks |
 
-The Cloudflare tunnel routes your domain to the chat server (7690). The auth-proxy is localhost-only — if chat breaks badly enough, you SSH in and hit it directly.
+The Cloudflare tunnel routes your domain to the primary chat server (7690). The auth-proxy is localhost-only — if chat breaks badly enough, you SSH in and hit it directly. The `7692` plane is for RemoteLab self-hosting development only and is normally started ad hoc via `scripts/chat-instance.sh`.
 
 ```
 Phone ──HTTPS──→ Cloudflare Tunnel ──→ chat-server :7690

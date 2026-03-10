@@ -465,7 +465,7 @@ Leave these for later unless phase-1 execution proves they are unavoidable:
 
 - `notes/message-transport-architecture.md` remains the discussion merge point
 - this document is the execution-oriented phase-1 contract
-- `notes/self-hosting-dev-restarts.md` explains the restart-safety motivation
-- `notes/ai-driven-interaction.md` remains the future-facing autonomy context
+- `notes/current/self-hosting-dev-restarts.md` explains the restart-safety motivation
+- `notes/directional/ai-driven-interaction.md` remains the future-facing autonomy context
 
 When starting the next implementation session, begin from this file and use the broader transport note only when extra rationale is needed.

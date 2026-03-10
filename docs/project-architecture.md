@@ -12,9 +12,21 @@ Use it when you need to:
 It complements, rather than replaces:
 
 - `AGENTS.md` — repo operating rules and high-level constraints
-- `notes/*.md` — deeper design discussions and future architecture direction
+- `docs/README.md` / `notes/README.md` — documentation taxonomy and note buckets
+- `notes/` — deeper design discussions, grouped by status (`current`, `directional`, `archive`, `local`)
 - `docs/external-message-protocol.md` — canonical integration contract for external connectors
 - `README.md` / `README.zh.md` — user-facing overview and setup
+
+---
+
+## 0. Documentation precedence
+
+When docs overlap, use this order:
+
+1. `AGENTS.md` — repo rules, constraints, and active priorities
+2. this file — current shipped architecture and code map
+3. `notes/current/core-domain-contract.md` — current domain/refactor baseline
+4. other `notes/` docs — deeper discussion, interpreted by their bucket (`current`, `directional`, `archive`, `local`)
 
 ---
 
@@ -64,8 +76,8 @@ Then branch by the change you need:
 - UI / mobile behavior → `templates/chat.html`, `static/chat.js`, `static/sw.js`
 - Apps / visitor flow → `chat/apps.mjs`, `chat/router.mjs`, `chat/session-manager.mjs`
 - progress sidebar / rename / grouping → `chat/summarizer.mjs`, `chat/session-naming.mjs`
-- memory activation / startup prompt → `chat/system-prompt.mjs`, `notes/memory-activation-architecture.md`
-- provider/tool extensibility → `lib/tools.mjs`, `chat/models.mjs`, `notes/provider-architecture.md`
+- memory activation / startup prompt → `chat/system-prompt.mjs`, `notes/current/memory-activation-architecture.md`
+- provider/tool extensibility → `lib/tools.mjs`, `chat/models.mjs`, `notes/directional/provider-architecture.md`
 - external mail / webhook automation → `lib/agent-mailbox.mjs`, `lib/agent-mail-http-bridge.mjs`, `scripts/agent-mail-*.mjs`, `chat/completion-targets.mjs`
 
 ---
@@ -243,7 +255,7 @@ remotelab/
 ├── static/                         # browser JS + manifest + service worker
 ├── templates/                      # no-build HTML templates
 ├── scripts/                        # operational scripts and side services
-├── notes/                          # design notes and future-direction docs
+├── notes/                          # internal notes bucketed by status
 ├── docs/                           # user/developer docs
 ├── memory/                         # shared system memory (repo-level)
 └── tests/                          # scenario-style validation scripts
@@ -775,7 +787,7 @@ The currently shipped implementation uses a pragmatic tool abstraction.
 
 ### 12.3 Directional note
 
-This is explicitly evolving toward the broader provider registry described in `notes/provider-architecture.md`.
+This is explicitly evolving toward the broader provider registry described in `notes/directional/provider-architecture.md`.
 
 The current abstraction is functional, but still transitional.
 
@@ -824,14 +836,14 @@ Use this as the practical code-finding guide.
 | session creation / rename / archive | `chat/router.mjs`, `chat/session-manager.mjs`, `chat/session-naming.mjs`, `static/chat.js` |
 | message submission or run lifecycle | `static/chat.js`, `chat/router.mjs`, `chat/session-manager.mjs`, `chat/runs.mjs`, `chat/runner-sidecar.mjs` |
 | tool execution details | `chat/process-runner.mjs`, `chat/adapters/*.mjs`, `lib/tools.mjs` |
-| restart recovery behavior | `chat/session-manager.mjs`, `chat/runs.mjs`, `chat/runner-sidecar.mjs`, `notes/http-runtime-phase1.md` |
+| restart recovery behavior | `chat/session-manager.mjs`, `chat/runs.mjs`, `chat/runner-sidecar.mjs`, `notes/archive/http-runtime-phase1.md` |
 | event persistence / long-output handling | `chat/history.mjs`, `chat/runs.mjs`, `chat/fs-utils.mjs` |
 | sidebar summaries / auto-rename / grouping | `chat/summarizer.mjs`, `chat/session-manager.mjs`, `chat/session-naming.mjs`, `static/chat.js` |
 | App templates or visitor flow | `chat/apps.mjs`, `chat/router.mjs`, `chat/session-manager.mjs`, `static/chat.js`, `docs/creating-apps.md` |
 | share snapshots | `chat/shares.mjs`, `templates/share.html`, `static/share.js` |
 | push notifications | `chat/push.mjs`, `static/sw.js`, `static/chat.js` |
 | model/tool picker behavior | `lib/tools.mjs`, `chat/models.mjs`, `static/chat.js` |
-| pointer-first memory startup | `chat/system-prompt.mjs`, `notes/memory-activation-architecture.md` |
+| pointer-first memory startup | `chat/system-prompt.mjs`, `notes/current/memory-activation-architecture.md` |
 | inbound/outbound mail automation | `lib/agent-mailbox.mjs`, `lib/agent-mail-http-bridge.mjs`, `lib/agent-mail-outbound.mjs`, `chat/completion-targets.mjs`, `scripts/agent-mail-*.mjs` |
 | frozen fallback terminal plane | `auth-proxy.mjs`, `lib/router.mjs`, `lib/sessions.mjs`, `lib/proxy.mjs` — only if you truly mean to touch the emergency plane |
 
@@ -897,12 +909,12 @@ This repo already contains several design notes that point beyond the current co
 Use these notes when needed:
 
 - `notes/message-transport-architecture.md`
-- `notes/http-runtime-phase1.md`
-- `notes/provider-architecture.md`
-- `notes/app-centric-architecture.md`
-- `notes/ai-driven-interaction.md`
-- `notes/autonomous-execution.md`
-- `notes/self-hosting-dev-restarts.md`
+- `notes/archive/http-runtime-phase1.md`
+- `notes/directional/provider-architecture.md`
+- `notes/directional/app-centric-architecture.md`
+- `notes/directional/ai-driven-interaction.md`
+- `notes/directional/autonomous-execution.md`
+- `notes/current/self-hosting-dev-restarts.md`
 
 ---
 

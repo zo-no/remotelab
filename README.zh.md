@@ -14,7 +14,7 @@
 
 ### 它能做什么
 
-RemoteLab 在你的 Mac 或 Linux 服务器上运行一个轻量级 Web 服务器。配合 Cloudflare Tunnel 得到一个 HTTPS 地址，之后在任意浏览器（手机、平板、随便什么设备）打开，就能和运行在服务器上的 Claude Code 对话。
+RemoteLab 在你的 Mac 或 Linux 服务器上运行一个轻量级 Web 服务器。配合 Cloudflare Tunnel 得到一个 HTTPS 地址，之后在任意浏览器（手机、平板、随便什么设备）打开，就能和运行在这台机器上的 AI 工具对话。
 
 会话断开后依然保活。历史记录存到磁盘。多个会话可以并行运行。
 
@@ -83,14 +83,15 @@ remotelab restart chat   # 只重启 chat server
 
 ## 架构
 
-两个服务在你的 Mac 或 Linux 服务器上运行，隐藏在 Cloudflare Tunnel 后面：
+默认安装会在你的 Mac 或 Linux 服务器上启动两项开机自启服务，隐藏在 Cloudflare Tunnel 后面。开发 RemoteLab 自身时，再额外拉起一个 `7692` 的 validation chat plane，而不是把它也做成长期常驻服务：
 
 | 服务 | 端口 | 职责 |
 |------|------|------|
 | `chat-server.mjs` | 7690 | **主服务**。HTTP 控制面、detached runner 管理、WebSocket 无效化提示 |
 | `auth-proxy.mjs` | 7681 | **备用**。通过 ttyd 提供原始终端——仅用于应急 |
+| `scripts/chat-instance.sh` → `chat-server.mjs` | 7692 | **仅开发时使用**。可随时重启的验证 plane |
 
-Cloudflare Tunnel 将你的域名路由到 chat server（7690）。auth-proxy 仅监听 localhost——如果 chat 崩得很惨，SSH 进去直接访问它。
+Cloudflare Tunnel 将你的域名路由到主 chat server（7690）。auth-proxy 仅监听 localhost——如果 chat 崩得很惨，SSH 进去直接访问它。`7692` 只用于自举开发 RemoteLab 本身，通常通过 `scripts/chat-instance.sh` 临时拉起。
 
 ```
 手机 ──HTTPS──→ Cloudflare Tunnel ──→ chat-server :7690

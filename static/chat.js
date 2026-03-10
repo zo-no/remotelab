@@ -872,7 +872,7 @@
       modelLines,
       ``,
       `Work in the RemoteLab repo root (usually \`~/code/remotelab\`; adjust if your checkout lives elsewhere).`,
-      `Read \`AGENTS.md\` (legacy \`CLAUDE.md\` is only a compatibility shim) and \`notes/provider-architecture.md\` first.`,
+      `Read \`AGENTS.md\` (legacy \`CLAUDE.md\` is only a compatibility shim) and \`notes/directional/provider-architecture.md\` first.`,
       ``,
       `Please:`,
       `1. Decide whether this can stay a simple provider bound to an existing runtime family or needs full provider code.`,

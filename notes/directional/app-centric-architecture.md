@@ -1,5 +1,9 @@
 # App-Centric Architecture Direction
 
+> Note: the current shipped architecture baseline now lives in `docs/project-architecture.md`.
+> The current domain/refactor baseline lives in `notes/current/core-domain-contract.md`.
+> This file remains useful as historical context and broader design exploration, but if this file conflicts with either of those newer baselines, follow them.
+
 > Status: consolidation anchor, not final spec.
 > Purpose: collect the core idea that was discussed across multiple sessions so a later dedicated architecture conversation can start from one place.
 

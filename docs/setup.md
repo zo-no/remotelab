@@ -8,13 +8,15 @@ Steps marked **[HUMAN]** cannot be automated — they require the user to intera
 
 ## What you're setting up
 
-Two services that auto-start on boot:
+The boot-managed owner stack:
 
 | Service | Port | Role |
 |---------|------|------|
 | `remotelab-chat` / `com.chatserver.claude` | 7690 | **Primary.** Chat UI — this is what the user accesses |
 | `remotelab-proxy` / `com.authproxy.claude` | 7681 | Terminal fallback (localhost only, emergency access) |
 | `remotelab-tunnel` / `com.cloudflared.tunnel` | — | Cloudflare tunnel — routes a public HTTPS domain to port 7690 |
+
+For RemoteLab self-hosting development, keep a separate `7692` validation chat plane via `scripts/chat-instance.sh`. It is intentionally **not** created as another permanent launchd/systemd unit in this guide.
 
 **Goal:** User opens `https://[subdomain].[domain]/?token=TOKEN` on their phone and gets a working chat UI.
 

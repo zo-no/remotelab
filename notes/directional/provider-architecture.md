@@ -1,6 +1,7 @@
 # Open Provider / Model Architecture
 
-> 2026-03-06 架构设计草案。
+> 状态：方向性架构草案，不是当前 shipped provider 实现说明。
+> 当前已落地的 tool/provider 分层请先看 `docs/project-architecture.md` 第 12 节。
 > 目标：让 RemoteLab 的 model 选择和 agent/provider 接入更开放，既方便本地配置，也方便外部贡献者通过 PR 接入新 provider。
 
 ---
