@@ -34,6 +34,7 @@ const staticDir = join(__dirname, '..', 'static');
 
 const staticMimeTypes = {
   'manifest.json': 'application/manifest+json',
+  'favicon.ico': 'image/x-icon',
   'icon.svg': 'image/svg+xml',
   'apple-touch-icon.png': 'image/png',
   'chat.js': 'application/javascript',
