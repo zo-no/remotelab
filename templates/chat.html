@@ -126,6 +126,160 @@ body {
   display: none; flex-direction: column; gap: 6px;
 }
 .progress-panel.visible { display: flex; }
+.memory-panel {
+  flex: 1;
+  display: none;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+.memory-panel.visible {
+  display: flex;
+  flex-direction: column;
+}
+.memory-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.memory-summary,
+.memory-toolbar,
+.memory-file-header {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.memory-summary {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.memory-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.memory-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.memory-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.memory-btn:hover {
+  background: var(--bg);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.memory-btn.primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
+.memory-btn.primary:hover {
+  opacity: 0.92;
+  background: var(--text);
+  color: var(--bg);
+}
+.memory-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.memory-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.memory-status.error {
+  color: var(--error);
+}
+.memory-status.success {
+  color: var(--success);
+}
+.memory-file-btn {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 9px;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.memory-file-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text);
+}
+.memory-file-btn.active {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+  color: var(--text);
+}
+.memory-file-label {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.memory-file-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.memory-file-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-all;
+}
+.memory-file-path {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.memory-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.memory-empty {
+  padding: 14px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.chat-area.memory-mode .messages,
+.chat-area.memory-mode .input-area {
+  display: none;
+}
+.chat-area.memory-mode .memory-panel {
+  display: flex;
+}
 .progress-card {
   padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
   background: var(--bg-secondary); cursor: default;
@@ -141,12 +295,12 @@ body {
   font-size: 10px; color: var(--text-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.progress-card-bg {
-  font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 5px;
-}
 .progress-card-action {
   font-size: 11px; color: var(--text-muted); line-height: 1.4;
   border-top: 1px solid var(--border); padding-top: 5px; margin-top: 2px;
+}
+.progress-card-bg {
+  font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 5px;
 }
 .progress-card-time {
   font-size: 10px; color: var(--text-muted); margin-top: 4px;
@@ -297,6 +451,122 @@ body {
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+}
+.shared-context-shell {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #fffdf7 0%, #ffffff 100%);
+}
+.goal-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  min-height: 48px;
+}
+.goal-strip-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warning);
+}
+.goal-strip-text {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  font-weight: 600;
+}
+.goal-strip-text.empty {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.goal-strip-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 6px 11px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.goal-strip-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.context-panel {
+  display: none;
+  border-top: 1px solid var(--border);
+  padding: 12px;
+  gap: 12px;
+  background: #fffdfa;
+}
+.context-panel.open {
+  display: flex;
+  flex-direction: column;
+}
+.context-grid {
+  display: grid;
+  gap: 10px;
+}
+.context-field label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.context-value {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  min-height: 46px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+.context-value.empty {
+  color: var(--text-muted);
+}
+.context-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.context-close-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.context-close-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.context-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.context-status.success {
+  color: var(--success);
+}
+.context-status.error {
+  color: var(--error);
 }
 
 /* ---- Messages ---- */
@@ -949,6 +1219,7 @@ body.visitor-mode .header #menuBtn { display: none !important; }
       <div class="sidebar-tabs">
         <button class="sidebar-tab active" id="tabSessions">Sessions</button>
         <button class="sidebar-tab" id="tabProgress">Progress</button>
+        <button class="sidebar-tab" id="tabMemory">Memory</button>
       </div>
       <div class="sidebar-list" id="sessionList"></div>
       <div class="progress-panel" id="progressPanel"></div>
@@ -958,6 +1229,31 @@ body.visitor-mode .header #menuBtn { display: none !important; }
 
   <!-- Chat area -->
   <main class="chat-area">
+    <section class="shared-context-shell" id="sharedContextShell" hidden>
+      <div class="goal-strip">
+        <div class="goal-strip-label">Goal</div>
+        <div class="goal-strip-text empty" id="goalStripText">Agent will keep the current goal aligned here.</div>
+        <button class="goal-strip-btn" id="freezeSessionBtn" type="button">Freeze</button>
+        <button class="goal-strip-btn" id="contextToggleBtn" type="button">Context</button>
+      </div>
+      <div class="context-panel" id="contextPanel">
+        <div class="context-grid">
+          <div class="context-field">
+            <label>Understanding</label>
+            <div class="context-value empty" id="contextUnderstandingValue">The agent has not written an understanding summary yet.</div>
+          </div>
+          <div class="context-field">
+            <label>Constraints</label>
+            <div class="context-value empty" id="contextConstraintsValue">No explicit constraints yet.</div>
+          </div>
+        </div>
+        <div class="context-actions">
+          <div class="context-status" id="contextStatus">Agent-maintained shared context.</div>
+          <button class="context-close-btn" id="contextCollapseBtn" type="button">Close</button>
+        </div>
+      </div>
+    </section>
+
     <div class="messages" id="messages">
       <div class="messages-inner" id="messagesInner">
         <div class="empty-state" id="emptyState">
@@ -966,6 +1262,8 @@ body.visitor-mode .header #menuBtn { display: none !important; }
         </div>
       </div>
     </div>
+
+    <div class="memory-panel" id="memoryPanel"></div>
 
     <!-- Input area -->
     <div class="input-area" id="inputArea">

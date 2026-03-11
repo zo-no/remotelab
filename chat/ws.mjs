@@ -6,7 +6,7 @@ import {
   archiveSession, unarchiveSession,
   subscribe, unsubscribe, sendMessage, cancelSession, getHistory,
   resumeInterruptedSession,
-  renameSession, compactSession, dropToolUse,
+  renameSession, compactSession, dropToolUse, updateSharedContext, freezeSession,
 } from './session-manager.mjs';
 
 /**
@@ -252,6 +252,43 @@ function handleMessage(ws, msg, ctx) {
         return;
       }
       dropToolUse(sessionId);
+      break;
+    }
+
+    case 'freeze_session': {
+      const sessionId = ctx.getAttached();
+      if (!sessionId) {
+        wsSend(ws, { type: 'error', message: 'Not attached to a session' });
+        return;
+      }
+      const frozen = freezeSession(sessionId);
+      if (!frozen) {
+        wsSend(ws, { type: 'error', message: 'Session not found' });
+      } else {
+        wsSend(ws, { type: 'freeze_saved', ...frozen });
+      }
+      break;
+    }
+
+    case 'update_context': {
+      const sessionId = ctx.getAttached();
+      if (!sessionId) {
+        wsSend(ws, { type: 'error', message: 'Not attached to a session' });
+        return;
+      }
+      const patch = typeof msg.patch === 'object' && msg.patch ? msg.patch : {};
+      const eventContent =
+        typeof msg.eventContent === 'string' && msg.eventContent.trim()
+          ? msg.eventContent.trim()
+          : '';
+      const updated = updateSharedContext(sessionId, patch, {
+        eventContent,
+        eventSource: msg.eventSource === 'user' ? 'user' : 'system',
+        forceEvent: !!msg.forceEvent,
+      });
+      if (!updated) {
+        wsSend(ws, { type: 'error', message: 'No context changes to save' });
+      }
       break;
     }
 

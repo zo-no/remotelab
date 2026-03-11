@@ -1,8 +1,8 @@
-import { existsSync, statSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
-import { join, resolve, dirname, basename } from 'path';
+import { join, resolve, dirname, basename, sep } from 'path';
 import { parse as parseUrl, fileURLToPath } from 'url';
-import { SESSION_EXPIRY, CHAT_IMAGES_DIR } from '../lib/config.mjs';
+import { SESSION_EXPIRY, CHAT_IMAGES_DIR, MEMORY_DIR } from '../lib/config.mjs';
 import {
   sessions, saveAuthSessions,
   verifyToken, verifyPassword, generateToken,
@@ -39,6 +39,13 @@ const staticMimeTypes = {
   'sw.js': 'application/javascript',
 };
 
+const MEMORY_TOP_LEVEL_FILES = [
+  { path: 'bootstrap.md', label: 'Bootstrap', section: 'core' },
+  { path: 'projects.md', label: 'Projects', section: 'core' },
+  { path: 'skills.md', label: 'Skills', section: 'core' },
+  { path: 'global.md', label: 'Global', section: 'core' },
+];
+
 function writeJson(res, statusCode, payload) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(payload));
@@ -57,9 +64,89 @@ function isOwnerOnlyRoute(pathname, method) {
   if (pathname === '/api/browse' && method === 'GET') return true;
   if (pathname === '/api/push/vapid-public-key' && method === 'GET') return true;
   if (pathname === '/api/push/subscribe' && method === 'POST') return true;
+  if (pathname === '/api/memory' && method === 'GET') return true;
+  if (pathname === '/api/memory/file' && (method === 'GET' || method === 'PUT')) return true;
   if (pathname === '/api/apps') return true;
   if (pathname.startsWith('/api/apps/')) return true;
   return false;
+}
+
+function resolveMemoryPath(relativePath) {
+  if (typeof relativePath !== 'string') return null;
+  const trimmed = relativePath.trim();
+  if (!trimmed) return null;
+  const root = resolve(MEMORY_DIR);
+  const target = resolve(root, trimmed);
+  if (target !== root && !target.startsWith(root + sep)) return null;
+  return target;
+}
+
+function walkMemoryEntries(relativeDir = 'tasks') {
+  const absoluteDir = resolveMemoryPath(relativeDir);
+  if (!absoluteDir || !existsSync(absoluteDir) || !statSync(absoluteDir).isDirectory()) {
+    return [];
+  }
+
+  const entries = [];
+  for (const name of readdirSync(absoluteDir).sort((a, b) => a.localeCompare(b))) {
+    const relativePath = `${relativeDir}/${name}`;
+    const absolutePath = resolveMemoryPath(relativePath);
+    if (!absolutePath || !existsSync(absolutePath)) continue;
+    const stats = statSync(absolutePath);
+    if (stats.isDirectory()) {
+      entries.push(...walkMemoryEntries(relativePath));
+      continue;
+    }
+    if (!stats.isFile()) continue;
+    entries.push({
+      path: relativePath,
+      label: name,
+      section: 'tasks',
+      size: stats.size || 0,
+    });
+  }
+  return entries;
+}
+
+function listMemoryEntries() {
+  if (!existsSync(MEMORY_DIR)) {
+    return { root: MEMORY_DIR, entries: [] };
+  }
+
+  const entries = [];
+  const seen = new Set();
+
+  for (const file of MEMORY_TOP_LEVEL_FILES) {
+    const absolutePath = resolveMemoryPath(file.path);
+    if (!absolutePath || !existsSync(absolutePath)) continue;
+    const stats = statSync(absolutePath);
+    if (!stats.isFile()) continue;
+    seen.add(file.path);
+      entries.push({
+        path: file.path,
+        label: file.label,
+        section: file.section,
+        size: stats.size || 0,
+      });
+  }
+
+  for (const name of readdirSync(MEMORY_DIR).sort((a, b) => a.localeCompare(b))) {
+    if (seen.has(name)) continue;
+    if (!name.endsWith('.md')) continue;
+    const absolutePath = resolveMemoryPath(name);
+    if (!absolutePath || !existsSync(absolutePath)) continue;
+    const stats = statSync(absolutePath);
+    if (!stats.isFile()) continue;
+    entries.push({
+      path: name,
+      label: name,
+      section: 'other',
+      size: stats.size || 0,
+    });
+  }
+
+  entries.push(...walkMemoryEntries());
+  return { root: MEMORY_DIR, entries };
 }
 
 export async function handleRequest(req, res) {
@@ -552,6 +639,62 @@ export async function handleRequest(req, res) {
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'App not found' }));
+    }
+    return;
+  }
+
+  if (pathname === '/api/memory' && req.method === 'GET') {
+    writeJson(res, 200, listMemoryEntries());
+    return;
+  }
+
+  if (pathname === '/api/memory/file' && req.method === 'GET') {
+    const requestedPath = typeof parsedUrl.query.path === 'string' ? parsedUrl.query.path : '';
+    const absolutePath = resolveMemoryPath(requestedPath);
+    if (!absolutePath) {
+      writeJson(res, 400, { error: 'Invalid memory path' });
+      return;
+    }
+    if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) {
+      writeJson(res, 404, { error: 'Memory file not found' });
+      return;
+    }
+    writeJson(res, 200, {
+      path: requestedPath,
+      content: readFileSync(absolutePath, 'utf8'),
+      size: statSync(absolutePath).size || 0,
+    });
+    return;
+  }
+
+  if (pathname === '/api/memory/file' && req.method === 'PUT') {
+    let body;
+    try { body = await readBody(req, 1024 * 1024); } catch {
+      writeJson(res, 400, { error: 'Bad request' });
+      return;
+    }
+    let payload;
+    try { payload = JSON.parse(body); } catch {
+      writeJson(res, 400, { error: 'Invalid request body' });
+      return;
+    }
+    const requestedPath = typeof payload?.path === 'string' ? payload.path : '';
+    const content = typeof payload?.content === 'string' ? payload.content : null;
+    const absolutePath = resolveMemoryPath(requestedPath);
+    if (!absolutePath || content === null) {
+      writeJson(res, 400, { error: 'path and content are required' });
+      return;
+    }
+    try {
+      mkdirSync(dirname(absolutePath), { recursive: true });
+      writeFileSync(absolutePath, content, 'utf8');
+      writeJson(res, 200, {
+        ok: true,
+        path: requestedPath,
+        size: Buffer.byteLength(content, 'utf8'),
+      });
+    } catch (error) {
+      writeJson(res, 500, { error: error?.message || 'Failed to save memory file' });
     }
     return;
   }

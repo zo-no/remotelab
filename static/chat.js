@@ -10,9 +10,23 @@
   const collapseBtn = document.getElementById("collapseBtn");
   const sessionList = document.getElementById("sessionList");
   const newSessionBtn = document.getElementById("newSessionBtn");
+  const chatArea = document.querySelector(".chat-area");
   const messagesEl = document.getElementById("messages");
   const messagesInner = document.getElementById("messagesInner");
   const emptyState = document.getElementById("emptyState");
+  const sharedContextShell = document.getElementById("sharedContextShell");
+  const goalStripText = document.getElementById("goalStripText");
+  const freezeSessionBtn = document.getElementById("freezeSessionBtn");
+  const contextToggleBtn = document.getElementById("contextToggleBtn");
+  const contextPanel = document.getElementById("contextPanel");
+  const contextUnderstandingValue = document.getElementById(
+    "contextUnderstandingValue",
+  );
+  const contextConstraintsValue = document.getElementById(
+    "contextConstraintsValue",
+  );
+  const contextCollapseBtn = document.getElementById("contextCollapseBtn");
+  const contextStatus = document.getElementById("contextStatus");
   const msgInput = document.getElementById("msgInput");
   const sendBtn = document.getElementById("sendBtn");
   const headerTitle = document.getElementById("headerTitle");
@@ -32,7 +46,9 @@
   const resumeBtn = document.getElementById("resumeBtn");
   const tabSessions = document.getElementById("tabSessions");
   const tabProgress = document.getElementById("tabProgress");
+  const tabMemory = document.getElementById("tabMemory");
   const progressPanel = document.getElementById("progressPanel");
+  const memoryPanel = document.getElementById("memoryPanel");
   const inputArea = document.getElementById("inputArea");
   const inputResizeHandle = document.getElementById("inputResizeHandle");
   const addToolModal = document.getElementById("addToolModal");
@@ -164,7 +180,8 @@
   registerHiddenMarkdownExtensions();
 
   function normalizeSidebarTab(tab) {
-    return tab === "progress" ? "progress" : "sessions";
+    if (tab === "progress" || tab === "memory") return tab;
+    return "sessions";
   }
 
   function normalizeNavigationState(raw) {
@@ -227,7 +244,8 @@
     url.searchParams.delete("source");
     if (nextSessionId) url.searchParams.set("session", nextSessionId);
     else url.searchParams.delete("session");
-    if (nextTab === "progress") url.searchParams.set("tab", nextTab);
+    if (nextTab === "progress" || nextTab === "memory")
+      url.searchParams.set("tab", nextTab);
     else url.searchParams.delete("tab");
     return `${url.pathname}${url.search}`;
   }
@@ -397,6 +415,181 @@
     }
 
     return data;
+  }
+
+  function formatMemorySize(size) {
+    if (!Number.isFinite(size) || size < 1024) return `${size || 0} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function setMemoryStatus(message, kind) {
+    const statusEl = document.getElementById("memoryStatus");
+    if (!statusEl) return;
+    statusEl.className = "memory-status" + (kind ? ` ${kind}` : "");
+    statusEl.textContent = message || "";
+  }
+
+  async function fetchMemoryIndex() {
+    const data = await fetchJsonOrRedirect("/api/memory");
+    memoryRoot = data.root || "";
+    memoryEntries = Array.isArray(data.entries) ? data.entries : [];
+    return data;
+  }
+
+  async function fetchMemoryFile(path) {
+    return fetchJsonOrRedirect(`/api/memory/file?path=${encodeURIComponent(path)}`);
+  }
+
+  async function saveMemoryFile(path, content) {
+    return fetchJsonOrRedirect("/api/memory/file", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, content }),
+    });
+  }
+
+  function getMemoryEntry(path) {
+    return memoryEntries.find((entry) => entry.path === path) || null;
+  }
+
+  function renderMemoryFileList() {
+    sessionList.innerHTML = "";
+    if (memoryEntries.length === 0) {
+      sessionList.innerHTML = `<div class="memory-empty">No memory files found yet.</div>`;
+      return;
+    }
+    for (const entry of memoryEntries) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "memory-file-btn" + (entry.path === currentMemoryPath ? " active" : "");
+      button.innerHTML = `<span class="memory-file-label">${esc(entry.label || entry.path)}</span><span class="memory-file-meta">${esc(entry.section || "file")} · ${esc(formatMemorySize(entry.size || 0))}</span>`;
+      button.addEventListener("click", () => {
+        openMemoryFile(entry.path);
+        if (!isDesktop) sidebarOverlay.classList.remove("open");
+      });
+      sessionList.appendChild(button);
+    }
+  }
+
+  function renderMemoryPanel() {
+    if (!memoryPanel) return;
+    const selectedEntry = getMemoryEntry(currentMemoryPath);
+    const summary = memoryEntries.length
+      ? `${memoryEntries.length} files in ${memoryRoot || "~/.remotelab/memory"}`
+      : `Memory root: ${memoryRoot || "~/.remotelab/memory"}`;
+
+    memoryPanel.innerHTML = `
+      <div class="memory-summary">${esc(summary)}</div>
+      <div class="memory-main">
+        <div class="memory-toolbar">
+          <div class="memory-status" id="memoryStatus"></div>
+          <div class="memory-toolbar-actions">
+            <button class="memory-btn" id="memoryReloadBtn" type="button">Reload</button>
+            <button class="memory-btn primary" id="memorySaveBtn" type="button">Save</button>
+          </div>
+        </div>
+        <div class="memory-file-header">
+          <div class="memory-file-title">${esc(selectedEntry?.label || "Select a memory file")}</div>
+          <div class="memory-file-path">${esc(selectedEntry?.path || "read only")}</div>
+        </div>
+        <textarea class="memory-editor" id="memoryEditor" spellcheck="false" placeholder="Select a memory file from the list.">${selectedEntry ? esc(currentMemoryContent) : ""}</textarea>
+      </div>`;
+
+    renderMemoryFileList();
+
+    const editor = document.getElementById("memoryEditor");
+    const saveBtn = document.getElementById("memorySaveBtn");
+    const reloadBtn = document.getElementById("memoryReloadBtn");
+
+    if (editor) {
+      editor.disabled = !selectedEntry;
+      editor.addEventListener("input", () => {
+        currentMemoryContent = editor.value;
+        memoryDirty = selectedEntry ? true : false;
+        setMemoryStatus(memoryDirty ? "Unsaved changes" : "", memoryDirty ? "" : "");
+      });
+    }
+
+    if (saveBtn) {
+      saveBtn.disabled = !selectedEntry;
+      saveBtn.addEventListener("click", async () => {
+        if (!selectedEntry) return;
+        saveBtn.disabled = true;
+        setMemoryStatus("Saving...", "");
+        try {
+          await saveMemoryFile(selectedEntry.path, editor.value);
+          currentMemoryContent = editor.value;
+          memoryDirty = false;
+          await fetchMemoryIndex();
+          setMemoryStatus("Saved", "success");
+          renderMemoryPanel();
+        } catch (error) {
+          setMemoryStatus(error.message || "Failed to save", "error");
+        } finally {
+          const refreshedSaveBtn = document.getElementById("memorySaveBtn");
+          if (refreshedSaveBtn) refreshedSaveBtn.disabled = !getMemoryEntry(currentMemoryPath);
+        }
+      });
+    }
+
+    if (reloadBtn) {
+      reloadBtn.addEventListener("click", async () => {
+        if (!currentMemoryPath) return;
+        setMemoryStatus("Reloading...", "");
+        await openMemoryFile(currentMemoryPath, { force: true });
+      });
+    }
+
+    if (!selectedEntry) {
+      setMemoryStatus(memoryEntries.length ? "Choose a file to inspect or edit." : "No memory files available.", "");
+    } else if (memoryDirty) {
+      setMemoryStatus("Unsaved changes", "");
+    } else {
+      setMemoryStatus(`Editing ${selectedEntry.path}`, "");
+    }
+  }
+
+  async function openMemoryFile(path, { force = false } = {}) {
+    if (!path) return;
+    if (memoryDirty && !force) {
+      const confirmed = window.confirm("Discard unsaved changes and open another memory file?");
+      if (!confirmed) return;
+    }
+    currentMemoryPath = path;
+    setMemoryStatus("Loading...", "");
+    renderMemoryPanel();
+    try {
+      const data = await fetchMemoryFile(path);
+      currentMemoryContent = data.content || "";
+      memoryDirty = false;
+      renderMemoryPanel();
+    } catch (error) {
+      currentMemoryContent = "";
+      memoryDirty = false;
+      renderMemoryPanel();
+      setMemoryStatus(error.message || "Failed to load memory file", "error");
+    }
+  }
+
+  async function ensureMemoryLoaded() {
+    if (visitorMode || !memoryPanel) return;
+    if (!memoryLoaded) {
+      await fetchMemoryIndex();
+      memoryLoaded = true;
+    } else {
+      await fetchMemoryIndex();
+    }
+    if (!getMemoryEntry(currentMemoryPath)) {
+      currentMemoryPath = memoryEntries[0]?.path || null;
+    }
+    if (currentMemoryPath) {
+      await openMemoryFile(currentMemoryPath, { force: true });
+    } else {
+      currentMemoryContent = "";
+      memoryDirty = false;
+      renderMemoryPanel();
+    }
   }
 
   async function setupPushNotifications() {
@@ -1002,6 +1195,73 @@
     return sessions.find((s) => s.id === currentSessionId) || null;
   }
 
+  function normalizeSharedContext(sharedContext) {
+    const source =
+      sharedContext && typeof sharedContext === "object" ? sharedContext : {};
+    return {
+      goal:
+        typeof source.goal === "string" ? source.goal.trim().slice(0, 240) : "",
+      understanding:
+        typeof source.understanding === "string"
+          ? source.understanding.trim()
+          : "",
+      constraints:
+        typeof source.constraints === "string" ? source.constraints.trim() : "",
+    };
+  }
+
+  function getCurrentSharedContext() {
+    return normalizeSharedContext(getCurrentSession()?.sharedContext);
+  }
+
+  function setContextStatus(message = "", kind = "") {
+    if (!contextStatus) return;
+    contextStatus.className = "context-status" + (kind ? ` ${kind}` : "");
+    contextStatus.textContent = message;
+  }
+
+  function setContextPanelOpen(open) {
+    contextPanelOpen = !!open;
+    if (contextPanel) contextPanel.classList.toggle("open", contextPanelOpen);
+    if (contextToggleBtn) {
+      contextToggleBtn.textContent = contextPanelOpen ? "Hide" : "Context";
+    }
+  }
+
+  function renderSharedContext({ forceInputs = false } = {}) {
+    if (!sharedContextShell || !goalStripText) return;
+    const hasSession = !!currentSessionId && activeTab !== "memory";
+    sharedContextShell.hidden = !hasSession;
+    if (!hasSession) {
+      setContextPanelOpen(false);
+      return;
+    }
+
+    const context = getCurrentSharedContext();
+    const goal =
+      context.goal || "Agent will keep the current goal aligned here.";
+    goalStripText.textContent = goal;
+    goalStripText.classList.toggle("empty", !context.goal);
+    if (contextUnderstandingValue) {
+      const understanding =
+        context.understanding ||
+        "The agent has not written an understanding summary yet.";
+      contextUnderstandingValue.textContent = understanding;
+      contextUnderstandingValue.classList.toggle("empty", !context.understanding);
+    }
+    if (contextConstraintsValue) {
+      const constraints = context.constraints || "No explicit constraints yet.";
+      contextConstraintsValue.textContent = constraints;
+      contextConstraintsValue.classList.toggle("empty", !context.constraints);
+    }
+    setContextStatus(
+      context.goal || context.understanding || context.constraints
+        ? "Agent-maintained shared context."
+        : "The agent will surface the shared context when it has enough signal.",
+      "",
+    );
+  }
+
   function normalizeSessionStatus(incomingStatus, previousStatus) {
     if (incomingStatus !== "idle") return incomingStatus;
     if (previousStatus === "running" || previousStatus === "done") {
@@ -1033,6 +1293,7 @@
         sortSessionsInPlace();
         renderSessionList();
         restoreOwnerSessionSelection();
+        renderSharedContext();
         break;
 
       case "session":
@@ -1056,6 +1317,7 @@
             headerTitle.textContent = displayName;
             sessionStatus = normalizedSession.status || "idle";
             updateStatus("connected", sessionStatus, normalizedSession.renameState);
+            renderSharedContext();
           }
           if (
             isCurrentSession &&
@@ -1092,6 +1354,7 @@
         // Check for unconfirmed messages from a previous page load
         checkPendingMessage(msg.events || []);
         updateResumeButton();
+        renderSharedContext({ forceInputs: true });
         break;
 
       case "event":
@@ -1120,6 +1383,7 @@
         renderSessionList();
         restoreOwnerSessionSelection();
         wsSend({ action: "list_archived" });
+        renderSharedContext({ forceInputs: true });
         break;
 
       case "archived_list":
@@ -1135,6 +1399,7 @@
           sortSessionsInPlace();
           renderSessionList();
           renderArchivedSection();
+          renderSharedContext();
         }
         break;
 
@@ -1153,6 +1418,10 @@
           lastProgressState = msg.state;
           if (activeTab === "progress") renderProgressPanel(msg.state);
         }
+        break;
+
+      case "freeze_saved":
+        setContextStatus("Session frozen.", "success");
         break;
 
       case "error":
@@ -1246,6 +1515,9 @@
     switch (evt.type) {
       case "message":
         renderMessage(evt);
+        break;
+      case "context":
+        renderContextEvent(evt);
         break;
       case "tool_use":
         renderToolUse(evt);
@@ -1515,6 +1787,13 @@
     div.className = "reasoning";
     div.textContent = evt.content || "";
     container.appendChild(div);
+  }
+
+  function renderContextEvent(evt) {
+    const div = document.createElement("div");
+    div.className = "msg-system";
+    div.textContent = evt.content || "Shared context updated";
+    messagesInner.appendChild(div);
   }
 
   function renderStatusMsg(evt) {
@@ -1802,6 +2081,7 @@
     restoreDraft();
     msgInput.focus();
     renderSessionList();
+    renderSharedContext({ forceInputs: true });
     updateResumeButton();
     syncBrowserState();
   }
@@ -2152,15 +2432,22 @@
     renderPendingRecovery(pending);
   }
 
-  // ---- Progress sidebar ----
+  // ---- Tracks sidebar ----
   let activeTab = normalizeSidebarTab(
     pendingNavigationState.tab ||
       localStorage.getItem(ACTIVE_SIDEBAR_TAB_STORAGE_KEY) ||
       "sessions",
-  ); // "sessions" | "progress"
+  ); // "sessions" | "progress" | "memory"
   let progressPollTimer = null;
   let lastProgressState = { sessions: {} };
   let progressEnabled = false; // loaded from backend, default off
+  let memoryEntries = [];
+  let memoryRoot = "";
+  let currentMemoryPath = null;
+  let currentMemoryContent = "";
+  let memoryDirty = false;
+  let memoryLoaded = false;
+  let contextPanelOpen = false;
 
   async function fetchSettings() {
     if (visitorMode) return;
@@ -2174,18 +2461,31 @@
     activeTab = normalizeSidebarTab(tab);
     tabSessions.classList.toggle("active", activeTab === "sessions");
     tabProgress.classList.toggle("active", activeTab === "progress");
-    sessionList.style.display = activeTab === "sessions" ? "" : "none";
+    if (tabMemory) tabMemory.classList.toggle("active", activeTab === "memory");
+    sessionList.style.display = activeTab === "progress" ? "none" : "";
     progressPanel.classList.toggle("visible", activeTab === "progress");
-    newSessionBtn.classList.toggle("hidden", activeTab === "progress");
+    if (memoryPanel) memoryPanel.classList.toggle("visible", activeTab === "memory");
+    if (chatArea) chatArea.classList.toggle("memory-mode", activeTab === "memory");
+    newSessionBtn.classList.toggle("hidden", activeTab === "progress" || activeTab === "memory");
     if (activeTab === "progress") {
       fetchSidebarState();
       if (progressEnabled && !progressPollTimer) {
         progressPollTimer = setInterval(fetchSidebarState, 30_000);
       }
+    } else if (activeTab === "memory") {
+      clearInterval(progressPollTimer);
+      progressPollTimer = null;
+      ensureMemoryLoaded().catch((error) => {
+        if (memoryPanel) {
+          memoryPanel.innerHTML = `<div class="memory-empty">${esc(error.message || "Failed to load memory.")}</div>`;
+        }
+      });
     } else {
       clearInterval(progressPollTimer);
       progressPollTimer = null;
+      renderSessionList();
     }
+    renderSharedContext();
     if (syncState) {
       syncBrowserState();
     }
@@ -2193,7 +2493,29 @@
 
   tabSessions.addEventListener("click", () => switchTab("sessions"));
   tabProgress.addEventListener("click", () => switchTab("progress"));
+  if (tabMemory) tabMemory.addEventListener("click", () => switchTab("memory"));
   switchTab(activeTab, { syncState: false });
+
+  if (contextToggleBtn) {
+    contextToggleBtn.addEventListener("click", () => {
+      setContextPanelOpen(!contextPanelOpen);
+      renderSharedContext();
+    });
+  }
+
+  if (contextCollapseBtn) {
+    contextCollapseBtn.addEventListener("click", () => {
+      setContextPanelOpen(false);
+      renderSharedContext();
+    });
+  }
+
+  if (freezeSessionBtn) {
+    freezeSessionBtn.addEventListener("click", () => {
+      if (!currentSessionId) return;
+      wsSend({ action: "freeze_session" });
+    });
+  }
 
   function relativeTime(ts) {
     const diff = Date.now() - ts;
@@ -2412,6 +2734,8 @@
     if (menuBtn) menuBtn.style.display = "none";
     if (newSessionBtn) newSessionBtn.style.display = "none";
     if (collapseBtn) collapseBtn.style.display = "none";
+    if (tabMemory) tabMemory.style.display = "none";
+    if (memoryPanel) memoryPanel.style.display = "none";
     // Hide tool/model selectors and context management (visitors use defaults)
     if (inlineToolSelect) inlineToolSelect.style.display = "none";
     if (inlineModelSelect) inlineModelSelect.style.display = "none";
@@ -2420,6 +2744,7 @@
     if (compactBtn) compactBtn.style.display = "none";
     if (dropToolsBtn) dropToolsBtn.style.display = "none";
     if (contextTokens) contextTokens.style.display = "none";
+    if (activeTab === "memory") activeTab = "sessions";
   }
 
   // ---- Init ----

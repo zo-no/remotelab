@@ -1,11 +1,11 @@
 import { randomBytes } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
-import { CHAT_SESSIONS_FILE, CHAT_IMAGES_DIR } from '../lib/config.mjs';
+import { CHAT_SESSIONS_FILE, CHAT_IMAGES_DIR, FREEZE_DIR, FREEZE_INDEX_FILE } from '../lib/config.mjs';
 import { spawnTool } from './process-runner.mjs';
 import { loadHistory, appendEvent } from './history.mjs';
-import { messageEvent, statusEvent } from './normalizer.mjs';
-import { triggerSummary, removeSidebarEntry, renameSidebarEntry } from './summarizer.mjs';
+import { messageEvent, statusEvent, contextEvent } from './normalizer.mjs';
+import { triggerSummary, removeSidebarEntry, renameSidebarEntry, getSidebarState } from './summarizer.mjs';
 import { isProgressEnabled } from './settings.mjs';
 import { sendCompletionPush } from './push.mjs';
 import { buildSystemContext } from './system-prompt.mjs';
@@ -67,6 +67,37 @@ function saveSessionsMeta(list) {
   const dir = dirname(CHAT_SESSIONS_FILE);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(CHAT_SESSIONS_FILE, JSON.stringify(list, null, 2), 'utf8');
+}
+
+function loadFreezeIndex() {
+  try {
+    if (!existsSync(FREEZE_INDEX_FILE)) return { sessions: {} };
+    return JSON.parse(readFileSync(FREEZE_INDEX_FILE, 'utf8'));
+  } catch {
+    return { sessions: {} };
+  }
+}
+
+function saveFreezeIndex(index) {
+  if (!existsSync(FREEZE_DIR)) mkdirSync(FREEZE_DIR, { recursive: true });
+  writeFileSync(FREEZE_INDEX_FILE, JSON.stringify(index, null, 2), 'utf8');
+}
+
+function clipFreezeText(value, max = 280) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
+}
+
+function buildRecentMessageSnapshot(events, maxMessages = 6) {
+  return events
+    .filter((evt) => evt.type === 'message' && (evt.role === 'user' || evt.role === 'assistant'))
+    .slice(-maxMessages)
+    .map((evt) => ({
+      role: evt.role,
+      content: clipFreezeText(evt.content, evt.role === 'assistant' ? 400 : 280),
+      timestamp: evt.timestamp,
+    }));
 }
 
 function updateSessionMeta(sessionId, updater) {
@@ -200,6 +231,61 @@ const INTERRUPTED_RESUME_PROMPT =
   'Please continue where you left off. The previous turn was interrupted by a RemoteLab server restart. ' +
   'Pick up from the last unfinished task without repeating completed work unless necessary.';
 
+const SHARED_CONTEXT_TAG_PATTERN = /<shared_context>([\s\S]*?)<\/shared_context>/i;
+
+function normalizeSharedContextValue(value, maxLength = 1200) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+\n/g, '\n').slice(0, maxLength);
+}
+
+function normalizeSharedContextPatch(patch = {}, current = {}) {
+  return {
+    goal: normalizeSharedContextValue(
+      patch.goal === undefined ? current.goal || '' : patch.goal,
+      240,
+    ),
+    understanding: normalizeSharedContextValue(
+      patch.understanding === undefined ? current.understanding || '' : patch.understanding,
+      2000,
+    ),
+    constraints: normalizeSharedContextValue(
+      patch.constraints === undefined ? current.constraints || '' : patch.constraints,
+      2000,
+    ),
+  };
+}
+
+function buildSharedContextPrompt(session) {
+  const context = session?.sharedContext;
+  if (!context || !(context.goal || context.understanding || context.constraints)) return '';
+  const parts = ['[Shared Context]'];
+  if (context.goal) parts.push(`Goal: ${context.goal}`);
+  if (context.understanding) parts.push(`Current understanding: ${context.understanding}`);
+  if (context.constraints) parts.push(`Constraints: ${context.constraints}`);
+  return parts.join('\n');
+}
+
+function extractSharedContextPatch(content) {
+  if (typeof content !== 'string' || !content.includes('<shared_context>')) {
+    return null;
+  }
+  const match = content.match(SHARED_CONTEXT_TAG_PATTERN);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    return normalizeSharedContextPatch(parsed, {});
+  } catch {
+    return null;
+  }
+}
+
+function deriveInitialGoal(text) {
+  const normalized = normalizeSharedContextValue(text, 240);
+  if (!normalized) return '';
+  const singleLine = normalized.split('\n').find(Boolean) || normalized;
+  return singleLine.slice(0, 140);
+}
+
 // ---- Public API ----
 
 export function listSessions({ includeVisitor = false } = {}) {
@@ -237,6 +323,11 @@ export function createSession(folder, tool, name, extra = {}) {
     autoRenamePending: initialNaming.autoRenamePending,
     created: now,
     updatedAt: now,
+    sharedContext: {
+      goal: '',
+      understanding: '',
+      constraints: '',
+    },
   };
 
   // App-related metadata
@@ -314,6 +405,89 @@ export function updateSessionTool(id, tool) {
   return updated;
 }
 
+export function updateSharedContext(id, patch, options = {}) {
+  const metas = loadSessionsMeta();
+  const idx = metas.findIndex(m => m.id === id);
+  if (idx === -1) return null;
+  const current = metas[idx].sharedContext || {};
+  const next = normalizeSharedContextPatch(patch, current);
+  if (!next) return null;
+
+  const changed =
+    next.goal !== (current.goal || '')
+    || next.understanding !== (current.understanding || '')
+    || next.constraints !== (current.constraints || '');
+
+  if (!changed && !options.forceEvent) {
+    return enrichSessionMeta(metas[idx]);
+  }
+
+  metas[idx].sharedContext = next;
+  metas[idx].updatedAt = new Date().toISOString();
+  saveSessionsMeta(metas);
+
+  const updated = enrichSessionMeta(metas[idx]);
+  broadcastSessionUpdate(id, updated);
+
+  if (options.eventContent) {
+    const evt = contextEvent(options.eventContent, next, options.eventSource || 'system');
+    appendEvent(id, evt);
+    broadcast(id, { type: 'event', event: evt });
+  }
+
+  return updated;
+}
+
+export function freezeSession(sessionId) {
+  const session = getSession(sessionId);
+  if (!session) return null;
+
+  const history = loadHistory(sessionId);
+  const sidebarState = getSidebarState();
+  const sidebarEntry = sidebarState.sessions?.[sessionId] || null;
+  const frozenAt = new Date().toISOString();
+  const freezeId = `${frozenAt.replace(/[:.]/g, '-')}`;
+  const sessionDir = join(FREEZE_DIR, sessionId);
+  if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
+
+  const snapshot = {
+    id: freezeId,
+    frozenAt,
+    sessionId,
+    name: session.name || '',
+    folder: session.folder || '',
+    tool: session.tool || '',
+    status: session.status || 'idle',
+    sharedContext: session.sharedContext || { goal: '', understanding: '', constraints: '' },
+    lastAction: sidebarEntry?.lastAction || '',
+    historyCount: history.length,
+    recentMessages: buildRecentMessageSnapshot(history),
+  };
+
+  const snapshotPath = join(sessionDir, `${freezeId}.json`);
+  writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), 'utf8');
+
+  const index = loadFreezeIndex();
+  if (!index.sessions) index.sessions = {};
+  const existing = Array.isArray(index.sessions[sessionId]) ? index.sessions[sessionId] : [];
+  existing.unshift({
+    id: freezeId,
+    frozenAt,
+    path: snapshotPath,
+    name: snapshot.name,
+    goal: snapshot.sharedContext?.goal || '',
+    lastAction: snapshot.lastAction,
+  });
+  index.sessions[sessionId] = existing.slice(0, 50);
+  saveFreezeIndex(index);
+
+  const evt = statusEvent(`Session frozen — ${snapshotPath}`);
+  appendEvent(sessionId, evt);
+  broadcast(sessionId, { type: 'event', event: evt });
+
+  return { snapshotPath, freezeId, frozenAt };
+}
+
 /**
  * Subscribe a WebSocket to session events.
  */
@@ -368,6 +542,11 @@ export function sendMessage(sessionId, text, images, options = {}) {
   const isFirstRecordedUserMessage =
     options.recordUserMessage !== false
     && !priorHistory.some((evt) => evt.type === 'message' && evt.role === 'user');
+
+  if (isFirstRecordedUserMessage && !session.sharedContext?.goal) {
+    updateSharedContext(sessionId, { goal: deriveInitialGoal(text) });
+    session = getSession(sessionId) || session;
+  }
 
   // Determine effective tool: per-message override or session default
   const effectiveTool = options.tool || session.tool;
@@ -464,6 +643,12 @@ export function sendMessage(sessionId, text, images, options = {}) {
 
   const onEvent = (evt) => {
     console.log(`[session-mgr] onEvent session=${sessionId.slice(0,8)} type=${evt.type} content=${(evt.content || evt.toolName || '').slice(0, 80)}`);
+    if (evt.type === 'message' && evt.role === 'assistant' && evt.content) {
+      const patch = extractSharedContextPatch(evt.content);
+      if (patch) {
+        updateSharedContext(sessionId, patch, { eventSource: 'assistant' });
+      }
+    }
     appendEvent(sessionId, evt);
     broadcast(sessionId, { type: 'event', event: evt });
   };
@@ -622,10 +807,15 @@ export function sendMessage(sessionId, text, images, options = {}) {
   }
 
   let actualText = text;
+  const sharedContextPrompt = buildSharedContextPrompt(session);
   if (continuationContext) {
     actualText = `${continuationContext}\n\n---\n\nCurrent user message:\n${text}`;
   } else if (isFirstMessage) {
     actualText = `User message:\n${text}`;
+  }
+
+  if (sharedContextPrompt) {
+    actualText = `${sharedContextPrompt}\n\n---\n\n${actualText}`;
   }
 
   if (isFirstMessage) {

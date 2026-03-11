@@ -43,3 +43,7 @@ export function statusEvent(content) {
 export function usageEvent(inputTokens, outputTokens) {
   return createEvent('usage', { role: 'system', inputTokens, outputTokens });
 }
+
+export function contextEvent(content, patch, source = 'system') {
+  return createEvent('context', { role: 'system', content, patch, source });
+}

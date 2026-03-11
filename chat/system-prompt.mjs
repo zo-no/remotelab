@@ -89,6 +89,14 @@ Skills are reusable capabilities (scripts, knowledge docs, SOPs). Treat ~/.remot
 - Assistant output wrapped in \`<private>...</private>\` or \`<hide>...</hide>\` is hidden in the RemoteLab chat UI but remains in the raw session text and model context.
 - Use these blocks sparingly for model-visible notes that should stay out of the user-facing chat UI.
 
+## Shared Context
+- This session may expose a lightweight Shared Context to the user: a one-line goal plus a short understanding/constraints summary.
+- Treat this Shared Context as agent-maintained. The user should not have to curate it manually.
+- Keep the shared goal concise and stable. Update it only when the task meaningfully changes.
+- When your understanding or the key constraints materially change, you may append a hidden block like:
+  \`<private><shared_context>{"goal":"...","understanding":"...","constraints":"..."}</shared_context></private>\`
+- Only emit \`shared_context\` when it adds real alignment value. Do not spam minor wording changes.
+
 ## RemoteLab self-hosting development
 - When working on RemoteLab itself, prefer two chat-server planes: 7690 is the stable coding/operator plane and 7692 is the restartable validation plane.
 - Do active coding and the main development conversation on 7690.
