@@ -64,6 +64,7 @@ const BUILD_INFO = loadBuildInfo();
 
 const staticMimeTypes = {
   'manifest.json': 'application/manifest+json',
+  'favicon.ico': 'image/x-icon',
   'icon.svg': 'image/svg+xml',
   'apple-touch-icon.png': 'image/png',
   'chat.js': 'application/javascript',
@@ -232,7 +233,7 @@ function setShareSnapshotHeaders(res, nonce) {
     "connect-src 'none'",
     `script-src 'self' 'nonce-${nonce}'`,
     "style-src 'unsafe-inline'",
-    "img-src data: blob:",
+    "img-src 'self' data: blob:",
     "font-src 'none'",
   ].join('; '));
 }
