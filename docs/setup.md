@@ -395,6 +395,15 @@ This interactive script handles phases 1–6 automatically, prompting for domain
 
 ## Troubleshooting
 
+### Storage keeps growing
+
+This is expected. RemoteLab keeps durable session history, run output, artifacts, and logs on disk so work survives disconnects and restarts.
+
+- Archiving a session does **not** delete its stored data.
+- RemoteLab does **not** auto-delete old sessions and does **not** provide a built-in one-click cleanup flow.
+- If disk usage starts to matter, periodically review old archived sessions and prune them manually from the terminal, or ask an AI operator to help you clean them up carefully.
+- The main storage directories are `~/.config/remotelab/chat-history/` and `~/.config/remotelab/chat-runs/`.
+
 ### macOS: Service shows dash (no PID) in launchctl list
 
 ```bash

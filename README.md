@@ -189,6 +189,15 @@ remotelab --help               Show help
 | `~/.local/share/remotelab/logs/auth-proxy.log` | Auth proxy stdout **(Linux)** |
 | `~/.local/share/remotelab/logs/cloudflared.log` | Tunnel stdout **(Linux)** |
 
+## Storage growth and manual cleanup
+
+- RemoteLab is durability-first: session history, run output, artifacts, and logs accumulate on disk over time.
+- Archiving a session is organizational only. It hides the session from the active list, but it does **not** delete the stored history or run data behind it.
+- On long-lived installs, storage can grow materially, especially if you keep long conversations, large tool outputs, heavy reasoning traces, or generated artifacts.
+- RemoteLab does **not** automatically delete old data and does **not** currently ship a one-click cleanup feature. This is intentional: keeping user data is safer than guessing what is safe to remove.
+- If you want to reclaim disk space, periodically review old archived sessions and prune them manually from the terminal, or ask an AI operator to help you clean them up carefully.
+- In practice, most storage growth lives under `~/.config/remotelab/chat-history/` and `~/.config/remotelab/chat-runs/`.
+
 ## Security
 
 - HTTPS via Cloudflare (TLS at the edge, localhost HTTP on the machine)
