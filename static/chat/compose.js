@@ -9,6 +9,7 @@ function sendMessage(existingRequestId) {
 
   // Protect the message: save to localStorage before anything else
   const pendingTimestamp = savePendingMessage(text, requestId);
+  refreshSessionAttentionUi(sessionId);
 
   // Render optimistic bubble BEFORE revoking image URLs
   renderOptimisticMessage(text, pendingImages, pendingTimestamp);

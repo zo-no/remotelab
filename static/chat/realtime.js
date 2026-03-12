@@ -280,9 +280,6 @@ function updateStatus(connState, sessState, renameState, archived = false) {
     sendBtn.title = "Send";
     return;
   }
-  const isRunning = sessState === "running";
-  const isBusy = isRunning || session?.pendingCompact === true;
-  sessionStatus = isBusy ? "running" : sessState;
   const visualStatus = getSessionVisualStatus({
     ...(session || {}),
     id: session?.id || currentSessionId,
@@ -290,13 +287,9 @@ function updateStatus(connState, sessState, renameState, archived = false) {
     renameState,
     archived,
   });
-  const showArchivedOnly = archived && [
-    "idle",
-    "done-read",
-    "done-unread",
-    "interrupted",
-    "archived",
-  ].includes(visualStatus.key);
+  const isRunning = visualStatus.key === "running";
+  sessionStatus = isRunning ? "running" : sessState;
+  const showArchivedOnly = archived && visualStatus.key === "idle";
   if (showArchivedOnly) {
     statusDot.className = "status-dot";
     statusText.textContent = "archived";
@@ -312,6 +305,7 @@ function updateStatus(connState, sessState, renameState, archived = false) {
     statusText.textContent = currentSessionId ? "idle" : "connected";
   }
   const hasSession = !!currentSessionId;
+  const isBusy = isRunning;
   msgInput.disabled = !hasSession || archived;
   msgInput.placeholder = archived
     ? "Archived session — restore to continue"

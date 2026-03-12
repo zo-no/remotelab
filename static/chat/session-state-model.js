@@ -1,6 +1,8 @@
 "use strict";
 
 (function attachRemoteLabSessionStateModel(root) {
+  const PENDING_MESSAGE_GRACE_MS = 15000;
+
   function createEmptyStatus() {
     return {
       key: "idle",
@@ -10,11 +12,6 @@
       itemClass: "",
       title: "",
     };
-  }
-
-  function getQueuedStatusLabel(count) {
-    const total = Number.isInteger(count) ? count : Number(count) || 0;
-    return total === 1 ? "1 queued" : `${total} queued`;
   }
 
   function normalizePendingDeliveryState(value) {
@@ -45,7 +42,8 @@
     const pending = normalizePendingMessage(message);
     if (!pending) return false;
     if (pending.deliveryState === "failed") return false;
-    return isSessionBusy(session);
+    if (isSessionBusy(session)) return true;
+    return Date.now() - pending.timestamp < PENDING_MESSAGE_GRACE_MS;
   }
 
   function getSessionPrimaryStatus(session, options = {}) {
@@ -53,33 +51,20 @@
       return createEmptyStatus();
     }
 
+    const read = typeof options.isRead === "function"
+      ? options.isRead(session)
+      : false;
+    const hasPendingDelivery = options.hasPendingDelivery === true;
     const queuedCount = Number.isInteger(session.queuedMessageCount)
       ? session.queuedMessageCount
       : 0;
+    const isRunning =
+      hasPendingDelivery
+      || session.status === "running"
+      || session.pendingCompact === true
+      || queuedCount > 0;
 
-    if (queuedCount > 0) {
-      return {
-        key: "queued",
-        label: getQueuedStatusLabel(queuedCount),
-        className: "status-queued",
-        dotClass: "queued",
-        itemClass: "",
-        title: "Queued follow-up messages waiting for the next turn",
-      };
-    }
-
-    if (session.pendingCompact === true) {
-      return {
-        key: "compacting",
-        label: "compressing",
-        className: "status-running",
-        dotClass: "running",
-        itemClass: "",
-        title: "Auto Compress is condensing older context into a fresh handoff",
-      };
-    }
-
-    if (session.status === "running") {
+    if (isRunning) {
       return {
         key: "running",
         label: "running",
@@ -90,61 +75,14 @@
       };
     }
 
-    if (session.status === "done") {
-      const read = typeof options.isRead === "function"
-        ? options.isRead(session)
-        : false;
+    if (session.status === "done" && !read) {
       return {
-        key: read ? "done-read" : "done-unread",
-        label: read ? "read" : "unread",
-        className: read ? "status-done-read" : "status-done-unread",
-        dotClass: read ? "done-read" : "done-unread",
-        itemClass: read ? "is-complete-read" : "is-complete-unread",
+        key: "unread",
+        label: "unread",
+        className: "status-done-unread",
+        dotClass: "done-unread",
+        itemClass: "is-complete-unread",
         title: "",
-      };
-    }
-
-    if (session.status === "interrupted") {
-      return {
-        key: "interrupted",
-        label: "interrupted",
-        className: "status-interrupted",
-        dotClass: "interrupted",
-        itemClass: "",
-        title: "",
-      };
-    }
-
-    if (session.archived === true) {
-      return {
-        key: "archived",
-        label: "archived",
-        className: "status-archived",
-        dotClass: "",
-        itemClass: "",
-        title: "",
-      };
-    }
-
-    return createEmptyStatus();
-  }
-
-  function getSessionIssueStatus(session, options = {}) {
-    if (!session) {
-      return createEmptyStatus();
-    }
-
-    const renameError =
-      typeof session.renameError === "string" ? session.renameError.trim() : "";
-
-    if (options.hasSendFailure === true) {
-      return {
-        key: "send-failed",
-        label: "send issue",
-        className: "status-send-failed",
-        dotClass: "send-failed",
-        itemClass: "",
-        title: "A local outgoing message still needs retry or recovery",
       };
     }
 
@@ -159,56 +97,22 @@
       };
     }
 
-    if (session.renameState === "failed") {
-      return {
-        key: "rename-failed",
-        label: "rename issue",
-        className: "status-rename-failed",
-        dotClass: "rename-failed",
-        itemClass: "",
-        title: renameError || "Rename suggestion could not be applied",
-      };
-    }
-
-    return createEmptyStatus();
-  }
-
-  function getToolFallbackStatus(session) {
-    if (!session?.tool || !session?.name) {
-      return createEmptyStatus();
-    }
-
     return {
-      key: "tool",
-      label: session.tool,
+      key: "idle",
+      label: "idle",
       className: "",
       dotClass: "",
-      itemClass: "",
+      itemClass: read ? "is-complete-read" : "",
       title: "",
     };
   }
 
   function getSessionStatusSummary(session, options = {}) {
     const primary = getSessionPrimaryStatus(session, options);
-    const issue = getSessionIssueStatus(session, options);
-    const indicators = [];
-
-    if (primary.key !== "idle") {
-      indicators.push(primary);
-    }
-    if (issue.key !== "idle" && issue.key !== primary.key) {
-      indicators.push(issue);
-    }
-    if (indicators.length === 0 && options.includeToolFallback) {
-      const toolFallback = getToolFallbackStatus(session);
-      if (toolFallback.key !== "idle") {
-        indicators.push(toolFallback);
-      }
-    }
 
     return {
-      primary: indicators[0] || createEmptyStatus(),
-      indicators,
+      primary,
+      indicators: [primary],
     };
   }
 
@@ -222,9 +126,7 @@
     normalizePendingMessage,
     isSessionBusy,
     shouldKeepPendingMessagePending,
-    getQueuedStatusLabel,
     getSessionPrimaryStatus,
-    getSessionIssueStatus,
     getSessionStatusSummary,
     getSessionVisualStatus,
   };

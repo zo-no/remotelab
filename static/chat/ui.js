@@ -390,12 +390,6 @@ function createActiveSessionItem(session) {
   const metaParts = [];
   const countHtml = renderSessionMessageCount(session);
   if (countHtml) metaParts.push(countHtml);
-  if (
-    (session.queuedMessageCount || 0) > 0
-    && !statusSummary.indicators.some((status) => status.key === "queued")
-  ) {
-    metaParts.push(`<span title="Queued follow-up messages waiting for the next turn">${session.queuedMessageCount} queued</span>`);
-  }
   for (const indicator of statusSummary.indicators) {
     const statusHtml = renderSessionStatusHtml(indicator);
     if (statusHtml) metaParts.push(statusHtml);

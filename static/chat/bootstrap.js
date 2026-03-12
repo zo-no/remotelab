@@ -210,6 +210,11 @@ function shouldKeepPendingMessagePending(message, session) {
   return !!pending && pending.deliveryState !== "failed" && isSessionBusy(session);
 }
 
+function hasSessionPendingDelivery(sessionId) {
+  const deliveryState = readPendingMessage(sessionId)?.deliveryState;
+  return deliveryState === "sending" || deliveryState === "accepted";
+}
+
 function getPendingMessageStorageKey(sessionId) {
   if (!sessionId) return null;
   return `${PENDING_MESSAGE_STORAGE_PREFIX}${sessionId}`;
@@ -316,15 +321,11 @@ function finishSessionSendAttempt(sessionId, ok) {
   return ok ? false : markSessionSendFailed(sessionId);
 }
 
-function hasSessionSendFailure(sessionId) {
-  return readPendingMessage(sessionId)?.deliveryState === "failed";
-}
-
 function getSessionStatusSummary(session, { includeToolFallback = false } = {}) {
   if (typeof sessionStateModel.getSessionStatusSummary === "function") {
     return sessionStateModel.getSessionStatusSummary(session, {
       includeToolFallback,
-      hasSendFailure: hasSessionSendFailure(session?.id),
+      hasPendingDelivery: hasSessionPendingDelivery(session?.id),
       isRead: isSessionRead,
     });
   }

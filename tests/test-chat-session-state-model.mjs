@@ -26,66 +26,73 @@ const model = context.RemoteLabSessionStateModel;
 
 assert.ok(model, 'session state model should attach to the global scope');
 
-const runningWithIssue = model.getSessionStatusSummary(
+const optimisticRunning = model.getSessionStatusSummary(
   {
-    id: 'session-running',
-    name: 'Running session',
-    status: 'running',
-  },
-  {
-    hasSendFailure: true,
-  },
-);
-assert.equal(runningWithIssue.primary.key, 'running');
-assert.equal(
-  Array.from(runningWithIssue.indicators, (indicator) => indicator.key).join(','),
-  'running,send-failed',
-  'running should remain the primary state while a local send issue is secondary',
-);
-
-const idleWithIssue = model.getSessionStatusSummary(
-  {
-    id: 'session-idle',
-    name: 'Idle session',
+    id: 'session-pending',
+    name: 'Pending session',
     status: 'idle',
   },
   {
-    hasSendFailure: true,
+    hasPendingDelivery: true,
   },
 );
-assert.equal(idleWithIssue.primary.key, 'send-failed');
-assert.equal(idleWithIssue.primary.label, 'send issue');
-
-const pendingAccepted = model.normalizePendingMessage({
-  text: 'hello',
-  requestId: 'req-1',
-  timestamp: 1,
-  deliveryState: 'accepted',
-});
+assert.equal(optimisticRunning.primary.key, 'running');
 assert.equal(
-  model.shouldKeepPendingMessagePending(pendingAccepted, { status: 'running' }),
-  true,
-  'accepted pending messages should stay non-failing while the session is busy',
+  Array.from(optimisticRunning.indicators, (indicator) => indicator.key).join(','),
+  'running',
+  'pending local delivery should surface as running immediately',
 );
 
-const pendingSending = model.normalizePendingMessage({
-  text: 'hello',
-  requestId: 'req-2',
-  timestamp: 2,
-});
-assert.equal(
-  model.shouldKeepPendingMessagePending(pendingSending, { status: 'idle' }),
-  false,
-  'legacy pending messages should surface for recovery once the session is no longer busy',
-);
-
-const doneUnread = model.getSessionStatusSummary(
+const unreadStatus = model.getSessionStatusSummary(
   {
     id: 'session-done',
+    name: 'Done session',
     status: 'done',
   },
   {
     isRead: () => false,
   },
 );
-assert.equal(doneUnread.primary.key, 'done-unread');
+assert.equal(unreadStatus.primary.key, 'unread');
+assert.equal(unreadStatus.primary.label, 'unread');
+
+const pendingAccepted = model.normalizePendingMessage({
+  text: 'hello',
+  requestId: 'req-1',
+  timestamp: Date.now(),
+  deliveryState: 'accepted',
+});
+assert.equal(
+  model.shouldKeepPendingMessagePending(pendingAccepted, { status: 'idle' }),
+  true,
+  'accepted pending messages should stay non-failing during the delivery grace window',
+);
+
+const pendingSending = model.normalizePendingMessage({
+  text: 'hello',
+  requestId: 'req-2',
+  timestamp: Date.now() - 20000,
+});
+assert.equal(
+  model.shouldKeepPendingMessagePending(pendingSending, { status: 'idle' }),
+  false,
+  'stale pending messages should surface for recovery after the grace window',
+);
+
+const renamingStatus = model.getSessionStatusSummary(
+  {
+    id: 'session-renaming',
+    status: 'idle',
+    renameState: 'pending',
+  },
+);
+assert.equal(renamingStatus.primary.key, 'renaming');
+
+const idleStatus = model.getSessionStatusSummary(
+  {
+    id: 'session-idle',
+    status: 'idle',
+  },
+);
+assert.equal(idleStatus.primary.key, 'idle');
+assert.equal(idleStatus.primary.label, 'idle');
