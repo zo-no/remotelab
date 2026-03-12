@@ -325,6 +325,7 @@ function updateStatus(connState, sessState, renameState, archived = false) {
     syncSessionTemplateControls();
   }
   updateResumeButton();
+  syncCaptureButton();
   syncForkButton();
   syncShareButton();
 }
@@ -349,6 +350,7 @@ function showEmpty() {
   if (typeof syncSessionTemplateControls === "function") {
     syncSessionTemplateControls();
   }
+  syncCaptureButton();
   syncForkButton();
   syncShareButton();
 }
