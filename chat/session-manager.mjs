@@ -726,10 +726,69 @@ async function getPersistedStatus(meta) {
   return 'idle';
 }
 
+async function resolveSessionRunActivity(meta) {
+  if (meta?.activeRunId) {
+    const run = await getRun(meta.activeRunId);
+    if (run && !isTerminalRunState(run.state)) {
+      return {
+        status: 'running',
+        run,
+      };
+    }
+  }
+
+  if (meta?.activeRun) {
+    return {
+      status: 'interrupted',
+      run: meta.activeRun,
+    };
+  }
+
+  return {
+    status: 'idle',
+    run: null,
+  };
+}
+
+function buildSessionActivity(meta, live, { status, run, recoverable, queuedCount }) {
+  const renameState = live?.renameState === 'pending' || live?.renameState === 'failed'
+    ? live.renameState
+    : 'idle';
+  const renameError = typeof live?.renameError === 'string' ? live.renameError : '';
+  const compactState = live?.pendingCompact === true ? 'pending' : 'idle';
+  const queueCount = Number.isInteger(queuedCount) ? queuedCount : 0;
+
+  return {
+    run: {
+      state: status,
+      phase: typeof run?.state === 'string' ? run.state : null,
+      runId: typeof run?.id === 'string'
+        ? run.id
+        : (typeof meta?.activeRunId === 'string' ? meta.activeRunId : null),
+      cancelRequested: run?.cancelRequested === true,
+      recoverable,
+    },
+    queue: {
+      state: queueCount > 0 ? 'queued' : 'idle',
+      count: queueCount,
+    },
+    rename: {
+      state: renameState,
+      error: renameError || null,
+    },
+    compact: {
+      state: compactState,
+    },
+  };
+}
+
 async function enrichSessionMeta(meta) {
   const live = liveSessions.get(meta.id);
   const snapshot = await getHistorySnapshot(meta.id);
+  const queuedCount = getFollowUpQueueCount(meta);
+  const runActivity = await resolveSessionRunActivity(meta);
   const { followUpQueue, recentFollowUpRequestIds, ...rest } = meta;
+  const recoverable = !!meta.activeRun && !!(meta.claudeSessionId || meta.codexThreadId);
   return {
     ...rest,
     appId: resolveEffectiveAppId(meta.appId),
@@ -741,12 +800,18 @@ async function enrichSessionMeta(meta) {
     activeFromSeq: snapshot.activeFromSeq,
     compactedThroughSeq: snapshot.compactedThroughSeq,
     contextTokenEstimate: snapshot.contextTokenEstimate,
-    status: await getPersistedStatus(meta),
-    recoverable: !!meta.activeRun && !!(meta.claudeSessionId || meta.codexThreadId),
-    queuedMessageCount: getFollowUpQueueCount(meta),
+    status: runActivity.status,
+    recoverable,
+    queuedMessageCount: queuedCount,
     pendingCompact: live?.pendingCompact === true,
     renameState: live?.renameState || undefined,
     renameError: live?.renameError || undefined,
+    activity: buildSessionActivity(meta, live, {
+      status: runActivity.status,
+      run: runActivity.run,
+      recoverable,
+      queuedCount,
+    }),
   };
 }
 

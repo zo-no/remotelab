@@ -10,9 +10,9 @@
 <meta name="theme-color" content="#1e1e1e" media="(prefers-color-scheme: dark)">
 <meta name="remotelab-build" content="{{BUILD_TITLE}}">
 <link rel="manifest" href="/manifest.json?v={{ASSET_VERSION}}">
-<link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/favicon.ico?v={{ASSET_VERSION}}" sizes="any">
+<link rel="icon" href="/icon.svg?v={{ASSET_VERSION}}" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v={{ASSET_VERSION}}">
 <title>RemoteLab Chat</title>
 <style nonce="{{NONCE}}">
 :root {
@@ -153,6 +153,7 @@ body {
 }
 .status-dot.running { background: var(--success); animation: pulse 1.5s infinite; }
 .status-dot.queued { background: var(--queue); animation: pulse 1.5s infinite; }
+.status-dot.compacting { background: var(--notice); animation: pulse 1.5s infinite; }
 .status-dot.done-read { background: var(--text-muted); }
 .status-dot.done-unread { background: var(--notice); }
 .status-dot.interrupted { background: var(--warning); }
@@ -321,6 +322,7 @@ body {
 .session-item-count { font-variant-numeric: tabular-nums; }
 .session-item-meta .status-running { color: var(--success); }
 .session-item-meta .status-queued { color: var(--queue); }
+.session-item-meta .status-compacting { color: var(--notice); }
 .session-item-meta .status-interrupted { color: var(--warning); }
 .session-item-meta .status-done-read { color: var(--text-muted); }
 .session-item-meta .status-done-unread { color: var(--notice); }
@@ -1403,16 +1405,16 @@ body.visitor-mode .gesture-pill { display: none !important; }
 </div>
 
 <script nonce="{{NONCE}}">window.__REMOTELAB_BUILD__ = {{BUILD_JSON}};</script>
-<script src="/marked.min.js" nonce="{{NONCE}}"></script>
-<script src="/chat/session-state-model.js" nonce="{{NONCE}}"></script>
-<script src="/chat/icons.js" nonce="{{NONCE}}"></script>
-<script src="/chat/bootstrap.js" nonce="{{NONCE}}"></script>
-<script src="/chat/session-http.js" nonce="{{NONCE}}"></script>
-<script src="/chat/tooling.js" nonce="{{NONCE}}"></script>
-<script src="/chat/realtime.js" nonce="{{NONCE}}"></script>
-<script src="/chat/ui.js" nonce="{{NONCE}}"></script>
-<script src="/chat/compose.js" nonce="{{NONCE}}"></script>
-<script src="/chat/gestures.js" nonce="{{NONCE}}"></script>
-<script src="/chat/init.js" nonce="{{NONCE}}"></script>
+<script src="/marked.min.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/session-state-model.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/icons.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/bootstrap.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/session-http.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/tooling.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/realtime.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/ui.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/compose.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/gestures.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
+<script src="/chat/init.js?v={{ASSET_VERSION}}" nonce="{{NONCE}}"></script>
 </body>
 </html>

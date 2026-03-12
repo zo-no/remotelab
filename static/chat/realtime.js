@@ -8,12 +8,7 @@ function connect() {
   ws = new WebSocket(`${proto}//${location.host}/ws`);
 
   ws.onopen = () => {
-    updateStatus(
-      "connected",
-      getCurrentSession()?.status || "idle",
-      getCurrentSession()?.renameState,
-      getCurrentSession()?.archived === true,
-    );
+    updateStatus("connected", getCurrentSession());
     if (hasSeenWsOpen) {
       refreshRealtimeViews().catch(() => {});
     } else {
@@ -32,12 +27,7 @@ function connect() {
   };
 
   ws.onclose = () => {
-    updateStatus(
-      "disconnected",
-      getCurrentSession()?.status || "idle",
-      getCurrentSession()?.renameState,
-      getCurrentSession()?.archived === true,
-    );
+    updateStatus("disconnected", getCurrentSession());
     scheduleReconnect();
   };
 
@@ -143,11 +133,7 @@ async function dispatchAction(msg) {
         return true;
       }
       case "send": {
-        const pending = getPendingMessage();
-        const requestId = msg.requestId || pending?.requestId || createRequestId();
-        if (!pending || pending.requestId !== requestId || pending.text !== msg.text) {
-          savePendingMessage(msg.text, requestId);
-        }
+        const requestId = msg.requestId || createRequestId();
         const data = await fetchJsonOrRedirect(`/api/sessions/${encodeURIComponent(currentSessionId)}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -161,13 +147,13 @@ async function dispatchAction(msg) {
             ...(msg.thinking ? { thinking: true } : {}),
           }),
         });
-        if (data?.queued) {
-          clearPendingMessage();
-          clearOptimisticMessage();
-        } else {
-          setPendingMessageDeliveryState(currentSessionId, "accepted");
+        try {
+          await refreshCurrentSession();
+        } catch {
+          setTimeout(() => {
+            refreshCurrentSession().catch(() => {});
+          }, 0);
         }
-        await refreshCurrentSession();
         return true;
       }
       case "apply_template": {
@@ -233,16 +219,16 @@ function getCurrentSession() {
 }
 
 function normalizeSessionStatus(incomingStatus, previousStatus) {
-  if (incomingStatus !== "idle") return incomingStatus;
-  if (previousStatus === "running" || previousStatus === "done") {
-    return "done";
-  }
-  return "idle";
+  return incomingStatus || previousStatus || "idle";
 }
 
 function updateResumeButton() {
   const session = getCurrentSession();
-  const canResume = !!session && !session.archived && session.status === "interrupted" && session.recoverable;
+  const activity = getSessionActivity(session);
+  const canResume = !!session
+    && !session.archived
+    && activity.run.state === "interrupted"
+    && activity.run.recoverable;
   resumeBtn.style.display = canResume ? "" : "none";
   resumeBtn.disabled = !canResume;
 }
@@ -272,8 +258,8 @@ function handleWsMessage(msg) {
 }
 
 // ---- Status ----
-function updateStatus(connState, sessState, renameState, archived = false) {
-  const session = getCurrentSession();
+function updateStatus(connState, session = getCurrentSession()) {
+  const archived = session?.archived === true;
   if (connState === "disconnected") {
     statusDot.className = "status-dot";
     statusText.textContent = "Reconnecting…";
@@ -284,15 +270,14 @@ function updateStatus(connState, sessState, renameState, archived = false) {
     sendBtn.title = "Send";
     return;
   }
-  const visualStatus = getSessionVisualStatus({
-    ...(session || {}),
-    id: session?.id || currentSessionId,
-    status: sessState,
-    renameState,
-    archived,
+  const visualStatus = getSessionVisualStatus(session || {
+    id: currentSessionId,
+    status: "idle",
   });
-  const isRunning = visualStatus.key === "running";
-  sessionStatus = isRunning ? "running" : sessState;
+  const activity = getSessionActivity(session);
+  const runIsActive = activity.run.state === "running";
+  const inputBusy = isSessionBusy(session);
+  sessionStatus = runIsActive ? "running" : activity.run.state || session?.status || "idle";
   const showArchivedOnly = archived && visualStatus.key === "idle";
   if (showArchivedOnly) {
     statusDot.className = "status-dot";
@@ -309,17 +294,16 @@ function updateStatus(connState, sessState, renameState, archived = false) {
     statusText.textContent = currentSessionId ? "idle" : "connected";
   }
   const hasSession = !!currentSessionId;
-  const isBusy = isRunning;
   msgInput.disabled = !hasSession || archived;
   msgInput.placeholder = archived
     ? "Archived session — restore to continue"
-    : isBusy
+    : inputBusy
       ? "Queue follow-up..."
       : "Message...";
   sendBtn.style.display = "";
   sendBtn.disabled = !hasSession || archived;
-  sendBtn.title = isBusy ? "Queue follow-up" : "Send";
-  cancelBtn.style.display = isRunning && hasSession ? "flex" : "none";
+  sendBtn.title = inputBusy ? "Queue follow-up" : "Send";
+  cancelBtn.style.display = runIsActive && hasSession ? "flex" : "none";
   imgBtn.disabled = !hasSession || archived;
   inlineToolSelect.disabled = visitorMode || archived;
   inlineModelSelect.disabled = !hasSession || archived;

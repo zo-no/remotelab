@@ -293,7 +293,8 @@ function renderQueuedMessagePanel(session) {
 
   const note = document.createElement("div");
   note.className = "queued-panel-note";
-  note.textContent = session.status === "running" || session.pendingCompact === true
+  const activity = getSessionActivity(session);
+  note.textContent = activity.run.state === "running" || activity.compact.state === "pending"
     ? "Will send automatically after the current run"
     : "Preparing the next turn";
 
@@ -655,15 +656,6 @@ menuBtn.addEventListener("click", openSidebar);
 closeSidebar.addEventListener("click", closeSidebarFn);
 sidebarOverlay.addEventListener("click", (e) => {
   if (e.target === sidebarOverlay && !isDesktop) closeSidebarFn();
-});
-
-// Keep the current session marked as seen when the tab becomes visible again
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible" || !currentSessionId) return;
-  const session = getCurrentSession();
-  if (markSessionSeen(session)) {
-    refreshSessionAttentionUi(currentSessionId);
-  }
 });
 
 // ---- New Session ----

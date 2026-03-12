@@ -6,13 +6,9 @@ function sendMessage(existingRequestId) {
 
   const requestId = existingRequestId || createRequestId();
   const sessionId = currentSessionId;
+  const queuedImages = pendingImages.slice();
 
-  // Protect the message: save to localStorage before anything else
-  const pendingTimestamp = savePendingMessage(text, requestId);
-  refreshSessionAttentionUi(sessionId);
-
-  // Render optimistic bubble BEFORE revoking image URLs
-  renderOptimisticMessage(text, pendingImages, pendingTimestamp);
+  renderOptimisticMessage(text, queuedImages, Date.now());
 
   const msg = { action: "send", text: text || "(image)" };
   msg.requestId = requestId;
@@ -25,31 +21,25 @@ function sendMessage(existingRequestId) {
       msg.thinking = thinkingEnabled;
     }
   }
-  if (pendingImages.length > 0) {
-    msg.images = pendingImages.map((img) => ({
+  if (queuedImages.length > 0) {
+    msg.images = queuedImages.map((img) => ({
       data: img.data,
       mimeType: img.mimeType,
     }));
-    pendingImages.forEach((img) => URL.revokeObjectURL(img.objectUrl));
-    pendingImages = [];
-    renderImagePreviews();
   }
-  void dispatchAction(msg).then((ok) => {
-    const changed = finishSessionSendAttempt(sessionId, ok);
-    if (!ok && sessionId === currentSessionId) {
-      clearOptimisticMessage();
-      const pending = getPendingMessage(sessionId);
-      if (pending) {
-        renderPendingRecovery(pending);
-      }
-    }
-    if (changed || !ok) {
-      refreshSessionAttentionUi(sessionId);
-    }
-  });
   msgInput.value = "";
   clearDraft();
+  pendingImages = [];
+  renderImagePreviews();
   autoResizeInput();
+  void dispatchAction(msg).then((ok) => {
+    if (ok) {
+      clearOptimisticMessage();
+      releaseImageObjectUrls(queuedImages);
+      return;
+    }
+    restoreFailedSendState(sessionId, text, queuedImages);
+  });
 }
 
 cancelBtn.addEventListener("click", () => dispatchAction({ action: "cancel" }));
@@ -265,27 +255,35 @@ msgInput.addEventListener("input", () => {
 // Set initial height
 requestAnimationFrame(() => restoreSavedInputHeight());
 
-// ---- Pending message protection ----
-// Saves sent message to localStorage until server confirms receipt.
-// Prevents message loss on refresh, network failure, or server crash.
-function savePendingMessage(text, requestId, deliveryState = "sending") {
-  if (!currentSessionId) return;
-  const timestamp = Date.now();
-  writePendingMessage(currentSessionId, {
-    text,
-    requestId,
-    timestamp,
-    deliveryState,
-  });
-  return timestamp;
+function releaseImageObjectUrls(images = []) {
+  for (const image of images) {
+    if (image?.objectUrl) {
+      URL.revokeObjectURL(image.objectUrl);
+    }
+  }
 }
-function clearPendingMessage(sessionId) {
-  const targetId = sessionId || currentSessionId;
-  if (!targetId) return false;
-  return removePendingMessage(targetId);
-}
-function getPendingMessage(sessionId) {
-  return readPendingMessage(sessionId || currentSessionId);
+
+function restoreFailedSendState(sessionId, text, images) {
+  clearOptimisticMessage();
+  if (sessionId !== currentSessionId) {
+    releaseImageObjectUrls(images);
+    return;
+  }
+
+  if (!msgInput.value.trim() && text) {
+    msgInput.value = text;
+    autoResizeInput();
+    saveDraft();
+  }
+
+  if (pendingImages.length === 0 && images.length > 0) {
+    pendingImages = images;
+    renderImagePreviews();
+  } else {
+    releaseImageObjectUrls(images);
+  }
+
+  msgInput.focus();
 }
 
 function renderOptimisticMessage(text, images, timestamp = Date.now()) {
@@ -327,106 +325,6 @@ function renderOptimisticMessage(text, images, timestamp = Date.now()) {
 function clearOptimisticMessage() {
   const prev = document.getElementById("optimistic-msg");
   if (prev) prev.remove();
-}
-
-function renderPendingRecovery(pending) {
-  document.getElementById("pending-msg-recovery")?.remove();
-  const wrap = document.createElement("div");
-  wrap.className = "msg-user";
-  wrap.id = "pending-msg-recovery";
-  const bubble = document.createElement("div");
-  bubble.className = "msg-user-bubble msg-failed";
-
-  if (pending.text) {
-    const span = document.createElement("span");
-    span.textContent = pending.text;
-    bubble.appendChild(span);
-  }
-
-  appendMessageTimestamp(bubble, pending.timestamp, "msg-user-time");
-
-  const actions = document.createElement("div");
-  actions.className = "msg-failed-actions";
-
-  const retryBtn = document.createElement("button");
-  retryBtn.textContent = "Resend";
-  retryBtn.className = "msg-retry-btn";
-  retryBtn.onclick = () => {
-    wrap.remove();
-    const changed = clearPendingMessage();
-    if (changed) {
-      refreshSessionAttentionUi();
-    }
-    msgInput.value = pending.text;
-    sendMessage(pending.requestId);
-  };
-
-  const editBtn = document.createElement("button");
-  editBtn.textContent = "Edit";
-  editBtn.className = "msg-edit-btn";
-  editBtn.onclick = () => {
-    msgInput.value = pending.text;
-    autoResizeInput();
-    wrap.remove();
-    const changed = clearPendingMessage();
-    if (changed) {
-      refreshSessionAttentionUi();
-    }
-    msgInput.focus();
-  };
-
-  const discardBtn = document.createElement("button");
-  discardBtn.textContent = "Discard";
-  discardBtn.className = "msg-discard-btn";
-  discardBtn.onclick = () => {
-    wrap.remove();
-    const changed = clearPendingMessage();
-    if (changed) {
-      refreshSessionAttentionUi();
-    }
-  };
-
-  actions.appendChild(retryBtn);
-  actions.appendChild(editBtn);
-  actions.appendChild(discardBtn);
-  bubble.appendChild(actions);
-
-  wrap.appendChild(bubble);
-  messagesInner.appendChild(wrap);
-  scrollToBottom();
-}
-
-function checkPendingMessage(historyEvents) {
-  const pending = getPendingMessage();
-  if (!pending) return;
-
-  // Check if the pending message already exists in history
-  // (server received it but client didn't get confirmation before refresh)
-  const lastUserMsg = [...historyEvents]
-    .reverse()
-    .find((e) => e.type === "message" && e.role === "user");
-  if (
-    lastUserMsg &&
-    ((pending.requestId && lastUserMsg.requestId === pending.requestId) ||
-      (lastUserMsg.content === pending.text &&
-        lastUserMsg.timestamp >= pending.timestamp - 5000))
-  ) {
-    const changed = clearPendingMessage();
-    if (changed) {
-      refreshSessionAttentionUi();
-    }
-    return;
-  }
-
-  if (shouldKeepPendingMessagePending(pending, getCurrentSession())) {
-    return;
-  }
-
-  markSessionSendFailed(currentSessionId);
-  refreshSessionAttentionUi();
-
-  // Show the pending message with recovery actions
-  renderPendingRecovery(getPendingMessage() || pending);
 }
 
 // ---- Sidebar tabs ----

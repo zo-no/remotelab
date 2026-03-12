@@ -2,8 +2,82 @@
 
 const buildInfo = window.__REMOTELAB_BUILD__ || {};
 const buildAssetVersion = buildInfo.assetVersion || "dev";
+const BUILD_INFO_ENDPOINT = "/api/build-info";
+const BUILD_REFRESH_CHECK_INTERVAL_MS = 4000;
 
 console.info("RemoteLab build", buildInfo.title || buildAssetVersion);
+
+let buildRefreshCheckPromise = null;
+let lastBuildRefreshCheckAt = 0;
+let buildRefreshScheduled = false;
+
+async function fetchLatestBuildInfo() {
+  const res = await fetch(BUILD_INFO_ENDPOINT, {
+    cache: "no-store",
+    headers: {
+      "Cache-Control": "no-cache",
+      Pragma: "no-cache",
+    },
+  });
+  if (!res.ok) throw new Error(`Build info request failed (${res.status})`);
+  return res.json();
+}
+
+function reloadForFreshBuild(nextBuildInfo) {
+  if (buildRefreshScheduled) return;
+  buildRefreshScheduled = true;
+  console.info(
+    "RemoteLab frontend updated; reloading",
+    nextBuildInfo?.assetVersion || "unknown",
+  );
+  window.location.reload();
+}
+
+async function checkForUpdatedBuild({ force = false } = {}) {
+  if (buildRefreshScheduled) return false;
+  const now = Date.now();
+  if (!force && now - lastBuildRefreshCheckAt < BUILD_REFRESH_CHECK_INTERVAL_MS) {
+    return false;
+  }
+  if (buildRefreshCheckPromise) return buildRefreshCheckPromise;
+
+  lastBuildRefreshCheckAt = now;
+  buildRefreshCheckPromise = (async () => {
+    try {
+      const latestBuildInfo = await fetchLatestBuildInfo();
+      if (
+        latestBuildInfo?.assetVersion &&
+        latestBuildInfo.assetVersion !== buildAssetVersion
+      ) {
+        reloadForFreshBuild(latestBuildInfo);
+        return true;
+      }
+    } catch (error) {
+      console.debug?.("RemoteLab build check skipped", error?.message || error);
+    } finally {
+      buildRefreshCheckPromise = null;
+    }
+    return false;
+  })();
+
+  return buildRefreshCheckPromise;
+}
+
+window.addEventListener("pageshow", () => {
+  void checkForUpdatedBuild({ force: true });
+});
+
+window.addEventListener("focus", () => {
+  if (document.visibilityState === "visible") {
+    void checkForUpdatedBuild();
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    void checkForUpdatedBuild();
+  }
+});
 
 // ---- Elements ----
 const menuBtn = document.getElementById("menuBtn");
@@ -74,9 +148,7 @@ let pendingImages = [];
 const ACTIVE_SESSION_STORAGE_KEY = "activeSessionId";
 const ACTIVE_SIDEBAR_TAB_STORAGE_KEY = "activeSidebarTab";
 const ACTIVE_APP_FILTER_STORAGE_KEY = "activeAppFilter";
-const SESSION_SEEN_VERSIONS_STORAGE_KEY = "sessionSeenVersions";
 const LEGACY_SESSION_SEND_FAILURES_STORAGE_KEY = "sessionSendFailures";
-const PENDING_MESSAGE_STORAGE_PREFIX = "pending_msg_";
 const APP_FILTER_ALL_VALUE = "__all__";
 const DEFAULT_APP_ID = "chat";
 const DEFAULT_APP_NAME = "Chat";
@@ -92,12 +164,9 @@ let reconnectTimer = null;
 let sessions = [];
 let appCatalog = [];
 let availableApps = [];
+let hasLoadedSessions = false;
 let visitorMode = false;
 let visitorSessionId = null;
-let sessionSeenVersions = readStoredJsonValue(
-  SESSION_SEEN_VERSIONS_STORAGE_KEY,
-  {},
-);
 let currentSessionRefreshPromise = null;
 let pendingCurrentSessionRefresh = false;
 let hasSeenWsOpen = false;
@@ -179,19 +248,35 @@ function createEmptySessionStatus() {
   };
 }
 
-function normalizePendingMessageRecord(value) {
-  if (typeof sessionStateModel.normalizePendingMessage === "function") {
-    return sessionStateModel.normalizePendingMessage(value);
+function getSessionActivity(session) {
+  if (typeof sessionStateModel.normalizeSessionActivity === "function") {
+    return sessionStateModel.normalizeSessionActivity(session);
   }
-  if (!value || typeof value !== "object") return null;
   return {
-    text: typeof value.text === "string" ? value.text : "",
-    requestId: typeof value.requestId === "string" ? value.requestId : "",
-    timestamp: Number.isFinite(value.timestamp) ? value.timestamp : Date.now(),
-    deliveryState:
-      value.deliveryState === "accepted" || value.deliveryState === "failed"
-        ? value.deliveryState
-        : "sending",
+    run: {
+      state: session?.status === "interrupted"
+        ? "interrupted"
+        : session?.status === "running"
+          ? "running"
+          : "idle",
+      phase: null,
+      runId: null,
+      cancelRequested: false,
+      recoverable: session?.recoverable === true,
+    },
+    queue: {
+      state: (session?.queuedMessageCount || 0) > 0 ? "queued" : "idle",
+      count: Number.isInteger(session?.queuedMessageCount) ? session.queuedMessageCount : 0,
+    },
+    rename: {
+      state: session?.renameState === "pending" || session?.renameState === "failed"
+        ? session.renameState
+        : "idle",
+      error: session?.renameError || "",
+    },
+    compact: {
+      state: session?.pendingCompact === true ? "pending" : "idle",
+    },
   };
 }
 
@@ -199,135 +284,19 @@ function isSessionBusy(session) {
   if (typeof sessionStateModel.isSessionBusy === "function") {
     return sessionStateModel.isSessionBusy(session);
   }
-  return session?.status === "running" || session?.pendingCompact === true;
+  const activity = getSessionActivity(session);
+  return activity.run.state === "running"
+    || activity.queue.state === "queued"
+    || activity.compact.state === "pending";
 }
 
-function shouldKeepPendingMessagePending(message, session) {
-  if (typeof sessionStateModel.shouldKeepPendingMessagePending === "function") {
-    return sessionStateModel.shouldKeepPendingMessagePending(message, session);
-  }
-  const pending = normalizePendingMessageRecord(message);
-  return !!pending && pending.deliveryState !== "failed" && isSessionBusy(session);
-}
-
-function hasSessionPendingDelivery(sessionId) {
-  const deliveryState = readPendingMessage(sessionId)?.deliveryState;
-  return deliveryState === "sending" || deliveryState === "accepted";
-}
-
-function getPendingMessageStorageKey(sessionId) {
-  if (!sessionId) return null;
-  return `${PENDING_MESSAGE_STORAGE_PREFIX}${sessionId}`;
-}
-
-function readPendingMessage(sessionId) {
-  const key = getPendingMessageStorageKey(sessionId);
-  if (!key) return null;
-  return normalizePendingMessageRecord(readStoredJsonValue(key, null));
-}
-
-function writePendingMessage(sessionId, message) {
-  const key = getPendingMessageStorageKey(sessionId);
-  const normalized = normalizePendingMessageRecord(message);
-  if (!key || !normalized) return false;
-  writeStoredJsonValue(key, normalized);
-  return true;
-}
-
-function removePendingMessage(sessionId) {
-  const key = getPendingMessageStorageKey(sessionId);
-  if (!key) return false;
-  try {
-    const existed = localStorage.getItem(key) !== null;
-    localStorage.removeItem(key);
-    return existed;
-  } catch {
-    return false;
-  }
-}
-
-function setPendingMessageDeliveryState(sessionId, deliveryState) {
-  const pending = readPendingMessage(sessionId);
-  if (!pending || pending.deliveryState === deliveryState) return false;
-  return writePendingMessage(sessionId, {
-    ...pending,
-    deliveryState,
-  });
-}
-
-function persistSessionSeenVersions() {
-  writeStoredJsonValue(SESSION_SEEN_VERSIONS_STORAGE_KEY, sessionSeenVersions);
-}
-
-function getSessionSeenVersion(session) {
-  const stamp = session?.updatedAt || session?.created || "";
-  return typeof stamp === "string" ? stamp : String(stamp || "");
-}
-
-function isSessionRead(session) {
-  if (session?.status !== "done" || !session?.id) return false;
-  const version = getSessionSeenVersion(session);
-  if (!version) return true;
-  return sessionSeenVersions[session.id] === version;
-}
-
-function markSessionSeen(session) {
-  if (!session?.id || document.visibilityState !== "visible") return false;
-  const version = getSessionSeenVersion(session);
-  if (!version || sessionSeenVersions[session.id] === version) return false;
-  sessionSeenVersions = { ...sessionSeenVersions, [session.id]: version };
-  persistSessionSeenVersions();
-  return true;
-}
-
-function pruneStoredSessionAttentionState(sessionIds) {
-  const knownIds = new Set(
-    Array.isArray(sessionIds) ? sessionIds.filter(Boolean) : [],
-  );
-  let seenChanged = false;
-  for (const sessionId of Object.keys(sessionSeenVersions)) {
-    if (!knownIds.has(sessionId)) {
-      delete sessionSeenVersions[sessionId];
-      seenChanged = true;
-    }
-  }
-  if (seenChanged) {
-    persistSessionSeenVersions();
-  }
-
-  const orphanedPendingKeys = [];
-  try {
-    for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index);
-      if (!key || !key.startsWith(PENDING_MESSAGE_STORAGE_PREFIX)) continue;
-      const sessionId = key.slice(PENDING_MESSAGE_STORAGE_PREFIX.length);
-      if (!knownIds.has(sessionId)) {
-        orphanedPendingKeys.push(key);
-      }
-    }
-    for (const key of orphanedPendingKeys) {
-      localStorage.removeItem(key);
-    }
-  } catch {
-    // Best-effort storage cleanup only.
-  }
-}
-
-function markSessionSendFailed(sessionId) {
-  return setPendingMessageDeliveryState(sessionId, "failed");
-}
-
-function finishSessionSendAttempt(sessionId, ok) {
-  return ok ? false : markSessionSendFailed(sessionId);
+function pruneStoredSessionAttentionState() {
+  return false;
 }
 
 function getSessionStatusSummary(session, { includeToolFallback = false } = {}) {
   if (typeof sessionStateModel.getSessionStatusSummary === "function") {
-    return sessionStateModel.getSessionStatusSummary(session, {
-      includeToolFallback,
-      hasPendingDelivery: hasSessionPendingDelivery(session?.id),
-      isRead: isSessionRead,
-    });
+    return sessionStateModel.getSessionStatusSummary(session, { includeToolFallback });
   }
 
   const primary = session?.tool && includeToolFallback
@@ -358,12 +327,7 @@ function refreshSessionAttentionUi(sessionId = currentSessionId) {
     && typeof getCurrentSession === "function"
   ) {
     const session = getCurrentSession();
-    updateStatus(
-      "connected",
-      session?.status || "idle",
-      session?.renameState,
-      session?.archived === true,
-    );
+    updateStatus("connected", session);
   }
 }
 
@@ -597,11 +561,19 @@ function refreshAppCatalog(apps = availableApps) {
   }
 
   appCatalog = [...next.values()].filter(Boolean).sort(sortAppCatalogEntries);
-  if (activeAppFilter !== APP_FILTER_ALL_VALUE && !appCatalog.some((app) => app.id === activeAppFilter)) {
+  if (
+    hasLoadedSessions
+    && activeAppFilter !== APP_FILTER_ALL_VALUE
+    && !appCatalog.some((app) => app.id === activeAppFilter)
+  ) {
     activeAppFilter = APP_FILTER_ALL_VALUE;
     persistActiveAppFilter(activeAppFilter);
   }
-  if (!appCatalog.some((app) => app.id !== DEFAULT_APP_ID) && activeAppFilter !== APP_FILTER_ALL_VALUE) {
+  if (
+    hasLoadedSessions
+    && !appCatalog.some((app) => app.id !== DEFAULT_APP_ID)
+    && activeAppFilter !== APP_FILTER_ALL_VALUE
+  ) {
     activeAppFilter = APP_FILTER_ALL_VALUE;
     persistActiveAppFilter(activeAppFilter);
   }
@@ -627,11 +599,15 @@ function getEffectiveSessionAppId(session) {
   return normalizeAppId(session?.appId, { fallbackDefault: true });
 }
 
-function matchesCurrentAppFilter(session) {
+function matchesAppFilter(session, appFilter = activeAppFilter) {
   return (
-    activeAppFilter === APP_FILTER_ALL_VALUE
-    || getEffectiveSessionAppId(session) === activeAppFilter
+    appFilter === APP_FILTER_ALL_VALUE
+    || getEffectiveSessionAppId(session) === appFilter
   );
+}
+
+function matchesCurrentAppFilter(session) {
+  return matchesAppFilter(session, activeAppFilter);
 }
 
 function getVisibleActiveSessions() {
@@ -750,6 +726,16 @@ function getLatestActiveSession() {
   return sessions.find((session) => !session.archived) || null;
 }
 
+function getLatestSessionForAppFilter(appFilter = activeAppFilter) {
+  return sessions.find((session) => matchesAppFilter(session, appFilter)) || null;
+}
+
+function getLatestActiveSessionForAppFilter(appFilter = activeAppFilter) {
+  return sessions.find(
+    (session) => !session.archived && matchesAppFilter(session, appFilter),
+  ) || null;
+}
+
 function resolveRestoreTargetSession() {
   if (pendingNavigationState?.sessionId) {
     const requested = sessions.find(
@@ -759,7 +745,14 @@ function resolveRestoreTargetSession() {
   }
   if (currentSessionId) {
     const current = sessions.find((session) => session.id === currentSessionId);
-    if (current) return current;
+    if (current && matchesAppFilter(current)) return current;
+  }
+  if (activeAppFilter !== APP_FILTER_ALL_VALUE) {
+    return (
+      getLatestActiveSessionForAppFilter(activeAppFilter)
+      || getLatestSessionForAppFilter(activeAppFilter)
+      || null
+    );
   }
   return getLatestActiveSession() || getLatestSession();
 }

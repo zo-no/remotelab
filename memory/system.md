@@ -200,6 +200,11 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - A stronger steady-state pattern is: HTTP remains the source of truth, hot GET routes support ETag / `If-None-Match` revalidation, and WebSocket is reduced to a push-only invalidation hint.
 - In that model, correctness still does not depend on socket-only payloads, but convergence without realtime comes from manual refresh or the next HTTP interaction rather than a hidden polling loop.
 
+### PWA Frontend Freshness Needs Dynamic Asset Fingerprints (2026-03-12)
+- Reading HTML templates from disk on every request is not enough if the page injects a build or asset version that was frozen when the server process started.
+- For RemoteLab's no-build-step frontend, compute a page asset fingerprint from the latest mtime under `templates/` and `static/`, and inject that per request into HTML so script, icon, manifest, and service-worker URLs change as soon as frontend files change.
+- In standalone/PWA mode, also let the loaded shell poll a tiny no-store build-info endpoint on `pageshow` / `visibilitychange`; if the injected asset version differs from the latest one, reload the page so backgrounded apps do not stay stuck on stale JS forever.
+
 ### Detached Run State Must Be Read Fresh Across Processes (2026-03-10)
 - `status.json` and `result.json` are shared mutable state between the chat-server control plane and detached runner sidecars, so process-local caches are not authoritative.
 - If `getRun()` serves a cached copy, the UI can stay stuck on `running` or `accepted` after the tool already finished, because spool normalization writes can overwrite fresher terminal state from another process.

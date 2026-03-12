@@ -14,7 +14,7 @@ function restoreOwnerSessionSelection() {
     syncBrowserState({ sessionId: null, tab: activeTab });
     showEmpty();
     restoreDraft();
-    updateStatus("connected", "idle");
+    updateStatus("connected");
     pendingNavigationState = null;
     return;
   }
@@ -205,15 +205,7 @@ function getEventRenderPlan(sessionId, events) {
 
 function reconcilePendingMessageState(event) {
   if (event?.type !== "message" || event.role !== "user") return;
-  const optimistic = document.getElementById("optimistic-msg");
-  if (optimistic) optimistic.remove();
-  const pending = getPendingMessage();
-  if (pending && (!pending.requestId || pending.requestId === event.requestId)) {
-    const changed = clearPendingMessage();
-    if (changed) {
-      refreshSessionAttentionUi();
-    }
-  }
+  document.getElementById("optimistic-msg")?.remove();
 }
 
 function normalizeSessionRecord(session, previous = null) {
@@ -228,9 +220,6 @@ function normalizeSessionRecord(session, previous = null) {
     } else {
       delete normalized.queuedMessages;
     }
-  }
-  if (typeof maybeUpdateSessionUnreadState === "function") {
-    maybeUpdateSessionUnreadState(normalized, previous);
   }
   return normalized;
 }
@@ -263,6 +252,7 @@ async function fetchSessionsList() {
   const data = await fetchJsonOrRedirect("/api/sessions");
   const previousMap = new Map(sessions.map((session) => [session.id, session]));
   sessions = (data.sessions || []).map((session) => normalizeSessionRecord(session, previousMap.get(session.id) || null));
+  hasLoadedSessions = true;
   sortSessionsInPlace();
   pruneStoredSessionAttentionState(sessions.map((session) => session.id));
   refreshAppCatalog();
@@ -284,11 +274,10 @@ function applyAttachedSessionState(id, session) {
   contextTokens.style.display = "none";
   compactBtn.style.display = "none";
   dropToolsBtn.style.display = "none";
-  markSessionSeen(session);
 
   const displayName = getSessionDisplayName(session);
   headerTitle.textContent = displayName;
-  updateStatus("connected", session?.status || "idle", session?.renameState, session?.archived === true);
+  updateStatus("connected", session);
   if (typeof renderQueuedMessagePanel === "function") {
     renderQueuedMessagePanel(session);
   }
@@ -351,7 +340,6 @@ async function fetchSessionEvents(sessionId) {
     } else if (events.length > 0 && shouldStickToBottom) {
       scrollToBottom();
     }
-    checkPendingMessage(events);
     return events;
   }
 
@@ -462,14 +450,7 @@ async function bootstrapViaHttp() {
     return;
   }
   await fetchSessionsList();
-  if (currentSessionId) {
-    await refreshCurrentSession();
-  } else {
-    const initialSession = getLatestActiveSession() || getLatestSession();
-    if (initialSession) {
-      attachSession(initialSession.id, initialSession);
-    }
-  }
+  restoreOwnerSessionSelection();
 }
 
 async function setupPushNotifications() {

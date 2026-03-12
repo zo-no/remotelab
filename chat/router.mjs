@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'fs/promises';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
-import { join, resolve, dirname, basename } from 'path';
+import { join, resolve, dirname, basename, extname, relative, isAbsolute, sep } from 'path';
 import { parse as parseUrl, fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
@@ -65,26 +65,32 @@ const staticDir = join(__dirname, '..', 'static');
 const packageJsonPath = join(__dirname, '..', 'package.json');
 
 const BUILD_INFO = loadBuildInfo();
+const pageBuildRoots = [
+  join(__dirname, '..', 'templates'),
+  staticDir,
+];
+let cachedPageBuildInfo = null;
 
-const staticMimeTypes = {
-  'manifest.json': 'application/manifest+json',
-  'favicon.ico': 'image/x-icon',
-  'icon.svg': 'image/svg+xml',
-  'apple-touch-icon.png': 'image/png',
-  'chat.js': 'application/javascript',
-  'chat/session-state-model.js': 'application/javascript',
-  'chat/bootstrap.js': 'application/javascript',
-  'chat/session-http.js': 'application/javascript',
-  'chat/tooling.js': 'application/javascript',
-  'chat/icons.js': 'application/javascript',
-  'chat/realtime.js': 'application/javascript',
-  'chat/ui.js': 'application/javascript',
-  'chat/compose.js': 'application/javascript',
-  'chat/init.js': 'application/javascript',
-  'marked.min.js': 'application/javascript',
-  'share.js': 'application/javascript',
-  'sw.js': 'application/javascript',
+const staticMimeTypesByExtension = {
+  '.css': 'text/css; charset=utf-8',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'application/javascript',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain; charset=utf-8',
+  '.ttf': 'font/ttf',
+  '.webmanifest': 'application/manifest+json',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
 };
+
+const staticDirResolved = resolve(staticDir);
 
 function loadBuildInfo() {
   let version = 'dev';
@@ -124,6 +130,112 @@ function renderPageTemplate(template, nonce, replacements = {}) {
     (output, [key, value]) => output.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value ?? '')),
     template,
   );
+}
+
+function buildTemplateReplacements(buildInfo) {
+  return {
+    ASSET_VERSION: buildInfo.assetVersion,
+    BUILD_LABEL: buildInfo.label,
+    BUILD_TITLE: buildInfo.title,
+    BUILD_JSON: serializeJsonForScript(buildInfo),
+  };
+}
+
+async function getLatestMtimeMs(path) {
+  const stat = await statOrNull(path);
+  if (!stat) return 0;
+
+  const ownMtime = Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0;
+  if (!stat.isDirectory()) return ownMtime;
+
+  let entries = [];
+  try {
+    entries = await readdir(path, { withFileTypes: true });
+  } catch {
+    return ownMtime;
+  }
+
+  const nestedTimes = await Promise.all(
+    entries
+      .filter((entry) => !entry.name.startsWith('.'))
+      .map((entry) => getLatestMtimeMs(join(path, entry.name))),
+  );
+
+  return Math.max(ownMtime, ...nestedTimes, 0);
+}
+
+function sanitizeAssetVersion(value) {
+  return String(value || 'dev').replace(/[^a-zA-Z0-9._-]+/g, '-');
+}
+
+async function getPageBuildInfo() {
+  const now = Date.now();
+  if (cachedPageBuildInfo && now - cachedPageBuildInfo.cachedAt < 250) {
+    return cachedPageBuildInfo.info;
+  }
+
+  let latestMtimeMs = 0;
+  for (const root of pageBuildRoots) {
+    latestMtimeMs = Math.max(latestMtimeMs, await getLatestMtimeMs(root));
+  }
+
+  const frontendFingerprint = latestMtimeMs > 0
+    ? Math.round(latestMtimeMs).toString(36)
+    : now.toString(36);
+  const assetVersion = sanitizeAssetVersion([
+    BUILD_INFO.version,
+    BUILD_INFO.commit || 'working',
+    frontendFingerprint,
+  ].filter(Boolean).join('-'));
+  const info = {
+    ...BUILD_INFO,
+    assetVersion,
+    frontendFingerprint,
+  };
+
+  cachedPageBuildInfo = {
+    cachedAt: now,
+    info,
+  };
+  return info;
+}
+
+async function resolveStaticAsset(pathname) {
+  if (!pathname.startsWith('/')) return null;
+
+  const staticName = pathname.slice(1);
+  if (!staticName || staticName.endsWith('/')) return null;
+
+  const segments = staticName.split('/').filter(Boolean);
+  if (segments.length === 0 || segments.some((segment) => segment.startsWith('.'))) {
+    return null;
+  }
+
+  const filepath = resolve(staticDirResolved, staticName);
+  const relativePath = relative(staticDirResolved, filepath);
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    return null;
+  }
+  if (relativePath.split(sep).some((segment) => segment === '..' || segment.startsWith('.'))) {
+    return null;
+  }
+
+  const stat = await statOrNull(filepath);
+  if (!stat?.isFile()) return null;
+
+  const filename = basename(filepath).toLowerCase();
+  const extension = extname(filename);
+  const contentType = filename === 'manifest.json'
+    ? 'application/manifest+json'
+    : staticMimeTypesByExtension[extension] || 'application/octet-stream';
+
+  return {
+    filepath,
+    cacheControl: filename === 'sw.js'
+      ? 'no-store, max-age=0, must-revalidate'
+      : 'public, no-cache, max-age=0, must-revalidate',
+    contentType,
+  };
 }
 
 function buildHeaders(headers = {}) {
@@ -255,6 +367,7 @@ async function writeSnapshotPage(res, nonce, snapshot, {
 } = {}) {
   setShareSnapshotHeaders(res, nonce);
   try {
+    const pageBuildInfo = await getPageBuildInfo();
     const sharePage = await readFile(shareTemplatePath, 'utf8');
     res.writeHead(200, buildHeaders({
       'Content-Type': 'text/html; charset=utf-8',
@@ -262,6 +375,7 @@ async function writeSnapshotPage(res, nonce, snapshot, {
       ...headers,
     }));
     res.end(renderPageTemplate(sharePage, nonce, {
+      ...buildTemplateReplacements(pageBuildInfo),
       SNAPSHOT_JSON: serializeJsonForScript(snapshot),
     }));
   } catch {
@@ -300,14 +414,12 @@ export async function handleRequest(req, res) {
   const pathname = parsedUrl.pathname;
 
   // Static assets (read from disk each time for hot-reload)
-  const staticName = pathname.slice(1); // strip leading /
-  if (staticMimeTypes[staticName]) {
+  const staticAsset = await resolveStaticAsset(pathname);
+  if (staticAsset) {
     try {
-      const content = await readFile(join(staticDir, staticName));
-      writeFileCached(req, res, staticMimeTypes[staticName], content, {
-        cacheControl: staticName === 'sw.js'
-          ? 'no-store, max-age=0, must-revalidate'
-          : 'public, no-cache, max-age=0, must-revalidate',
+      const content = await readFile(staticAsset.filepath);
+      writeFileCached(req, res, staticAsset.contentType, content, {
+        cacheControl: staticAsset.cacheControl,
       });
     } catch {
       res.writeHead(404, buildHeaders({ 'Content-Type': 'text/plain' }));
@@ -381,6 +493,7 @@ export async function handleRequest(req, res) {
     const hasError = parsedUrl.query.error === '1';
     const mode = parsedUrl.query.mode === 'token' ? 'token' : 'pw';
     let loginHtml;
+    const pageBuildInfo = await getPageBuildInfo();
     try { loginHtml = await readFile(loginTemplatePath, 'utf8'); } catch { loginHtml = '<h1>Login template missing</h1>'; }
     res.writeHead(200, buildHeaders({
       'Content-Type': 'text/html; charset=utf-8',
@@ -389,6 +502,7 @@ export async function handleRequest(req, res) {
       'Expires': '0',
     }));
     res.end(renderPageTemplate(loginHtml, nonce, {
+      ...buildTemplateReplacements(pageBuildInfo),
       ERROR_CLASS: hasError ? '' : 'hidden',
       MODE: mode,
     }));
@@ -459,6 +573,18 @@ export async function handleRequest(req, res) {
     await writeSnapshotPage(res, nonce, snapshot, {
       cacheControl: 'public, max-age=31536000, immutable',
       failureText: 'Failed to load share page',
+    });
+    return;
+  }
+
+  if (pathname === '/api/build-info' && req.method === 'GET') {
+    const pageBuildInfo = await getPageBuildInfo();
+    writeJsonCached(req, res, pageBuildInfo, {
+      cacheControl: 'no-store, max-age=0, must-revalidate',
+      vary: '',
+      headers: {
+        'X-RemoteLab-Asset-Version': pageBuildInfo.assetVersion,
+      },
     });
     return;
   }
@@ -1188,6 +1314,7 @@ export async function handleRequest(req, res) {
   // Main page (chat UI) — read from disk each time for hot-reload
   if (pathname === '/') {
     try {
+      const pageBuildInfo = await getPageBuildInfo();
       const chatPage = await readFile(chatTemplatePath, 'utf8');
       const refreshedCookie = await refreshAuthSession(req);
       res.writeHead(200, buildHeaders({
@@ -1197,7 +1324,7 @@ export async function handleRequest(req, res) {
         'Expires': '0',
         ...(refreshedCookie ? { 'Set-Cookie': refreshedCookie } : {}),
       }));
-      res.end(renderPageTemplate(chatPage, nonce));
+      res.end(renderPageTemplate(chatPage, nonce, buildTemplateReplacements(pageBuildInfo)));
     } catch {
       res.writeHead(500, buildHeaders({ 'Content-Type': 'text/plain' }));
       res.end('Failed to load chat page');
