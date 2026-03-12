@@ -15,6 +15,7 @@ const {
   createSession,
   getHistory,
   killAll,
+  renameSession,
   saveSessionAsTemplate,
   submitHttpMessage,
 } = await import('./chat/session-manager.mjs');
@@ -74,6 +75,7 @@ try {
   assert.equal(app.name, 'Warmed subtask');
   assert.equal(app.tool, 'missing-tool');
   assert.equal(app.systemPrompt, 'Stay inside the saved subtask template.');
+  assert.ok(app.templateContext?.sourceSessionUpdatedAt, 'saved templates should track the source session freshness timestamp');
   assert.match(app.templateContext?.content || '', /This template covers the warmed subtask context\./);
   assert.match(app.templateContext?.content || '', /ls -la/);
 
@@ -90,6 +92,7 @@ try {
   const templateEvent = targetHistory.find((event) => event.type === 'template_context');
   assert.ok(templateEvent, 'applying a template should append a hidden template context event');
   assert.equal(templateEvent.templateName, 'Warmed subtask');
+  assert.equal(templateEvent.templateFreshness, 'current', 'fresh templates should record a current freshness state');
   assert.match(templateEvent.content, /This template covers the warmed subtask context\./);
 
   const outcome = await submitHttpMessage(target.id, 'Continue from the saved base.', [], {
@@ -100,6 +103,28 @@ try {
   assert.match(manifest?.prompt || '', /Applied template context: Warmed subtask/);
   assert.match(manifest?.prompt || '', /This template covers the warmed subtask context\./);
   assert.match(manifest?.prompt || '', /Stay inside the saved subtask template\./);
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const renamedSource = await renameSession(source.id, 'Source template session refreshed');
+  assert.equal(renamedSource?.name, 'Source template session refreshed', 'source session refresh should update its metadata timestamp');
+
+  const staleTarget = await createSession(workspace, 'codex', 'Fresh session after drift');
+  const staleApplied = await applyAppTemplateToSession(staleTarget.id, app.id);
+  assert.ok(staleApplied, 'stale templates should still be applicable');
+
+  const staleHistory = await getHistory(staleTarget.id);
+  const staleTemplateEvent = staleHistory.find((event) => event.type === 'template_context');
+  assert.ok(staleTemplateEvent, 'stale template application should still create a template context event');
+  assert.equal(staleTemplateEvent.templateFreshness, 'stale', 'template application should flag stale snapshots');
+
+  const staleOutcome = await submitHttpMessage(staleTarget.id, 'Continue, but be careful about drift.', [], {
+    requestId: 'req_template_apply_stale',
+    queueIfBusy: false,
+  });
+  const staleManifest = await getRunManifest(staleOutcome.run.id);
+  assert.match(staleManifest?.prompt || '', /Template freshness warning/);
+  assert.match(staleManifest?.prompt || '', /historical bootstrap context only/);
+  assert.match(staleManifest?.prompt || '', /Re-read current files and notes before making changes\./);
 
   console.log('test-session-template-apps: ok');
 } finally {

@@ -345,6 +345,7 @@ Key fields include:
 - `skills`
 - `tool`
 - `shareToken`
+- optional `templateContext` snapshot metadata, including source-session freshness timestamps when the App was saved from a prior session
 
 ### 6.6 Share snapshot
 

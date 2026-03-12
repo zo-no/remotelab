@@ -45,6 +45,9 @@ function normalizeTemplateContext(templateContext) {
     sourceSessionName: typeof templateContext?.sourceSessionName === 'string'
       ? templateContext.sourceSessionName.trim()
       : '',
+    sourceSessionUpdatedAt: typeof templateContext?.sourceSessionUpdatedAt === 'string'
+      ? templateContext.sourceSessionUpdatedAt.trim()
+      : '',
     updatedAt: typeof templateContext?.updatedAt === 'string' && templateContext.updatedAt.trim()
       ? templateContext.updatedAt.trim()
       : new Date().toISOString(),

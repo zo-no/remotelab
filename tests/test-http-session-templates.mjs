@@ -200,11 +200,29 @@ try {
     const events = await request(port, 'GET', `/api/sessions/${target.id}/events`);
     const templateEvent = (events.json.events || []).find((event) => event.type === 'template_context');
     assert.ok(templateEvent, 'applying a template should append a hidden template event');
+    assert.equal(templateEvent.templateFreshness, 'current', 'fresh template application should expose freshness metadata');
 
     const body = await request(port, 'GET', `/api/sessions/${target.id}/events/${templateEvent.seq}/body`);
     assert.equal(body.status, 200, 'template event body should be readable on demand');
     assert.match(body.json.body.value, /Generate the reusable template context/, 'saved template content should carry source session context');
     assert.match(body.json.body.value, /echo fake/, 'saved template content should preserve source tool work');
+
+    await sleep(20);
+    const renamed = await request(port, 'PATCH', `/api/sessions/${source.id}`, {
+      name: 'Template source refreshed',
+    });
+    assert.equal(renamed.status, 200, 'source session rename should update the freshness baseline');
+
+    const staleTarget = await createSession(port, 'Template stale target');
+    const staleApplied = await request(port, 'POST', `/api/sessions/${staleTarget.id}/apply-template`, {
+      appId: saved.json.app.id,
+    });
+    assert.equal(staleApplied.status, 200, 'stale template should still apply');
+
+    const staleEvents = await request(port, 'GET', `/api/sessions/${staleTarget.id}/events`);
+    const staleTemplateEvent = (staleEvents.json.events || []).find((event) => event.type === 'template_context');
+    assert.ok(staleTemplateEvent, 'stale template apply should append a template event');
+    assert.equal(staleTemplateEvent.templateFreshness, 'stale', 'stale template application should surface freshness drift');
 
     console.log('test-http-session-templates: ok');
   } finally {

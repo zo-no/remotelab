@@ -14,6 +14,7 @@ assert.match(context, /Template-Session-First Routing/);
 assert.match(context, /reusable template\/base session likely exists/);
 assert.match(context, /clean, comprehensive project-task context/);
 assert.match(context, /improve it or derive a better template\/base/);
+assert.match(context, /saved template context as bootstrap, not eternal truth/);
 assert.match(context, /fresh working child\/fork/);
 assert.match(context, /approximate the behavior by loading the best matching template context/);
 

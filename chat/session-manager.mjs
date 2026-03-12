@@ -22,6 +22,7 @@ import { triggerSessionLabelSuggestion } from './summarizer.mjs';
 import { sendCompletionPush } from './push.mjs';
 import { buildSystemContext } from './system-prompt.mjs';
 import {
+  buildTemplateFreshnessNotice,
   buildSessionContinuationContextFromBody,
   prepareSessionContinuationBody,
 } from './session-continuation.mjs';
@@ -937,6 +938,68 @@ function buildSavedTemplateContextContent(prepared) {
   return parts.join('\n\n---\n\n').trim();
 }
 
+function parseTimestampMs(value) {
+  const timestamp = Date.parse(typeof value === 'string' ? value : '');
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+async function resolveAppTemplateFreshness(app) {
+  const templateContext = app?.templateContext || null;
+  const sourceSessionId = typeof templateContext?.sourceSessionId === 'string'
+    ? templateContext.sourceSessionId.trim()
+    : '';
+  const templateUpdatedAt = typeof templateContext?.updatedAt === 'string'
+    ? templateContext.updatedAt.trim()
+    : '';
+  const savedFromSourceUpdatedAt = typeof templateContext?.sourceSessionUpdatedAt === 'string'
+    ? templateContext.sourceSessionUpdatedAt.trim()
+    : '';
+
+  if (!sourceSessionId) {
+    return {
+      templateFreshness: 'unknown',
+      sourceSessionId: '',
+      sourceSessionName: typeof templateContext?.sourceSessionName === 'string'
+        ? templateContext.sourceSessionName.trim()
+        : '',
+      templateUpdatedAt,
+      savedFromSourceUpdatedAt,
+      currentSourceUpdatedAt: '',
+    };
+  }
+
+  const sourceSession = await findSessionMeta(sourceSessionId);
+  if (!sourceSession) {
+    return {
+      templateFreshness: 'source_missing',
+      sourceSessionId,
+      sourceSessionName: typeof templateContext?.sourceSessionName === 'string'
+        ? templateContext.sourceSessionName.trim()
+        : '',
+      templateUpdatedAt,
+      savedFromSourceUpdatedAt,
+      currentSourceUpdatedAt: '',
+    };
+  }
+
+  const currentSourceUpdatedAt = typeof sourceSession.updatedAt === 'string' && sourceSession.updatedAt.trim()
+    ? sourceSession.updatedAt.trim()
+    : (typeof sourceSession.created === 'string' ? sourceSession.created.trim() : '');
+  const baselineMs = parseTimestampMs(savedFromSourceUpdatedAt || templateUpdatedAt);
+  const currentMs = parseTimestampMs(currentSourceUpdatedAt);
+
+  return {
+    templateFreshness: baselineMs > 0 && currentMs > baselineMs ? 'stale' : 'current',
+    sourceSessionId,
+    sourceSessionName: sourceSession.name || (typeof templateContext?.sourceSessionName === 'string'
+      ? templateContext.sourceSessionName.trim()
+      : ''),
+    templateUpdatedAt,
+    savedFromSourceUpdatedAt,
+    currentSourceUpdatedAt,
+  };
+}
+
 async function sessionHasTemplateContextEvent(sessionId) {
   const history = await loadHistory(sessionId, { includeBodies: false });
   return history.some((event) => event?.type === 'template_context');
@@ -1151,7 +1214,10 @@ function formatCompactionTemplateContext(evt) {
   const content = normalizeCompactionText(evt.content);
   if (!content) return '';
   const name = normalizeCompactionText(evt.templateName) || 'template';
-  return `[Applied template context: ${name}]\n${content}`;
+  const freshnessNotice = buildTemplateFreshnessNotice(evt);
+  return freshnessNotice
+    ? `[Applied template context: ${name}]\n${freshnessNotice}\n\n${content}`
+    : `[Applied template context: ${name}]\n${content}`;
 }
 
 function formatCompactionStatus(evt) {
@@ -2269,6 +2335,7 @@ export async function saveSessionAsTemplate(sessionId, name = '') {
           content: templateContent,
           sourceSessionId: session.id,
           sourceSessionName: session.name || '',
+          sourceSessionUpdatedAt: session.updatedAt || session.created || nowIso(),
           updatedAt: nowIso(),
         }
       : null,
@@ -2293,6 +2360,8 @@ export async function applyAppTemplateToSession(sessionId, appId) {
     return null;
   }
 
+  const templateFreshness = await resolveAppTemplateFreshness(app);
+
   const appliedAt = nowIso();
   const updatedSession = await applySessionAppMetadata(sessionId, app, {
     templateAppId: app.id,
@@ -2307,6 +2376,7 @@ export async function applyAppTemplateToSession(sessionId, appId) {
       templateName: app.name || 'Template',
       appId: app.id,
       content: app.templateContext.content,
+      ...templateFreshness,
       timestamp: Date.now(),
     });
     await clearForkContext(sessionId);

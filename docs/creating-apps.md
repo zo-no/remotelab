@@ -50,13 +50,15 @@ In any regular session, you can say:
 
 1. **Welcome message should be actionable** — tell the visitor exactly what to do first
 2. **System instructions should be specific** — "correct grammar gently" is better than "be helpful"
-3. **Test it yourself** — click the share link in a private/incognito window before sharing
-4. **Keep it focused** — one App = one workflow. Don't try to make a Swiss army knife
+3. **Treat saved templates as snapshots** — if you reuse a session as a template, refresh it when the underlying project context changes a lot
+4. **Test it yourself** — click the share link in a private/incognito window before sharing
+5. **Keep it focused** — one App = one workflow. Don't try to make a Swiss army knife
 
 ## Technical Details (for developers)
 
 - Apps are stored in `~/.config/remotelab/apps.json`
 - Each App has a unique `shareToken` used in the URL
+- Saved session templates carry source-session freshness metadata so RemoteLab can warn the model when the original source session has drifted since capture
 - Visitor sessions are isolated — visitors can't see each other's conversations
 - The owner's session list hides visitor sessions by default
 - Share-link visitors are restricted to their assigned WebSocket session; owner APIs for sessions, tools, models, filesystem browsing, settings, sidebar state, and push registration stay unavailable to them
