@@ -71,10 +71,6 @@ const VISITOR_TURN_GUARDRAIL = [
   '</private>',
 ].join('\n');
 
-const INTERRUPTED_RESUME_PROMPT =
-  'Please continue where you left off. The previous turn was interrupted by a RemoteLab server restart. '
-  + 'Pick up from the last unfinished task without repeating completed work unless necessary.';
-
 const INTERNAL_SESSION_ROLE_CONTEXT_COMPACTOR = 'context_compactor';
 const AUTO_COMPACT_MARKER_TEXT = 'Older messages above this marker are no longer in the model\'s live context. They remain visible in the transcript, but only the compressed handoff and newer messages below are loaded for continued work.';
 const CONTEXT_COMPACTOR_SYSTEM_PROMPT = [
@@ -579,6 +575,39 @@ async function saveImages(images) {
   }));
 }
 
+function normalizeStoredSessionMeta(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return { meta: null, changed: true };
+  }
+
+  const normalized = { ...meta };
+  let changed = false;
+
+  for (const legacyField of ['activeRun', 'status', 'queuedMessageCount', 'pendingCompact', 'renameState', 'renameError', 'recoverable']) {
+    if (Object.prototype.hasOwnProperty.call(normalized, legacyField)) {
+      delete normalized[legacyField];
+      changed = true;
+    }
+  }
+
+  return { meta: normalized, changed };
+}
+
+function normalizeStoredSessionsMeta(list) {
+  let changed = false;
+  const normalized = [];
+  for (const entry of Array.isArray(list) ? list : []) {
+    const result = normalizeStoredSessionMeta(entry);
+    if (!result.meta) {
+      changed = true;
+      continue;
+    }
+    normalized.push(result.meta);
+    changed = changed || result.changed;
+  }
+  return { list: normalized, changed };
+}
+
 async function loadSessionsMeta() {
   const stats = await statOrNull(CHAT_SESSIONS_FILE);
   if (!stats) {
@@ -593,8 +622,13 @@ async function loadSessionsMeta() {
     return sessionsMetaCache;
   }
   const parsed = await readJson(CHAT_SESSIONS_FILE, []);
-  sessionsMetaCache = Array.isArray(parsed) ? parsed : [];
-  sessionsMetaCacheMtimeMs = mtimeMs;
+  const normalized = normalizeStoredSessionsMeta(parsed);
+  sessionsMetaCache = normalized.list;
+  if (normalized.changed) {
+    await saveSessionsMetaUnlocked(sessionsMetaCache);
+  } else {
+    sessionsMetaCacheMtimeMs = mtimeMs;
+  }
   return sessionsMetaCache;
 }
 
@@ -719,26 +753,37 @@ async function resolveSessionRunActivity(meta) {
     const run = await getRun(meta.activeRunId);
     if (run && !isTerminalRunState(run.state)) {
       return {
-        status: 'running',
+        state: 'running',
         run,
       };
     }
   }
 
-  if (meta?.activeRun) {
-    return {
-      status: 'interrupted',
-      run: meta.activeRun,
-    };
-  }
-
   return {
-    status: 'idle',
+    state: 'idle',
     run: null,
   };
 }
 
-function buildSessionActivity(meta, live, { status, run, recoverable, queuedCount }) {
+function getSessionRunState(session) {
+  return session?.activity?.run?.state === 'running' ? 'running' : 'idle';
+}
+
+function isSessionRunning(session) {
+  return getSessionRunState(session) === 'running';
+}
+
+function getSessionQueueCount(session) {
+  return Number.isInteger(session?.activity?.queue?.count) ? session.activity.queue.count : 0;
+}
+
+function getSessionRunId(session) {
+  return typeof session?.activity?.run?.runId === 'string' && session.activity.run.runId
+    ? session.activity.run.runId
+    : null;
+}
+
+function buildSessionActivity(meta, live, { runState, run, queuedCount }) {
   const renameState = live?.renameState === 'pending' || live?.renameState === 'failed'
     ? live.renameState
     : 'idle';
@@ -748,13 +793,12 @@ function buildSessionActivity(meta, live, { status, run, recoverable, queuedCoun
 
   return {
     run: {
-      state: status,
+      state: runState,
       phase: typeof run?.state === 'string' ? run.state : null,
-      runId: typeof run?.id === 'string'
+      runId: runState === 'running' && typeof run?.id === 'string'
         ? run.id
-        : (typeof meta?.activeRunId === 'string' ? meta.activeRunId : null),
+        : (runState === 'running' && typeof meta?.activeRunId === 'string' ? meta.activeRunId : null),
       cancelRequested: run?.cancelRequested === true,
-      recoverable,
     },
     queue: {
       state: queueCount > 0 ? 'queued' : 'idle',
@@ -775,8 +819,7 @@ async function enrichSessionMeta(meta) {
   const snapshot = await getHistorySnapshot(meta.id);
   const queuedCount = getFollowUpQueueCount(meta);
   const runActivity = await resolveSessionRunActivity(meta);
-  const { followUpQueue, recentFollowUpRequestIds, ...rest } = meta;
-  const recoverable = !!meta.activeRun && !!(meta.claudeSessionId || meta.codexThreadId);
+  const { followUpQueue, recentFollowUpRequestIds, activeRunId, activeRun, ...rest } = meta;
   return {
     ...rest,
     appId: resolveEffectiveAppId(meta.appId),
@@ -788,16 +831,9 @@ async function enrichSessionMeta(meta) {
     activeFromSeq: snapshot.activeFromSeq,
     compactedThroughSeq: snapshot.compactedThroughSeq,
     contextTokenEstimate: snapshot.contextTokenEstimate,
-    status: runActivity.status,
-    recoverable,
-    queuedMessageCount: queuedCount,
-    pendingCompact: live?.pendingCompact === true,
-    renameState: live?.renameState || undefined,
-    renameError: live?.renameError || undefined,
     activity: buildSessionActivity(meta, live, {
-      status: runActivity.status,
+      runState: runActivity.state,
       run: runActivity.run,
-      recoverable,
       queuedCount,
     }),
   };
@@ -1584,7 +1620,7 @@ async function queueContextCompaction(sessionId, session, run, { automatic = fal
 
 async function maybeAutoCompact(sessionId, session, run, manifest) {
   if (!session || !run || manifest?.internalOperation) return false;
-  if ((session.queuedMessageCount || 0) > 0) return false;
+  if (getSessionQueueCount(session) > 0) return false;
   const contextTokens = getRunLiveContextTokens(run);
   const autoCompactTokens = getAutoCompactContextTokens(run);
   if (!Number.isInteger(contextTokens) || !Number.isFinite(autoCompactTokens)) return false;
@@ -1710,10 +1746,6 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
       delete session.activeRunId;
       changed = true;
     }
-    if (session.activeRun) {
-      delete session.activeRun;
-      changed = true;
-    }
     if (!compacting) {
       if (run.claudeSessionId && session.claudeSessionId !== run.claudeSessionId) {
         session.claudeSessionId = run.claudeSessionId;
@@ -1739,7 +1771,7 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
   if (compacting) {
     if (workerCompaction && compactionTargetSessionId) {
       const targetSession = await getSession(compactionTargetSessionId);
-      if ((targetSession?.queuedMessageCount || 0) > 0) {
+      if (getSessionQueueCount(targetSession) > 0) {
         scheduleQueuedFollowUpDispatch(compactionTargetSessionId);
       }
       broadcastSessionInvalidation(compactionTargetSessionId);
@@ -1755,7 +1787,7 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
     return { historyChanged, sessionChanged };
   }
 
-  if ((latestSession.queuedMessageCount || 0) > 0) {
+  if (getSessionQueueCount(latestSession) > 0) {
     scheduleQueuedFollowUpDispatch(sessionId);
   }
 
@@ -2311,7 +2343,7 @@ export async function saveSessionAsTemplate(sessionId, name = '') {
   const session = await getSession(sessionId);
   if (!session) return null;
   if (session.visitorId) return null;
-  if (session.status === 'running') return null;
+  if (isSessionRunning(session)) return null;
 
   const [snapshot, contextHead] = await Promise.all([
     getHistorySnapshot(sessionId),
@@ -2346,7 +2378,7 @@ export async function applyAppTemplateToSession(sessionId, appId) {
   const session = await getSession(sessionId);
   if (!session) return null;
   if (session.visitorId) return null;
-  if (session.status === 'running') return null;
+  if (isSessionRunning(session)) return null;
   if ((session.messageCount || 0) > 0) return null;
 
   const app = await getApp(appId);
@@ -2425,9 +2457,10 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
   let activeRun = null;
   let hasActiveRun = false;
   const hasPendingCompact = liveSessions.get(sessionId)?.pendingCompact === true;
+  const activeRunId = typeof sessionMeta?.activeRunId === 'string' ? sessionMeta.activeRunId : null;
 
-  if (session.activeRunId) {
-    activeRun = await flushDetachedRunIfNeeded(sessionId, session.activeRunId) || await getRun(session.activeRunId);
+  if (activeRunId) {
+    activeRun = await flushDetachedRunIfNeeded(sessionId, activeRunId) || await getRun(activeRunId);
     if (activeRun && !isTerminalRunState(activeRun.state)) {
       hasActiveRun = true;
     }
@@ -2553,7 +2586,6 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
 
   const activeSession = (await mutateSessionMeta(sessionId, (draft) => {
     draft.activeRunId = run.id;
-    delete draft.activeRun;
     draft.updatedAt = nowIso();
     return true;
   })).meta;
@@ -2621,30 +2653,6 @@ export async function sendMessage(sessionId, text, images, options = {}) {
   });
 }
 
-export async function resumeInterruptedSession(sessionId) {
-  const session = await findSessionMeta(sessionId);
-  if (!session?.activeRun) return false;
-  if (session.archived) return false;
-  if (session.activeRunId) {
-    const activeRun = await flushDetachedRunIfNeeded(sessionId, session.activeRunId) || await getRun(session.activeRunId);
-    if (activeRun && !isTerminalRunState(activeRun.state)) return false;
-  }
-  if (!(session.claudeSessionId || session.codexThreadId)) return false;
-
-  const resumeEvent = statusEvent('Resuming interrupted turn…');
-  await appendEvent(sessionId, resumeEvent);
-  broadcastSessionInvalidation(sessionId);
-
-  await sendMessage(sessionId, INTERRUPTED_RESUME_PROMPT, [], {
-    tool: session.activeRun.tool || session.tool,
-    thinking: !!session.activeRun.thinking,
-    model: session.activeRun.model || undefined,
-    effort: session.activeRun.effort || undefined,
-    recordUserMessage: false,
-  });
-  return true;
-}
-
 export async function cancelActiveRun(sessionId) {
   const session = await findSessionMeta(sessionId);
   if (!session?.activeRunId) return null;
@@ -2669,7 +2677,7 @@ export async function forkSession(sessionId) {
   const source = await getSession(sessionId);
   if (!source) return null;
   if (source.visitorId) return null;
-  if (source.status === 'running') return null;
+  if (isSessionRunning(source)) return null;
 
   const [history, contextHead, snapshot] = await Promise.all([
     loadHistory(sessionId, { includeBodies: true }),
@@ -2756,9 +2764,10 @@ export async function dropToolUse(sessionId) {
 export async function compactSession(sessionId) {
   const session = await getSession(sessionId);
   if (!session) return false;
-  if ((session.queuedMessageCount || 0) > 0) return false;
-  if (session.activeRunId) {
-    const run = await getRun(session.activeRunId);
+  if (getSessionQueueCount(session) > 0) return false;
+  const runId = getSessionRunId(session);
+  if (runId) {
+    const run = await getRun(runId);
     if (run && !isTerminalRunState(run.state)) return false;
   }
   return queueContextCompaction(sessionId, session, null, { automatic: false });

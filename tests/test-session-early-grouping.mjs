@@ -113,7 +113,7 @@ await sendMessage(session.id, 'Build the new feature panel and wire the sidebar 
 });
 
 await waitFor(
-  async () => (await getSession(session.id))?.status === 'running',
+  async () => (await getSession(session.id))?.activity?.run?.state === 'running',
   'session should enter running state',
 );
 
@@ -128,13 +128,13 @@ await waitFor(
 );
 
 assert.equal(
-  (await getSession(session.id))?.status,
+  (await getSession(session.id))?.activity?.run?.state,
   'running',
   'early grouping should land while the main task is still running',
 );
 
 await waitFor(
-  async () => (await getSession(session.id))?.status === 'idle',
+  async () => (await getSession(session.id))?.activity?.run?.state === 'idle',
   'session should finish running',
 );
 

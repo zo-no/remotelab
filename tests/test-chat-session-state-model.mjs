@@ -31,7 +31,6 @@ function makeActivity(overrides = {}) {
       phase: null,
       runId: null,
       cancelRequested: false,
-      recoverable: false,
       ...overrides.run,
     },
     queue: {
@@ -93,15 +92,6 @@ const renamingSession = makeSession({
 });
 assert.equal(model.getSessionStatusSummary(renamingSession).primary.key, 'renaming');
 assert.equal(model.isSessionBusy(renamingSession), false);
-
-const interruptedSession = makeSession({
-  activity: makeActivity({
-    run: { state: 'interrupted', runId: 'run-2', recoverable: true },
-  }),
-});
-const interruptedStatus = model.getSessionStatusSummary(interruptedSession);
-assert.equal(interruptedStatus.primary.key, 'interrupted');
-assert.equal(interruptedStatus.primary.title, 'Recoverable interrupted session');
 
 const renameFailedSession = makeSession({
   activity: makeActivity({

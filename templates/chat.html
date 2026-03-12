@@ -179,7 +179,6 @@ body {
 .status-dot.running { background: var(--success); animation: pulse 1.5s infinite; }
 .status-dot.queued { background: var(--queue); animation: pulse 1.5s infinite; }
 .status-dot.compacting { background: var(--notice); animation: pulse 1.5s infinite; }
-.status-dot.interrupted { background: var(--warning); }
 .status-dot.renaming { background: var(--naming); animation: pulse 1.5s infinite; }
 .status-dot.rename-failed { background: var(--issue); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
@@ -345,7 +344,6 @@ body {
 .session-item-meta .status-running { color: var(--success); }
 .session-item-meta .status-queued { color: var(--queue); }
 .session-item-meta .status-compacting { color: var(--notice); }
-.session-item-meta .status-interrupted { color: var(--warning); }
 .session-item-meta .status-renaming { color: var(--naming); }
 .session-item-meta .status-rename-failed { color: var(--issue); }
 .session-item-meta .status-archived { color: var(--text-muted); }
@@ -1365,7 +1363,6 @@ body.visitor-mode .gesture-pill { display: none !important; }
           </div>
           <div class="input-config-group right">
             <span id="contextTokens" style="display:none"></span>
-            <button class="compact-btn" id="resumeBtn" style="display:none" title="Resume the last turn interrupted by a server restart">Resume</button>
             <button class="compact-btn" id="compactBtn" style="display:none" title="Ask model to summarize conversation, then reset context">Compact</button>
             <button class="compact-btn" id="dropToolsBtn" style="display:none" title="Remove past tool results from context (no model call)">Drop tools</button>
           </div>

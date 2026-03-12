@@ -215,7 +215,6 @@ function normalizeSessionRecord(session, previous = null) {
   const normalized = {
     ...session,
     appId: getEffectiveSessionAppId(session),
-    status: normalizeSessionStatus(session?.activity?.run?.state || session.status),
   };
   if (!Object.prototype.hasOwnProperty.call(session || {}, "queuedMessages")) {
     if (queueCount > 0 && Array.isArray(previous?.queuedMessages)) {
@@ -257,7 +256,6 @@ async function fetchSessionsList() {
   sessions = (data.sessions || []).map((session) => normalizeSessionRecord(session, previousMap.get(session.id) || null));
   hasLoadedSessions = true;
   sortSessionsInPlace();
-  pruneStoredSessionAttentionState(sessions.map((session) => session.id));
   refreshAppCatalog();
   renderSessionList();
   if (currentSessionId && !sessions.some((session) => session.id === currentSessionId)) {

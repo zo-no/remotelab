@@ -27,7 +27,7 @@
     const raw = session?.activity || {};
     const rawRunState = raw?.run?.state;
     const runState =
-      rawRunState === "running" || rawRunState === "interrupted"
+      rawRunState === "running"
         ? rawRunState
         : "idle";
     const queueCount = Number.isInteger(raw?.queue?.count)
@@ -49,7 +49,6 @@
         phase: typeof raw?.run?.phase === "string" ? raw.run.phase : null,
         runId: typeof raw?.run?.runId === "string" ? raw.run.runId : null,
         cancelRequested: raw?.run?.cancelRequested === true,
-        recoverable: raw?.run?.recoverable === true,
       },
       queue: {
         state: queueState,
@@ -108,17 +107,6 @@
 
     if (activity.rename.state === "pending") {
       indicators.push(createStatus("renaming", "renaming", "status-renaming", "renaming"));
-    }
-
-    if (activity.run.state === "interrupted") {
-      indicators.push(createStatus(
-        "interrupted",
-        "interrupted",
-        "status-interrupted",
-        "interrupted",
-        "",
-        activity.run.recoverable ? "Recoverable interrupted session" : "Interrupted session",
-      ));
     }
 
     if (activity.rename.state === "failed") {

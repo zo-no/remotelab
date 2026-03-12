@@ -142,7 +142,6 @@ function createContext({
       callback();
     },
     cancelBtn: makeEventTarget(),
-    resumeBtn: makeEventTarget(),
     compactBtn: makeEventTarget(),
     dropToolsBtn: makeEventTarget(),
     sendBtn: makeEventTarget(),

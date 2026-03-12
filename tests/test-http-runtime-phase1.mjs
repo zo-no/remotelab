@@ -533,12 +533,12 @@ async function phase9StaleResultReconciliation() {
     if (cancel.json.run) {
       assert.equal(cancel.json.run.state, 'completed', 'stale completed run should reconcile to completed');
     } else {
-      assert.equal(cancel.json.session.status, 'idle', 'stale completed run may self-heal before cancel executes');
+      assert.equal(cancel.json.session.activity?.run?.state, 'idle', 'stale completed run may self-heal before cancel executes');
     }
 
     const detail = await request(port, 'GET', `/api/sessions/${session.id}`);
     assert.equal(detail.status, 200, 'session detail should still load');
-    assert.equal(detail.json.session.status, 'idle', 'session should no longer appear running');
+    assert.equal(detail.json.session.activity?.run?.state, 'idle', 'session should no longer appear running');
     assert.equal(detail.json.session.activeRunId, undefined, 'session should clear activeRunId after reconciliation');
 
     const retry = await submitMessage(port, session.id, 'req-stale-retry', 'retry after stale completed run');
@@ -656,7 +656,6 @@ async function phase12QueuedMessageRouteContract() {
     assert.equal(queued.json.queued, true, 'route should expose queued follow-up state');
     assert.equal(queued.json.run, null, 'queued follow-up should not create a new run immediately');
     assert.equal(queued.json.session?.id, session.id, 'route should still return the refreshed session');
-    assert.equal(queued.json.session?.queuedMessageCount, 1, 'session payload should expose the queued follow-up count');
     assert.equal(queued.json.session?.activity?.run?.state, 'running', 'session activity should expose the active run state');
     assert.equal(queued.json.session?.activity?.queue?.state, 'queued', 'session activity should expose the queued follow-up state');
     assert.equal(queued.json.session?.activity?.queue?.count, 1, 'session activity should expose the queued follow-up count');
@@ -671,9 +670,7 @@ async function phase12QueuedMessageRouteContract() {
     await waitFor(async () => {
       const detail = await request(port, 'GET', `/api/sessions/${session.id}`);
       if (detail.status !== 200) return false;
-      return detail.json.session?.status === 'idle'
-        && detail.json.session?.queuedMessageCount === 0
-        && detail.json.session?.activity?.run?.state === 'idle'
+      return detail.json.session?.activity?.run?.state === 'idle'
         && detail.json.session?.activity?.queue?.state === 'idle';
     }, 'queued follow-up should finish draining before cleanup', 12000);
 

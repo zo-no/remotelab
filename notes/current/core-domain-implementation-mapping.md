@@ -126,7 +126,6 @@ Current implementation stores canonical conversation/event truth here.
 - `PATCH /api/sessions/:sessionId`
 - `POST /api/sessions/:sessionId/messages`
 - `POST /api/sessions/:sessionId/cancel`
-- `POST /api/sessions/:sessionId/resume`
 - `POST /api/sessions/:sessionId/compact`
 - `POST /api/sessions/:sessionId/drop-tools`
 - `POST /api/sessions/:sessionId/share`
@@ -565,7 +564,6 @@ This section groups the current routes by the contract object they primarily ser
 - `PATCH /api/sessions/:sessionId`
 - `POST /api/sessions/:sessionId/messages`
 - `POST /api/sessions/:sessionId/cancel`
-- `POST /api/sessions/:sessionId/resume`
 - `POST /api/sessions/:sessionId/compact`
 - `POST /api/sessions/:sessionId/drop-tools`
 - `POST /api/sessions/:sessionId/share`

@@ -186,7 +186,7 @@ try {
   assert.match(promptLog, /\[Video Workflow\] Rough Cut Review — Review edit decisions for the current draft\./);
 
   await waitFor(
-    async () => (await getSession(target.id))?.status === 'idle',
+    async () => (await getSession(target.id))?.activity?.run?.state === 'idle',
     'session should finish running',
   );
 

@@ -32,15 +32,13 @@ When the control plane shuts down during an active run:
 - the detached runner keeps writing `status.json`, `spool.jsonl`, and `result.json`
 - after reconnect, HTTP reads rebuild session and run state from durable files
 
-For older explicitly interrupted cases where resume metadata was captured, the UI may still show **Resume**. That is now a compatibility recovery path, not the main restart story.
-
 ### 2. Operational sequence
 
 1. Work and code from `7690`
 2. Restart `7690` when needed
 3. Re-open / reconnect the chat UI
 4. Validate the change through HTTP/state recovery, not socket continuity
-5. Use `Resume` only when a specific interrupted run captured resumable metadata
+5. Validate the recovered state through fresh HTTP reads rather than any client-local fallback
 
 ## What the current architecture solves
 

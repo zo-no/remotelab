@@ -37,11 +37,15 @@ async function runToolJsonPrompt(sessionMeta, prompt) {
   const {
     id: sessionId,
     folder,
-    tool = 'claude',
+    tool,
     model,
     effort,
     thinking,
   } = sessionMeta;
+
+  if (!tool) {
+    throw new Error('Session label suggestion requires an explicit tool');
+  }
 
   const { command, adapter, args } = await createToolInvocation(tool, prompt, {
     dangerouslySkipPermissions: true,

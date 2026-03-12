@@ -12,7 +12,7 @@ What changed:
 
 Current backend activity contract:
 
-- `activity.run.state` — `running | interrupted | idle`
+- `activity.run.state` — `running | idle`
 - `activity.run.phase` — underlying durable run phase when available
 - `activity.queue.state` + `activity.queue.count`
 - `activity.rename.state` + `activity.rename.error`
@@ -20,8 +20,8 @@ Current backend activity contract:
 
 What still remains as cleanup surface:
 
-- top-level mirrors such as `session.status`, `queuedMessageCount`, `pendingCompact`, and `renameState` still exist for compatibility
-- `activeRun` / `resume_interrupted` remains a legacy compatibility path and is still a candidate for later deletion
+- the top-level session state mirrors have been removed from the client payload
+- the legacy `activeRun` / `resume_interrupted` compatibility path has been removed
 
 Goal: separate durable server truth from frontend-only display state before another round of UI fixes.
 

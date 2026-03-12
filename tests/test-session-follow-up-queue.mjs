@@ -109,7 +109,7 @@ try {
   assert.ok(initialOutcome.run?.id, 'initial run should start immediately');
 
   await waitFor(
-    async () => (await getSession(session.id))?.status === 'running',
+    async () => (await getSession(session.id))?.activity?.run?.state === 'running',
     'initial run should enter running state',
   );
 
@@ -140,11 +140,11 @@ try {
   assert.equal(queuedSecond.queued, true, 'multiple follow-ups should continue to queue');
 
   const queuedSession = await getSession(session.id, { includeQueuedMessages: true });
-  assert.equal(queuedSession?.queuedMessageCount, 2, 'session detail should expose queued follow-up count');
+  assert.equal(queuedSession?.activity?.queue?.count, 2, 'session detail should expose queued follow-up count');
   assert.equal(queuedSession?.queuedMessages?.length, 2, 'session detail should expose queued follow-up bodies');
   assert.equal(queuedSession?.queuedMessages?.[0]?.text, 'Follow-up one');
   assert.equal(
-    (await listSessions()).find((entry) => entry.id === session.id)?.queuedMessageCount,
+    (await listSessions()).find((entry) => entry.id === session.id)?.activity?.queue?.count,
     2,
     'session list should expose queued follow-up count',
   );
@@ -154,8 +154,8 @@ try {
       const current = await getSession(session.id);
       const history = await getHistory(session.id);
       const messageEvents = history.filter((event) => event.type === 'message');
-      return current?.status === 'idle'
-        && current?.queuedMessageCount === 0
+      return current?.activity?.run?.state === 'idle'
+        && current?.activity?.queue?.count === 0
         && messageEvents.length >= 4;
     },
     'queued follow-ups should auto-flush into the next turn',
@@ -171,7 +171,7 @@ try {
   assert.match(userMessages[1].content, /Actually prioritize the second follow-up/);
 
   const drainedSession = await getSession(session.id, { includeQueuedMessages: true });
-  assert.equal(drainedSession?.queuedMessageCount, 0, 'queue should clear after the next run is accepted');
+  assert.equal(drainedSession?.activity?.queue?.count, 0, 'queue should clear after the next run is accepted');
   assert.deepEqual(drainedSession?.queuedMessages, [], 'drained session should expose an empty queue');
 
   const duplicateAfterFlush = await submitHttpMessage(session.id, 'Late retry after flush', [], {

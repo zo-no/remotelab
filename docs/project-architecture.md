@@ -702,7 +702,6 @@ Sessions:
 - `GET /api/sessions/:id/events/:seq/body`
 - `POST /api/sessions/:id/messages`
 - `POST /api/sessions/:id/cancel`
-- `POST /api/sessions/:id/resume`
 - `POST /api/sessions/:id/compact`
 - `POST /api/sessions/:id/drop-tools`
 - `POST /api/sessions/:id/share`

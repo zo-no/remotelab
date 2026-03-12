@@ -195,7 +195,7 @@ try {
   );
 
   await waitFor(
-    async () => (await getSession(overflowSession.id))?.status === 'idle',
+    async () => (await getSession(overflowSession.id))?.activity?.run?.state === 'idle',
     'overflow session should settle back to idle after compaction',
   );
 
@@ -218,7 +218,7 @@ try {
   });
 
   await waitFor(
-    async () => (await getSession(exactSession.id))?.status === 'idle',
+    async () => (await getSession(exactSession.id))?.activity?.run?.state === 'idle',
     'exact-limit session should finish the main run',
   );
   await new Promise((resolve) => setTimeout(resolve, 250));

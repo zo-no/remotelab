@@ -87,7 +87,7 @@ It owns:
 
 - tool/provider selection for that attempt
 - model/reasoning selection for that attempt
-- lifecycle state (`queued`, `running`, `done`, `failed`, `interrupted`, ...)
+- lifecycle state (`accepted`, `running`, `completed`, `failed`, `cancelled`)
 - resume metadata when the underlying tool supports it
 - execution result / error / timing metadata
 - pointers to normalized event output and spool state

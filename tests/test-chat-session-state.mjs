@@ -27,7 +27,6 @@ function createSessionActivity({
   runState = 'idle',
   phase = null,
   runId = null,
-  recoverable = false,
   queueState = 'idle',
   queueCount = 0,
   renameState = 'idle',
@@ -40,7 +39,6 @@ function createSessionActivity({
       phase,
       runId,
       cancelRequested: false,
-      recoverable,
     },
     queue: {
       state: queueState,
@@ -83,12 +81,6 @@ function createBaseContext() {
   return context;
 }
 
-const normalizeSessionStatusSnippet = sliceBetween(
-  realtimeSource,
-  'function normalizeSessionStatus',
-  'function updateResumeButton',
-);
-
 const normalizeSessionRecordSnippet = sliceBetween(
   sessionHttpSource,
   'function normalizeSessionRecord',
@@ -103,7 +95,7 @@ const dispatchActionSnippet = sliceBetween(
 
 const recordContext = createBaseContext();
 vm.runInNewContext(
-  `${normalizeSessionStatusSnippet}\n${normalizeSessionRecordSnippet}`,
+  normalizeSessionRecordSnippet,
   recordContext,
   { filename: 'chat-session-record-runtime.js' },
 );
@@ -111,13 +103,11 @@ vm.runInNewContext(
 const restored = recordContext.normalizeSessionRecord(
   {
     id: 'session-restore',
-    status: 'idle',
     activity: createSessionActivity(),
     lastEventAt: '2026-03-12T12:00:00.000Z',
   },
   {
     id: 'session-restore',
-    status: 'idle',
     activity: createSessionActivity(),
     archived: true,
     archivedAt: '2026-03-12T11:59:00.000Z',
@@ -125,12 +115,11 @@ const restored = recordContext.normalizeSessionRecord(
 );
 assert.equal(restored.archived, undefined, 'stale archived flags should not survive a fresh session payload');
 assert.equal(restored.archivedAt, undefined, 'stale archived timestamps should not survive a fresh session payload');
-assert.equal(restored.status, 'idle', 'session status should stay aligned with backend activity');
+assert.equal(restored.activity.run.state, 'idle', 'session activity should preserve the backend run state');
 
 const carriedQueue = recordContext.normalizeSessionRecord(
   {
     id: 'session-queue',
-    status: 'running',
     activity: createSessionActivity({ runState: 'running', queueState: 'queued', queueCount: 1 }),
   },
   {
@@ -147,7 +136,6 @@ assert.deepEqual(
 const clearedQueue = recordContext.normalizeSessionRecord(
   {
     id: 'session-queue',
-    status: 'idle',
     activity: createSessionActivity(),
   },
   {
@@ -187,7 +175,6 @@ dispatchContext.fetchJsonOrRedirect = async (url, options = {}) => {
     queued: true,
     session: {
       id: 'session-send',
-      status: 'running',
       activity: createSessionActivity({ runState: 'running', queueState: 'queued', queueCount: 1 }),
     },
   };
@@ -233,7 +220,6 @@ assert.deepEqual(
     id: 'session-send',
     session: {
       id: 'session-send',
-      status: 'running',
       activity: createSessionActivity({ runState: 'running', queueState: 'queued', queueCount: 1 }),
     },
   },

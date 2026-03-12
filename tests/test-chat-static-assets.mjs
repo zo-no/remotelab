@@ -174,8 +174,8 @@ async function main() {
     const apps = await request(port, 'GET', '/api/apps');
     assert.equal(apps.status, 200, 'owner apps endpoint should be available');
     assert.match(apps.text, /"id":"chat"/);
+    assert.match(apps.text, /"id":"email"/);
     assert.doesNotMatch(apps.text, /"id":"feishu"/);
-    assert.doesNotMatch(apps.text, /"id":"email"/);
     assert.doesNotMatch(apps.text, /"id":"github"/);
     assert.doesNotMatch(apps.text, /"id":"automation"/);
 

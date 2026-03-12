@@ -43,7 +43,6 @@ function sendMessage(existingRequestId) {
 }
 
 cancelBtn.addEventListener("click", () => dispatchAction({ action: "cancel" }));
-resumeBtn.addEventListener("click", () => dispatchAction({ action: "resume_interrupted" }));
 
 compactBtn.addEventListener("click", () => {
   if (!currentSessionId) return;

@@ -88,7 +88,6 @@ remotelab/
 │   ├── config.mjs           # Environment variables, paths, defaults
 │   ├── tools.mjs            # CLI tool discovery (which), custom tool registration
 │   ├── utils.mjs            # Utilities (read body, path handling)
-│   ├── git-diff.mjs         # Git diff retrieval
 │   └── cloudflared-config.mjs # Access-domain selection from cloudflared ingress
 │
 ├── static/                  # ── Frontend assets ──

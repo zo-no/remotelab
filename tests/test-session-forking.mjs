@@ -135,7 +135,7 @@ try {
   assert.equal(child.claudeSessionId, undefined, 'fork should clear Claude resume ids');
   assert.equal(child.externalTriggerId, undefined, 'fork should clear external trigger ids');
   assert.equal(child.completionTargets, undefined, 'fork should not inherit completion targets');
-  assert.equal(child.status, 'idle', 'forked child should start idle');
+  assert.equal(child.activity?.run?.state, 'idle', 'forked child should start idle');
   assert.equal(child.latestSeq, 5, 'forked child should keep the copied history length');
 
   const parentLoaded = await getSession(parent.id);
@@ -143,7 +143,7 @@ try {
   assert.equal(parentLoaded?.claudeSessionId, 'claude-parent-thread', 'fork should not mutate the parent Claude id');
   assert.equal(parentLoaded?.externalTriggerId, 'email-thread:parent-thread', 'fork should not mutate the parent external trigger id');
   assert.equal(parentLoaded?.completionTargets?.length, 1, 'fork should not mutate the parent completion targets');
-  assert.equal(parentLoaded?.activeRun?.id, 'interrupted-parent-run', 'fork should not mutate the parent interrupted run metadata');
+  assert.equal(parentLoaded?.activeRun, undefined, 'session loads should prune legacy interrupted run metadata');
 
   const parentHistory = await getHistory(parent.id);
   const childHistory = await getHistory(child.id);

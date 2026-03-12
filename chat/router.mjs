@@ -27,7 +27,6 @@ import {
   getSessionEventsAfter,
   listSessions,
   renameSession,
-  resumeInterruptedSession,
   saveSessionAsTemplate,
   sendMessage,
   setSessionArchived,
@@ -828,7 +827,7 @@ export async function handleRequest(req, res) {
       const run = await cancelActiveRun(sessionId);
       if (!run) {
         const session = await getSession(sessionId);
-        if (session && session.status !== 'running') {
+        if (session && session.activity?.run?.state !== 'running') {
           writeJson(res, 200, { run: null, session });
           return;
         }
@@ -836,21 +835,6 @@ export async function handleRequest(req, res) {
         return;
       }
       writeJson(res, 200, { run });
-      return;
-    }
-
-    if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'sessions' && sessionId && action === 'resume') {
-      if (!requireSessionAccess(res, authSession, sessionId)) return;
-      const session = await getSession(sessionId);
-      if (session?.archived) {
-        writeJson(res, 409, { error: 'Session is archived' });
-        return;
-      }
-      if (!await resumeInterruptedSession(sessionId)) {
-        writeJson(res, 409, { error: 'Interrupted run is not recoverable' });
-        return;
-      }
-      writeJson(res, 200, { ok: true, session: await getSession(sessionId) });
       return;
     }
 
@@ -906,7 +890,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
       }
-      if (session.status === 'running') {
+      if (session.activity?.run?.state === 'running') {
         writeJson(res, 409, { error: 'Session is running' });
         return;
       }
@@ -946,7 +930,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
       }
-      if (session.status === 'running') {
+      if (session.activity?.run?.state === 'running') {
         writeJson(res, 409, { error: 'Session is running' });
         return;
       }
@@ -970,7 +954,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Visitor sessions cannot be forked' });
         return;
       }
-      if (source.status === 'running') {
+      if (source.activity?.run?.state === 'running') {
         writeJson(res, 409, { error: 'Session is running' });
         return;
       }

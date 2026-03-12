@@ -176,7 +176,6 @@ const cancelBtn = document.getElementById("cancelBtn");
 const contextTokens = document.getElementById("contextTokens");
 const compactBtn = document.getElementById("compactBtn");
 const dropToolsBtn = document.getElementById("dropToolsBtn");
-const resumeBtn = document.getElementById("resumeBtn");
 const saveTemplateBtn = document.getElementById("saveTemplateBtn");
 const sessionTemplateRow = document.getElementById("sessionTemplateRow");
 const sessionTemplateSelect = document.getElementById("sessionTemplateSelect");
@@ -241,7 +240,10 @@ const LEGACY_SESSION_SEND_FAILURES_STORAGE_KEY = "sessionSendFailures";
 const APP_FILTER_ALL_VALUE = "__all__";
 const DEFAULT_APP_ID = "chat";
 const DEFAULT_APP_NAME = "Chat";
-const sessionStateModel = window.RemoteLabSessionStateModel || {};
+const sessionStateModel = window.RemoteLabSessionStateModel;
+if (!sessionStateModel) {
+  throw new Error("RemoteLabSessionStateModel must load before bootstrap.js");
+}
 let pendingNavigationState = readNavigationStateFromLocation();
 let currentSessionId =
   pendingNavigationState.sessionId ||
@@ -327,78 +329,19 @@ function writeStoredJsonValue(key, value) {
 }
 
 function createEmptySessionStatus() {
-  return {
-    key: "idle",
-    label: "",
-    className: "",
-    dotClass: "",
-    itemClass: "",
-    title: "",
-  };
+  return sessionStateModel.createEmptyStatus();
 }
 
 function getSessionActivity(session) {
-  if (typeof sessionStateModel.normalizeSessionActivity === "function") {
-    return sessionStateModel.normalizeSessionActivity(session);
-  }
-  return {
-    run: {
-      state: session?.status === "interrupted"
-        ? "interrupted"
-        : session?.status === "running"
-          ? "running"
-          : "idle",
-      phase: null,
-      runId: null,
-      cancelRequested: false,
-      recoverable: session?.recoverable === true,
-    },
-    queue: {
-      state: (session?.queuedMessageCount || 0) > 0 ? "queued" : "idle",
-      count: Number.isInteger(session?.queuedMessageCount) ? session.queuedMessageCount : 0,
-    },
-    rename: {
-      state: session?.renameState === "pending" || session?.renameState === "failed"
-        ? session.renameState
-        : "idle",
-      error: session?.renameError || "",
-    },
-    compact: {
-      state: session?.pendingCompact === true ? "pending" : "idle",
-    },
-  };
+  return sessionStateModel.normalizeSessionActivity(session);
 }
 
 function isSessionBusy(session) {
-  if (typeof sessionStateModel.isSessionBusy === "function") {
-    return sessionStateModel.isSessionBusy(session);
-  }
-  const activity = getSessionActivity(session);
-  return activity.run.state === "running"
-    || activity.queue.state === "queued"
-    || activity.compact.state === "pending";
-}
-
-function pruneStoredSessionAttentionState() {
-  return false;
+  return sessionStateModel.isSessionBusy(session);
 }
 
 function getSessionStatusSummary(session, { includeToolFallback = false } = {}) {
-  if (typeof sessionStateModel.getSessionStatusSummary === "function") {
-    return sessionStateModel.getSessionStatusSummary(session, { includeToolFallback });
-  }
-
-  const primary = session?.tool && includeToolFallback
-    ? {
-      key: "tool",
-      label: session.tool,
-      className: "",
-      dotClass: "",
-      itemClass: "",
-      title: "",
-    }
-    : createEmptySessionStatus();
-  return { primary, indicators: primary.label ? [primary] : [] };
+  return sessionStateModel.getSessionStatusSummary(session, { includeToolFallback });
 }
 
 function getSessionVisualStatus(session, options = {}) {

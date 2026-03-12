@@ -194,12 +194,6 @@ async function dispatchAction(msg) {
         });
         await refreshCurrentSession();
         return true;
-      case "resume_interrupted":
-        await fetchJsonOrRedirect(`/api/sessions/${encodeURIComponent(currentSessionId)}/resume`, {
-          method: "POST",
-        });
-        await refreshCurrentSession();
-        return true;
       case "compact":
         await fetchJsonOrRedirect(`/api/sessions/${encodeURIComponent(currentSessionId)}/compact`, {
           method: "POST",
@@ -223,21 +217,6 @@ async function dispatchAction(msg) {
 
 function getCurrentSession() {
   return sessions.find((s) => s.id === currentSessionId) || null;
-}
-
-function normalizeSessionStatus(incomingStatus) {
-  return incomingStatus || "idle";
-}
-
-function updateResumeButton() {
-  const session = getCurrentSession();
-  const activity = getSessionActivity(session);
-  const canResume = !!session
-    && !session.archived
-    && activity.run.state === "interrupted"
-    && activity.run.recoverable;
-  resumeBtn.style.display = canResume ? "" : "none";
-  resumeBtn.disabled = !canResume;
 }
 
 function handleWsMessage(msg) {
@@ -277,14 +256,11 @@ function updateStatus(connState, session = getCurrentSession()) {
     sendBtn.title = "Send";
     return;
   }
-  const visualStatus = getSessionVisualStatus(session || {
-    id: currentSessionId,
-    status: "idle",
-  });
+  const visualStatus = getSessionVisualStatus(session);
   const activity = getSessionActivity(session);
   const runIsActive = activity.run.state === "running";
   const inputBusy = isSessionBusy(session);
-  sessionStatus = runIsActive ? "running" : activity.run.state || session?.status || "idle";
+  sessionStatus = runIsActive ? "running" : "idle";
   const showArchivedOnly = archived && visualStatus.key === "idle";
   if (showArchivedOnly) {
     statusDot.className = "status-dot";
@@ -319,7 +295,6 @@ function updateStatus(connState, session = getCurrentSession()) {
   if (typeof syncSessionTemplateControls === "function") {
     syncSessionTemplateControls();
   }
-  updateResumeButton();
   syncForkButton();
   syncShareButton();
 }

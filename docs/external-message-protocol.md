@@ -212,13 +212,13 @@ For UI and status rendering, external clients should prefer the server-authored 
 
 Current `session.activity` shape:
 
-- `activity.run.state` — coarse run state: `running`, `interrupted`, or `idle`
+- `activity.run.state` — coarse run state: `running` or `idle`
 - `activity.run.phase` — underlying durable run phase such as `accepted`, `running`, `completed`, `failed`, or `cancelled` when available
 - `activity.queue.state` / `activity.queue.count` — follow-up backlog state
 - `activity.rename.state` — background rename state: `idle`, `pending`, or `failed`
 - `activity.compact.state` — background compaction state: `idle` or `pending`
 
-The top-level `session.status` field remains a coarse summary, but UI code should treat `session.activity` as the canonical backend activity contract.
+The `session.activity` object is the canonical backend activity contract.
 
 This means connectors should treat `requestId` as the idempotency key for one upstream update.
 

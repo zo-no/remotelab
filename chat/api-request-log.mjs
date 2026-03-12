@@ -120,7 +120,6 @@ function classifyApiRoute(method, pathname) {
       if (parts.length === 4 && method === 'POST') {
         if (parts[3] === 'messages') return 'POST /api/sessions/:sessionId/messages';
         if (parts[3] === 'cancel') return 'POST /api/sessions/:sessionId/cancel';
-        if (parts[3] === 'resume') return 'POST /api/sessions/:sessionId/resume';
         if (parts[3] === 'compact') return 'POST /api/sessions/:sessionId/compact';
         if (parts[3] === 'drop-tools') return 'POST /api/sessions/:sessionId/drop-tools';
         if (parts[3] === 'fork') return 'POST /api/sessions/:sessionId/fork';
