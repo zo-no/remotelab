@@ -1474,6 +1474,18 @@ async function main() {
     domain: resolveDomain(config.region),
     loggerLevel: resolveLoggerLevel(config.loggerLevel),
   });
+  // The Feishu SDK can stop retrying if the first connect-config pull returns
+  // a transient "system busy" response before any server-side reconnect policy
+  // has been received. Seed a local infinite retry policy so the connector keeps
+  // trying until the console-side long-connection mode is fully accepted.
+  if (wsClient?.wsConfig?.updateWs) {
+    wsClient.wsConfig.updateWs({
+      autoReconnect: true,
+      reconnectCount: -1,
+      reconnectInterval: 5000,
+      reconnectNonce: 0,
+    });
+  }
 
   let closed = false;
   const closeConnection = (reason) => {
