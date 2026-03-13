@@ -259,6 +259,7 @@ Reusable AI workflows shareable via link. Each App defines: name, systemPrompt, 
 | App-Centric Architecture | `notes/directional/app-centric-architecture.md` | Historical/consolidated direction note for treating default chat and shared Apps as one policy model |
 | Provider Architecture | `notes/directional/provider-architecture.md` | Open provider/model abstraction, local JS/JSON extension path, migration plan |
 | Product Vision | `notes/directional/product-vision.md` | Product rationale and open questions; not the canonical shipped-status tracker |
+| Super-Individual Workbench | `notes/directional/super-individual-workbench.md` | Sharpened product-definition memo: control plane vs IDE, orchestration-first sequencing, packaging-before-distribution |
 | AI-Driven Interaction | `notes/directional/ai-driven-interaction.md` | Deferred triggers design, session metadata schema, future phases |
 | Autonomous Execution | `notes/directional/autonomous-execution.md` | P2 background execution vision |
 | Message Transport Architecture | `notes/message-transport-architecture.md` | Historical transport/runtime rationale after the HTTP-first architecture landed |
