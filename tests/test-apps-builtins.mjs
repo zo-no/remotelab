@@ -73,7 +73,11 @@ try {
   assert.equal(createAppStarter?.tool, 'codex');
   assert.equal(createAppStarter?.shareEnabled, false);
   assert.equal(createAppStarter?.shareToken, undefined);
-  assert.match(createAppStarter?.welcomeMessage || '', /创建什么 App|app specification/i);
+  assert.match(createAppStarter?.systemPrompt || '', /POST \/api\/apps|PATCH \/api\/apps/i);
+  assert.match(createAppStarter?.systemPrompt || '', /share link|\/app\/\{shareToken\}|other people/i);
+  assert.match(createAppStarter?.welcomeMessage || '', /SOP|工作流|RemoteLab App/i);
+  assert.match(createAppStarter?.welcomeMessage || '', /SOP|工作流/i);
+  assert.match(createAppStarter?.welcomeMessage || '', /分享给别人的链接|分享方式|share/i);
 
   const videoCutApp = await getApp(VIDEO_CUT_APP_ID);
   assert.equal(videoCutApp?.id, VIDEO_CUT_APP_ID);

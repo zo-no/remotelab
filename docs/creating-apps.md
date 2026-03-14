@@ -18,7 +18,7 @@ The visitor doesn't need to know anything about prompts, tools, or configuration
 RemoteLab now ships three built-in App starting points out of the box:
 
 - **Basic Chat** — the default owner-side app for normal RemoteLab conversations; this is the baseline app layer for everyday sessions
-- **Create App** — a built-in app-building assistant; the sidebar `New App` button opens a fresh session scoped to this starter
+- **Create App** — a built-in app-building assistant; open an owner session under this app when you want the AI to turn a workflow/SOP into a finished App and share link
 - **Video Cut** — a built-in review-first video editing app that can be shared directly for upload + cut-planning flows
 
 If you open the sidebar **Settings** tab, RemoteLab also shows an **Apps** panel where you can:
@@ -27,23 +27,23 @@ If you open the sidebar **Settings** tab, RemoteLab also shows an **Apps** panel
 - copy the public share link for shareable apps like `Video Cut`
 - open that share link directly for testing
 
-RemoteLab also has a lightweight **Visitors** panel for the first round of distribution:
+RemoteLab also has a lightweight **Users** panel where you can:
 
-- create a named visitor/user record
-- assign exactly one shareable app to that visitor
-- generate a dedicated visitor link for that person
+- create extra owner-side identities
+- choose which apps each user can access
+- seed a first session for them when they are empty
 
-This lets you keep the product simple in v1: Apps define the workflow, Visitors define who gets which link.
+For external distribution, the main v1 sharing surface is still the App share link itself.
 
-Open a regular session in RemoteLab and tell the AI what App you want in one concentrated message so it can do most of the work without repeated back-and-forth:
+Open the Create App starter (or any owner session you are using for App setup) and tell the AI what workflow you want in one concentrated message so it can do most of the work without repeated back-and-forth:
 
 > "I want to create an App. It should [describe what it does]."
 
-The best pattern is that the AI gathers the missing details early, then drafts and creates the App with minimal interruption. It will guide you through:
-1. **Naming** the App
-2. **Writing a welcome message** — what the visitor sees first
-3. **Defining system instructions** — how the AI should behave
-4. **Creating the App** — the AI calls the API and gives you a share link
+The best pattern is that you stay at the SOP / business-workflow level while the AI handles the App mechanics. It should gather the missing details early, then draft and create the App with minimal interruption. A good end-to-end flow is:
+1. **Clarify the workflow once** — who it is for, what input they give, what steps the AI should follow, and what output or approval gates matter
+2. **Draft the App behavior** — welcome message + system instructions
+3. **Create or update the App** — without making you manage prompts or product-state details manually
+4. **Hand back the share link** — plus a simple explanation of how to send it to other people
 
 ### Example
 
@@ -55,7 +55,7 @@ The AI will draft the welcome message and system prompt, create the App, and ret
 https://your-domain.com/app/share_abc123...
 ```
 
-Share this link with anyone. They click it, they're in.
+Share this link with anyone. They click it, land inside the App, and start chatting with the workflow already loaded.
 
 ## How to Manage Apps
 
@@ -64,7 +64,7 @@ In any regular session, you can say:
 - **"List my Apps"** — see all active Apps with their share links
 - **"Update the English Tutor App"** — modify welcome message or instructions
 - **"Delete the X App"** — removes it (existing sessions keep working)
-- **"Regenerate the share link for X"** — invalidates old link, creates new one
+- **"Give me the share link for X again"** — retrieve the existing share link without recreating the App
 
 ## Tips for Good Apps
 
