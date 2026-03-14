@@ -98,7 +98,6 @@ function setupTempHome() {
 console.log('请登录：https://mcli.sankuai.com/api/v1.0/user/login?uuid=test-auth');
 setTimeout(() => {
   console.log('登录超时...');
-  process.exit(0);
 }, 50);
 `,
     'utf8',

@@ -35,7 +35,10 @@ try {
   assert.equal(eventIndex.at(-1)?.seq, events.length, 'full history reads should advance through the final sequence');
 
   const firstMessage = eventIndex.find((event) => event.type === 'message');
-  assert.ok(firstMessage?.content, 'chat messages should stay inline in the main event index');
+  assert.ok(firstMessage, 'message event should be present');
+  assert.equal(firstMessage.content, '', 'chat messages should be deferred from the main event index');
+  assert.equal(firstMessage.bodyAvailable, true, 'message event should expose a lazy body');
+  assert.equal(firstMessage.bodyLoaded, false, 'message body should stay unloaded in the event index');
 
   const reasoning = eventIndex.find((event) => event.type === 'reasoning');
   assert.ok(reasoning, 'reasoning event should be present');
@@ -54,6 +57,9 @@ try {
   assert.equal(toolResult.output, '', 'tool result should be deferred from the event index');
   assert.equal(toolResult.bodyAvailable, true, 'tool result should expose a lazy body');
   assert.equal(toolResult.bodyLoaded, false, 'tool result body should stay unloaded in the event index');
+
+  const messageBody = await readEventBody(sessionId, firstMessage.seq);
+  assert.equal(messageBody?.value, 'message 0', 'message body should load on demand');
 
   const reasoningBody = await readEventBody(sessionId, reasoning.seq);
   assert.equal(reasoningBody?.value, longReasoning, 'reasoning body should load on demand');

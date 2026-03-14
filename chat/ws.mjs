@@ -1,6 +1,17 @@
 import { WebSocketServer } from 'ws';
 import { isAuthenticated, getAuthSession } from '../lib/auth.mjs';
 import { setWss } from './ws-clients.mjs';
+import { getPageBuildInfo } from './router.mjs';
+
+async function sendBuildInfo(ws) {
+  try {
+    const buildInfo = await getPageBuildInfo();
+    if (ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ type: 'build_info', buildInfo }));
+  } catch (error) {
+    console.warn(`[build] failed to send websocket build info: ${error.message}`);
+  }
+}
 
 export function attachWebSocket(server) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
@@ -28,6 +39,7 @@ export function attachWebSocket(server) {
   wss.on('connection', (ws) => {
     const role = ws._authSession?.role || 'owner';
     console.log(`[ws] Client connected (role=${role})`);
+    void sendBuildInfo(ws);
 
     ws.on('message', () => {
       try {

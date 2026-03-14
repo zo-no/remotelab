@@ -31,6 +31,7 @@ try {
   const source = await createSession(workspace, 'missing-tool', 'Source template session', {
     systemPrompt: 'Stay inside the saved subtask template.',
     group: 'Templates',
+    description: 'Saved template source session for app-template coverage.',
   });
 
   await appendEvents(source.id, [
@@ -79,7 +80,10 @@ try {
   assert.match(app.templateContext?.content || '', /This template covers the warmed subtask context\./);
   assert.match(app.templateContext?.content || '', /ls -la/);
 
-  const target = await createSession(workspace, 'codex', 'Fresh session');
+  const target = await createSession(workspace, 'codex', 'Fresh session', {
+    group: 'Templates',
+    description: 'Target session for applying a saved template.',
+  });
   const applied = await applyAppTemplateToSession(target.id, app.id);
   assert.ok(applied, 'template should apply to a fresh session');
   assert.equal(applied.appId, app.id, 'app scope should switch to the saved template');
@@ -108,7 +112,10 @@ try {
   const renamedSource = await renameSession(source.id, 'Source template session refreshed');
   assert.equal(renamedSource?.name, 'Source template session refreshed', 'source session refresh should update its metadata timestamp');
 
-  const staleTarget = await createSession(workspace, 'codex', 'Fresh session after drift');
+  const staleTarget = await createSession(workspace, 'codex', 'Fresh session after drift', {
+    group: 'Templates',
+    description: 'Target session for stale saved-template coverage.',
+  });
   const staleApplied = await applyAppTemplateToSession(staleTarget.id, app.id);
   assert.ok(staleApplied, 'stale templates should still be applicable');
 

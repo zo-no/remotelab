@@ -8,7 +8,7 @@ import http from 'http';
 import { spawn } from 'child_process';
 import WebSocket from 'ws';
 
-const repoRoot = dirname(fileURLToPath(import.meta.url));
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const cookie = 'session_token=test-session';
 
 function sleep(ms) {
@@ -107,7 +107,6 @@ setTimeout(() => {
     type: 'turn.completed',
     usage: { input_tokens: 1, output_tokens: 1 }
   }));
-  process.exit(0);
 }, 50);
 `,
     'utf8',
@@ -127,6 +126,9 @@ async function startServer({ home, port }) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+
+  child.stdout.on('data', () => {});
+  child.stderr.on('data', () => {});
 
   await waitFor(async () => {
     try {

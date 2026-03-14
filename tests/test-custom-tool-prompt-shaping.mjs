@@ -59,6 +59,20 @@ function request(port, method, path, body = null) {
   });
 }
 
+async function fetchEventBody(port, sessionId, seq) {
+  const res = await request(port, 'GET', `/api/sessions/${sessionId}/events/${seq}/body`);
+  assert.equal(res.status, 200, 'event body request should succeed');
+  return res.json?.body?.value || '';
+}
+
+async function resolveMessageContent(port, sessionId, event) {
+  if (!event) return '';
+  if (event.type !== 'message') return '';
+  if (typeof event.content === 'string' && event.content) return event.content;
+  if (!event.bodyAvailable || !Number.isInteger(event.seq)) return '';
+  return fetchEventBody(port, sessionId, event.seq);
+}
+
 function setupTempHome() {
   const home = mkdtempSync(join(tmpdir(), 'remotelab-custom-prompt-shape-'));
   const configDir = join(home, '.config', 'remotelab');
@@ -140,7 +154,6 @@ console.log(JSON.stringify({
     cache_read_input_tokens: 0,
   },
 }));
-process.exit(0);
 `,
     'utf8',
   );
@@ -229,8 +242,9 @@ try {
 
   const assistant = eventsRes.json.events.find((event) => event.type === 'message' && event.role === 'assistant');
   assert.ok(assistant, 'assistant reply should be present');
+  const assistantContent = await resolveMessageContent(port, session.id, assistant);
   assert.equal(
-    assistant.content,
+    assistantContent,
     'Line one. Line two.',
     'bare-user + flattenPrompt should pass only the flattened user text to the provider',
   );

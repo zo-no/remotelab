@@ -121,6 +121,19 @@ async function fetchAllEvents(cookie, sessionId) {
   return fetchJson(cookie, `/api/sessions/${sessionId}/events`);
 }
 
+async function fetchEventBody(cookie, sessionId, seq) {
+  const data = await fetchJson(cookie, `/api/sessions/${sessionId}/events/${seq}/body`);
+  return data.body?.value || '';
+}
+
+async function resolveMessageContent(cookie, sessionId, event) {
+  if (!event) return '';
+  if (event.type !== 'message') return '';
+  if (typeof event.content === 'string' && event.content) return event.content;
+  if (!event.bodyAvailable || !Number.isInteger(event.seq)) return '';
+  return fetchEventBody(cookie, sessionId, event.seq);
+}
+
 async function main() {
   log('test', `Testing tool=${TOOL}, server=${BASE}, folder=${FOLDER}`);
 
@@ -166,8 +179,9 @@ async function main() {
   const firstReply = [...(firstEvents.events || [])]
     .reverse()
     .find((event) => event.type === 'message' && event.role === 'assistant');
-  if (!firstReply?.content) fail('No assistant reply found after first message');
-  log('test', `First reply: ${firstReply.content.slice(0, 120)}`);
+  const firstReplyContent = await resolveMessageContent(cookie, session.id, firstReply);
+  if (!firstReplyContent) fail('No assistant reply found after first message');
+  log('test', `First reply: ${firstReplyContent.slice(0, 120)}`);
   pass('First message got a response');
 
   log('test', 'Step 5: Sending follow-up context test via HTTP...');
@@ -178,11 +192,12 @@ async function main() {
   const secondReply = [...(secondEvents.events || [])]
     .reverse()
     .find((event) => event.type === 'message' && event.role === 'assistant');
-  if (!secondReply?.content) fail('No assistant reply found after second message');
-  log('test', `Second reply: ${secondReply.content.slice(0, 120)}`);
+  const secondReplyContent = await resolveMessageContent(cookie, session.id, secondReply);
+  if (!secondReplyContent) fail('No assistant reply found after second message');
+  log('test', `Second reply: ${secondReplyContent.slice(0, 120)}`);
 
-  if (!secondReply.content.includes('42')) {
-    fail(`Context lost. Reply was: "${secondReply.content.slice(0, 200)}"`);
+  if (!secondReplyContent.includes('42')) {
+    fail(`Context lost. Reply was: "${secondReplyContent.slice(0, 200)}"`);
   }
   pass('Context preserved through HTTP-first flow');
 

@@ -117,5 +117,6 @@ App 不只是 prompt 分享。
 ## 相关方向文档
 
 - `notes/directional/app-centric-architecture.md` — App 作为通用 policy layer 的方向
+- `notes/directional/super-individual-workbench.md` — 对“AI 超级个体工作台”表述的 sharpened 版本，明确 control plane、优先级和反目标
 - `notes/directional/ai-driven-interaction.md` — AI 主动发起与 deferred triggers
 - `notes/directional/provider-architecture.md` — provider/model 开放化

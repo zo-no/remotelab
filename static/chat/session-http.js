@@ -417,7 +417,7 @@ function applyAttachedSessionState(id, session) {
   if (session?.tool && toolsList.some((tool) => tool.id === session.tool)) {
     inlineToolSelect.value = session.tool;
     selectedTool = session.tool;
-    loadModelsForCurrentTool().catch(() => {});
+    Promise.resolve(loadModelsForCurrentTool()).catch(() => {});
   }
 
   restoreDraft();

@@ -229,6 +229,8 @@ async function main() {
   assert.match(publicShareRes.body, /<meta name="theme-color" content="#f5f7fb" media="\(prefers-color-scheme: light\)">/);
   assert.match(publicShareRes.body, /<meta name="theme-color" content="#0b1020" media="\(prefers-color-scheme: dark\)">/);
   assert.match(publicShareRes.body, /@media \(prefers-color-scheme: dark\)/);
+  assert.match(publicShareRes.body, /\/favicon\.ico\?v=/, 'share page should fingerprint icon URLs for immutable caching');
+  assert.match(publicShareRes.body, /\/icon\.svg\?v=/, 'share page should fingerprint svg icon URLs for immutable caching');
   assert.ok(!publicShareRes.body.includes('msgInput'), 'share page should not include live chat input');
   assert.ok(!publicShareRes.body.includes('/api/auth/me'), 'share page should not bootstrap owner auth UI');
   assert.ok(!publicShareRes.body.includes('/ws'), 'share page should not connect to live websocket');

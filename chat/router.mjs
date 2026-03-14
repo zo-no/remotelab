@@ -249,7 +249,7 @@ function sanitizeAssetVersion(value) {
   return String(value || 'dev').replace(/[^a-zA-Z0-9._-]+/g, '-');
 }
 
-async function getPageBuildInfo() {
+export async function getPageBuildInfo() {
   const now = Date.now();
   if (cachedPageBuildInfo && now - cachedPageBuildInfo.cachedAt < 250) {
     return cachedPageBuildInfo.info;
@@ -289,9 +289,14 @@ async function getPageBuildInfo() {
 function scheduleFrontendBuildInvalidation() {
   cachedPageBuildInfo = null;
   if (frontendBuildInvalidationTimer) return;
-  frontendBuildInvalidationTimer = setTimeout(() => {
+  frontendBuildInvalidationTimer = setTimeout(async () => {
     frontendBuildInvalidationTimer = null;
-    broadcastAll({ type: 'build_invalidated' });
+    try {
+      const buildInfo = await getPageBuildInfo();
+      broadcastAll({ type: 'build_info', buildInfo });
+    } catch (error) {
+      console.error(`[build] frontend update broadcast failed: ${error.message}`);
+    }
   }, 120);
   if (typeof frontendBuildInvalidationTimer.unref === 'function') {
     frontendBuildInvalidationTimer.unref();
@@ -324,7 +329,16 @@ function startFrontendBuildWatchers() {
 
 startFrontendBuildWatchers();
 
-async function resolveStaticAsset(pathname) {
+function getSingleQueryValue(value) {
+  if (Array.isArray(value)) return value[0] || '';
+  return typeof value === 'string' ? value : '';
+}
+
+function hasVersionedAssetTag(query = {}) {
+  return getSingleQueryValue(query?.v).trim().length > 0;
+}
+
+async function resolveStaticAsset(pathname, query = {}) {
   if (!pathname.startsWith('/')) return null;
 
   const staticName = pathname.slice(1);
@@ -357,7 +371,9 @@ async function resolveStaticAsset(pathname) {
     filepath,
     cacheControl: filename === 'sw.js'
       ? 'no-store, max-age=0, must-revalidate'
-      : 'public, no-cache, max-age=0, must-revalidate',
+      : hasVersionedAssetTag(query)
+        ? 'public, max-age=31536000, immutable'
+        : 'public, no-cache, max-age=0, must-revalidate',
     contentType,
   };
 }
@@ -540,7 +556,7 @@ export async function handleRequest(req, res) {
   const pathname = parsedUrl.pathname;
 
   // Static assets (read from disk each time for hot-reload)
-  const staticAsset = await resolveStaticAsset(pathname);
+  const staticAsset = await resolveStaticAsset(pathname, parsedUrl.query);
   if (staticAsset) {
     try {
       const content = await readFile(staticAsset.filepath);

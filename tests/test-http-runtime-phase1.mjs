@@ -119,7 +119,6 @@ setTimeout(() => {
     type: 'turn.completed',
     usage: { input_tokens: 1, output_tokens: 1 }
   }));
-  process.exit(0);
 }, delay);
 `,
     'utf8',

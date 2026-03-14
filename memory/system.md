@@ -217,7 +217,8 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 ### PWA Frontend Freshness Needs Dynamic Asset Fingerprints (2026-03-12)
 - Reading HTML templates from disk on every request is not enough if the page injects a build or asset version that was frozen when the server process started.
 - For RemoteLab's no-build-step frontend, compute a page asset fingerprint from the latest mtime under `templates/` and `static/`, and inject that per request into HTML so script, icon, manifest, and service-worker URLs change as soon as frontend files change.
-- In standalone/PWA mode, also let the loaded shell poll a tiny no-store build-info endpoint on `pageshow` / `visibilitychange`; if the injected asset version differs from the latest one, reload the page so backgrounded apps do not stay stuck on stale JS forever.
+- When the app already keeps a WebSocket open, prefer sending the current page build info on socket connect and rebroadcasting it on frontend file changes; existing pages can then reload from push without adding extra focus/visibility polling.
+- Keep versioned static asset URLs (`?v=` or hashed filenames) on long-lived immutable caching, and let only non-versioned assets or `sw.js` stay on revalidation/no-store policies.
 
 ### Detached Run State Must Be Read Fresh Across Processes (2026-03-10)
 - `status.json` and `result.json` are shared mutable state between the chat-server control plane and detached runner sidecars, so process-local caches are not authoritative.

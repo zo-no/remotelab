@@ -241,6 +241,14 @@ async function main() {
     assert.ok(splitAsset.headers.etag, 'split asset should expose an ETag');
     assert.match(splitAsset.text, /const buildInfo = window\.__REMOTELAB_BUILD__ \|\| \{\};/);
 
+    const versionedSplitAsset = await request(port, 'GET', '/chat/bootstrap.js?v=test-build');
+    assert.equal(versionedSplitAsset.status, 200, 'versioned split chat asset should load');
+    assert.equal(
+      versionedSplitAsset.headers['cache-control'],
+      'public, max-age=31536000, immutable',
+      'versioned split assets should be immutable cache hits',
+    );
+
     const stateModelAsset = await request(port, 'GET', '/chat/session-state-model.js');
     assert.equal(stateModelAsset.status, 200, 'session state model asset should load');
     assert.equal(

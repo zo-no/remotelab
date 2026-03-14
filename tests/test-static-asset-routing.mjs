@@ -135,6 +135,14 @@ async function main() {
     assert.ok(probe.headers.etag, 'new static asset should expose an ETag');
     assert.match(probe.text, /__REMOTELAB_STATIC_PROBE__/);
 
+    const versionedProbe = await request(port, `/chat/${probeName}?v=test-build`);
+    assert.equal(versionedProbe.status, 200, 'versioned static asset should load');
+    assert.equal(
+      versionedProbe.headers['cache-control'],
+      'public, max-age=31536000, immutable',
+      'versioned static assets should be long-lived immutable cache hits',
+    );
+
     const probe304 = await request(port, `/chat/${probeName}`, {
       'If-None-Match': probe.headers.etag,
     });

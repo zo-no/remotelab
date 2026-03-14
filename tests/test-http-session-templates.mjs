@@ -105,7 +105,6 @@ setTimeout(() => {
     item: { type: 'agent_message', text: 'finished from fake codex' }
   }));
   console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));
-  process.exit(0);
 }, 120);
 `,
     'utf8',
@@ -125,6 +124,9 @@ async function startServer({ home, port }) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+
+  child.stdout.on('data', () => {});
+  child.stderr.on('data', () => {});
 
   await waitFor(async () => {
     try {

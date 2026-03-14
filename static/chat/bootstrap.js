@@ -2,8 +2,6 @@
 
 const buildInfo = window.__REMOTELAB_BUILD__ || {};
 const buildAssetVersion = buildInfo.assetVersion || "dev";
-const BUILD_INFO_ENDPOINT = "/api/build-info";
-const BUILD_REFRESH_CHECK_COOLDOWN_MS = 1000;
 const BUILD_FORCE_RELOAD_HOLD_MS = 700;
 
 console.info(
@@ -11,23 +9,9 @@ console.info(
   buildInfo.title || buildInfo.serviceTitle || buildAssetVersion,
 );
 
-let buildRefreshCheckPromise = null;
-let lastBuildRefreshCheckAt = 0;
 let buildRefreshScheduled = false;
 let newerBuildInfo = null;
 let buildForceReloadHoldTimer = null;
-
-async function fetchLatestBuildInfo() {
-  const res = await fetch(BUILD_INFO_ENDPOINT, {
-    cache: "no-store",
-    headers: {
-      "Cache-Control": "no-cache",
-      Pragma: "no-cache",
-    },
-  });
-  if (!res.ok) throw new Error(`Build info request failed (${res.status})`);
-  return res.json();
-}
 
 async function clearFrontendCaches() {
   if (!("serviceWorker" in navigator)) return;
@@ -89,59 +73,27 @@ async function reloadForFreshBuild(nextBuildInfo, { force = false } = {}) {
   return true;
 }
 
-async function checkForUpdatedBuild({ force = false } = {}) {
+async function applyBuildInfo(nextBuildInfo) {
   if (buildRefreshScheduled) return false;
-  const now = Date.now();
-  if (!force && now - lastBuildRefreshCheckAt < BUILD_REFRESH_CHECK_COOLDOWN_MS) {
+  if (!nextBuildInfo?.assetVersion) {
     return false;
   }
-  if (buildRefreshCheckPromise) return buildRefreshCheckPromise;
-
-  lastBuildRefreshCheckAt = now;
-  buildRefreshCheckPromise = (async () => {
-    try {
-      const latestBuildInfo = await fetchLatestBuildInfo();
-      if (
-        latestBuildInfo?.assetVersion &&
-        latestBuildInfo.assetVersion !== buildAssetVersion
-      ) {
-        newerBuildInfo = latestBuildInfo;
-        updateFrontendRefreshUi();
-        return reloadForFreshBuild(latestBuildInfo);
-      }
+  if (nextBuildInfo.assetVersion === buildAssetVersion) {
+    if (!buildRefreshScheduled) {
       newerBuildInfo = null;
       updateFrontendRefreshUi();
-    } catch (error) {
-      console.debug?.("RemoteLab build check skipped", error?.message || error);
-    } finally {
-      buildRefreshCheckPromise = null;
     }
     return false;
-  })();
-
-  return buildRefreshCheckPromise;
+  }
+  newerBuildInfo = nextBuildInfo;
+  updateFrontendRefreshUi();
+  return reloadForFreshBuild(nextBuildInfo);
 }
 
 window.RemoteLabBuild = {
-  checkForUpdates: checkForUpdatedBuild,
+  applyBuildInfo,
   reloadForFreshBuild,
 };
-
-window.addEventListener("pageshow", () => {
-  void checkForUpdatedBuild({ force: true });
-});
-
-window.addEventListener("focus", () => {
-  if (document.visibilityState === "visible") {
-    void checkForUpdatedBuild();
-  }
-});
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
-    void checkForUpdatedBuild();
-  }
-});
 
 // ---- Elements ----
 const menuBtn = document.getElementById("menuBtn");

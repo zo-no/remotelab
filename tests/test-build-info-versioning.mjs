@@ -122,10 +122,16 @@ async function fetchBuildInfo(port) {
 
 async function connectWs(port) {
   return new Promise((resolve, reject) => {
+    const messages = [];
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
       headers: { Cookie: ownerCookie },
     });
-    socket.on('open', () => resolve(socket));
+    socket.on('message', (data) => {
+      try {
+        messages.push(JSON.parse(data.toString()));
+      } catch {}
+    });
+    socket.on('open', () => resolve({ socket, messages }));
     socket.on('error', reject);
   });
 }
@@ -139,16 +145,13 @@ async function main() {
   const bootstrapSource = readFileSync(join(repoRoot, 'static', 'chat', 'bootstrap.js'), 'utf8');
   let server = null;
   let ws = null;
+  let wsMessages = [];
 
   try {
     server = await startServer({ home, port });
-    ws = await connectWs(port);
-    const wsMessages = [];
-    ws.on('message', (data) => {
-      try {
-        wsMessages.push(JSON.parse(data.toString()));
-      } catch {}
-    });
+    const wsConnection = await connectWs(port);
+    ws = wsConnection.socket;
+    wsMessages = wsConnection.messages;
 
     assert.doesNotMatch(
       bootstrapSource,
@@ -187,6 +190,10 @@ async function main() {
       initial.frontendTitle,
       'build info headers should expose the frontend identity',
     );
+    await waitFor(
+      () => wsMessages.find((msg) => msg.type === 'build_info' && msg.buildInfo?.assetVersion === initial.assetVersion),
+      'initial websocket build info payload',
+    );
 
     const loginPage = await request(port, '/login', { Cookie: '' });
     assert.equal(loginPage.status, 200, 'login page should render');
@@ -200,8 +207,8 @@ async function main() {
     await sleep(350);
     writeFileSync(frontendProbePath, 'window.__REMOTELAB_BUILD_INFO_PROBE__ = true;\n', 'utf8');
     await waitFor(
-      () => wsMessages.some((msg) => msg.type === 'build_invalidated'),
-      'frontend build invalidation websocket hint',
+      () => wsMessages.find((msg) => msg.type === 'build_info' && msg.buildInfo?.assetVersion && msg.buildInfo.assetVersion !== initial.assetVersion),
+      'frontend build websocket update',
     );
 
     const frontendUpdatedBuild = await fetchBuildInfo(port);
