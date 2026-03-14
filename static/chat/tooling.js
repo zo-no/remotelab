@@ -542,9 +542,9 @@ async function saveSimpleToolConfig() {
       localStorage.setItem("selectedTool", selectedTool);
     }
 
-    await loadInlineTools();
+    await loadInlineTools({ skipModelLoad: true });
     if (selectedTool) {
-      await loadModelsForCurrentTool();
+      await loadModelsForCurrentTool({ refresh: true });
     }
 
     if (savedTool?.available) {
@@ -597,7 +597,43 @@ function renderInlineToolOptions(selectedValue, emptyMessage = "No agents found"
   }
 }
 
-async function loadInlineTools() {
+const modelResponseCache = new Map();
+const pendingModelResponseRequests = new Map();
+
+async function fetchModelResponse(toolId, { refresh = false } = {}) {
+  if (!toolId) {
+    return {
+      models: [],
+      effortLevels: null,
+      defaultModel: null,
+      reasoning: { kind: "none", label: "Thinking" },
+    };
+  }
+
+  if (!refresh && modelResponseCache.has(toolId)) {
+    return modelResponseCache.get(toolId);
+  }
+
+  if (!refresh && pendingModelResponseRequests.has(toolId)) {
+    return pendingModelResponseRequests.get(toolId);
+  }
+
+  const request = fetchJsonOrRedirect(`/api/models?tool=${encodeURIComponent(toolId)}`, {
+    revalidate: !refresh,
+  })
+    .then((data) => {
+      modelResponseCache.set(toolId, data);
+      return data;
+    })
+    .finally(() => {
+      pendingModelResponseRequests.delete(toolId);
+    });
+
+  pendingModelResponseRequests.set(toolId, request);
+  return request;
+}
+
+async function loadInlineTools({ skipModelLoad = false } = {}) {
   if (visitorMode) {
     toolsList = [];
     selectedTool = null;
@@ -619,11 +655,22 @@ async function loadInlineTools() {
         localStorage.setItem("preferredTool", preferredTool);
       }
     }
-    await loadModelsForCurrentTool();
+    if (!skipModelLoad) {
+      await loadModelsForCurrentTool();
+    }
+    if (typeof renderAppToolSelectOptions === "function") {
+      renderAppToolSelectOptions(newAppToolSelect, newAppToolSelect?.value || selectedTool || initialTool || "");
+    }
+    if (typeof renderSettingsAppsPanel === "function") {
+      renderSettingsAppsPanel();
+    }
   } catch (err) {
     toolsList = [];
     console.warn("[tools] Failed to load tools:", err.message);
     renderInlineToolOptions("", "Failed to load agents");
+    if (typeof renderAppToolSelectOptions === "function") {
+      renderAppToolSelectOptions(newAppToolSelect, newAppToolSelect?.value || "");
+    }
   }
 }
 
@@ -645,7 +692,7 @@ inlineToolSelect.addEventListener("change", async () => {
 });
 
 // ---- Model select ----
-async function loadModelsForCurrentTool() {
+async function loadModelsForCurrentTool({ refresh = false } = {}) {
   if (visitorMode) {
     currentToolModels = [];
     currentToolEffortLevels = null;
@@ -660,6 +707,7 @@ async function loadModelsForCurrentTool() {
     effortSelect.style.display = "none";
     return;
   }
+  const toolId = selectedTool;
   if (!selectedTool) {
     currentToolModels = [];
     currentToolEffortLevels = null;
@@ -675,8 +723,9 @@ async function loadModelsForCurrentTool() {
     return;
   }
   try {
-    const sessionPreferences = getAttachedSessionToolPreferences(selectedTool);
-    const data = await fetchJsonOrRedirect(`/api/models?tool=${encodeURIComponent(selectedTool)}`);
+    const sessionPreferences = getAttachedSessionToolPreferences(toolId);
+    const data = await fetchModelResponse(toolId, { refresh });
+    if (selectedTool !== toolId) return;
     currentToolModels = data.models || [];
     currentToolReasoningKind =
       data.reasoning?.kind || (data.effortLevels ? "enum" : "toggle");
@@ -701,7 +750,7 @@ async function loadModelsForCurrentTool() {
       inlineModelSelect.appendChild(opt);
     }
     // Restore saved model for this tool
-    const savedModel = localStorage.getItem(`selectedModel_${selectedTool}`) || "";
+    const savedModel = localStorage.getItem(`selectedModel_${toolId}`) || "";
     const defaultModel = data.defaultModel || "";
     selectedModel = sessionPreferences?.hasModel ? sessionPreferences.model : savedModel;
     if (selectedModel && currentToolModels.some((m) => m.id === selectedModel)) {
@@ -728,7 +777,7 @@ async function loadModelsForCurrentTool() {
 
       selectedEffort = sessionPreferences?.hasEffort
         ? sessionPreferences.effort
-        : (localStorage.getItem(`selectedEffort_${selectedTool}`) || "");
+        : (localStorage.getItem(`selectedEffort_${toolId}`) || "");
       const currentModelData = currentToolModels.find((m) => m.id === selectedModel);
       if (selectedEffort && currentToolEffortLevels.includes(selectedEffort)) {
         effortSelect.value = selectedEffort;

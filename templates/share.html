@@ -230,12 +230,24 @@ body {
   margin-bottom: 10px;
 }
 
-.msg-images img {
+.msg-images img,
+.msg-images video,
+.msg-images .attachment-link {
   width: 100%;
   display: block;
   border-radius: 12px;
   border: 1px solid var(--image-border);
+}
+
+.msg-images img {
   cursor: zoom-in;
+}
+
+.msg-images .attachment-link {
+  padding: 12px;
+  color: var(--assistant-link);
+  background: var(--card-bg);
+  text-decoration: none;
 }
 
 .msg-assistant,
@@ -520,9 +532,9 @@ body {
     </section>
   </div>
 
-  <script nonce="{{NONCE}}">window.__REMOTELAB_SHARE__ = {{SNAPSHOT_JSON}};</script>
-  <script nonce="{{NONCE}}" src="/marked.min.js?v={{ASSET_VERSION}}"></script>
-  <script nonce="{{NONCE}}" src="/chat/icons.js?v={{ASSET_VERSION}}"></script>
-  <script nonce="{{NONCE}}" src="/share.js?v={{ASSET_VERSION}}"></script>
+  <script src="{{SHARE_PAYLOAD_URL}}"></script>
+  <script src="/marked.min.js?v={{ASSET_VERSION}}"></script>
+  <script src="/chat/icons.js?v={{ASSET_VERSION}}"></script>
+  <script src="/share.js?v={{ASSET_VERSION}}"></script>
 </body>
 </html>

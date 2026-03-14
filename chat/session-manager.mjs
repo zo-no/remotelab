@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import { watch } from 'fs';
 import { writeFile } from 'fs/promises';
-import { join } from 'path';
+import { extname, join } from 'path';
 import { CHAT_IMAGES_DIR } from '../lib/config.mjs';
 import { getToolDefinitionAsync } from '../lib/tools.mjs';
 import { createToolInvocation } from './process-runner.mjs';
@@ -19,7 +19,11 @@ import {
   setContextHead,
 } from './history.mjs';
 import { messageEvent, statusEvent } from './normalizer.mjs';
-import { triggerSessionLabelSuggestion } from './summarizer.mjs';
+import {
+  triggerSessionBoardLayoutSuggestion,
+  triggerSessionLabelSuggestion,
+  triggerSessionWorkflowStateSuggestion,
+} from './summarizer.mjs';
 import { sendCompletionPush } from './push.mjs';
 import { buildSystemContext } from './system-prompt.mjs';
 import {
@@ -35,6 +39,10 @@ import {
   normalizeSessionGroup,
   resolveInitialSessionName,
 } from './session-naming.mjs';
+import {
+  normalizeSessionWorkflowPriority,
+  normalizeSessionWorkflowState,
+} from './session-workflow-state.mjs';
 import {
   createRun,
   findRunByRequest,
@@ -65,11 +73,46 @@ import {
   mutateSessionMeta,
   withSessionsMetaMutation,
 } from './session-meta-store.mjs';
+import {
+  getBoardPlacement,
+  loadBoardLayout,
+  replaceBoardLayout,
+  summarizeBoardLayout,
+} from './session-board-layout.mjs';
 import { dispatchSessionEmailCompletionTargets, sanitizeEmailCompletionTargets } from '../lib/agent-mail-completion-targets.mjs';
-import { createApp, getApp, normalizeAppId, resolveEffectiveAppId } from './apps.mjs';
+import {
+  DEFAULT_APP_ID,
+  createApp,
+  getApp,
+  getBuiltinApp,
+  normalizeAppId,
+  resolveEffectiveAppId,
+} from './apps.mjs';
 import { ensureDir } from './fs-utils.mjs';
 
-const MIME_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
+const MIME_EXTENSIONS = {
+  'application/json': '.json',
+  'application/pdf': '.pdf',
+  'application/zip': '.zip',
+  'audio/mpeg': '.mp3',
+  'audio/mp4': '.m4a',
+  'audio/ogg': '.ogg',
+  'audio/wav': '.wav',
+  'image/gif': '.gif',
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'text/markdown': '.md',
+  'text/plain': '.txt',
+  'video/mp4': '.mp4',
+  'video/ogg': '.ogv',
+  'video/quicktime': '.mov',
+  'video/webm': '.webm',
+  'video/x-m4v': '.m4v',
+};
+const EXTENSION_MIME_TYPES = Object.fromEntries(
+  Object.entries(MIME_EXTENSIONS).map(([mimeType, extension]) => [extension.slice(1), mimeType]),
+);
 const VISITOR_TURN_GUARDRAIL = [
   '<private>',
   'Share-link security notice for this turn:',
@@ -240,6 +283,62 @@ function normalizeSessionAppName(value) {
   return value.trim().replace(/\s+/g, ' ');
 }
 
+function normalizeSessionSourceName(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ');
+}
+
+function normalizeSessionVisitorName(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ');
+}
+
+function normalizeSessionUserName(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ');
+}
+
+function isTemplateAppScopeId(appId) {
+  const normalized = normalizeAppId(appId);
+  return /^app[_-]/i.test(normalized);
+}
+
+function formatSessionSourceNameFromId(sourceId) {
+  const normalized = typeof sourceId === 'string' ? sourceId.trim() : '';
+  if (!normalized) return 'Chat';
+  return normalized
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function resolveSessionSourceId(meta) {
+  const explicitSourceId = normalizeAppId(meta?.sourceId);
+  if (explicitSourceId) return explicitSourceId;
+
+  const legacyAppId = normalizeAppId(meta?.appId);
+  if (legacyAppId && !isTemplateAppScopeId(legacyAppId)) {
+    return legacyAppId;
+  }
+
+  return DEFAULT_APP_ID;
+}
+
+function resolveSessionSourceName(meta, sourceId = resolveSessionSourceId(meta)) {
+  const explicitSourceName = normalizeSessionSourceName(meta?.sourceName);
+  if (explicitSourceName) return explicitSourceName;
+
+  const legacyAppId = normalizeAppId(meta?.appId);
+  if (legacyAppId && !isTemplateAppScopeId(legacyAppId) && legacyAppId === sourceId) {
+    const legacyAppName = normalizeSessionAppName(meta?.appName);
+    if (legacyAppName) return legacyAppName;
+  }
+
+  const builtinSource = getBuiltinApp(sourceId);
+  if (builtinSource?.name) return builtinSource.name;
+
+  return formatSessionSourceNameFromId(sourceId);
+}
+
 function getFollowUpQueue(meta) {
   return Array.isArray(meta?.followUpQueue) ? meta.followUpQueue : [];
 }
@@ -248,17 +347,53 @@ function getFollowUpQueueCount(meta) {
   return getFollowUpQueue(meta).length;
 }
 
-function sanitizeQueuedFollowUpImages(images) {
+function sanitizeOriginalAttachmentName(value) {
+  if (typeof value !== 'string') return '';
+  const normalized = value.trim().replace(/\\/g, '/');
+  const basename = normalized.split('/').filter(Boolean).pop() || '';
+  return basename.replace(/\s+/g, ' ').slice(0, 255);
+}
+
+function resolveAttachmentMimeType(mimeType, originalName = '') {
+  const normalizedMimeType = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
+  if (normalizedMimeType) {
+    return normalizedMimeType;
+  }
+  const extension = extname(originalName || '').toLowerCase().replace(/^\./, '');
+  return EXTENSION_MIME_TYPES[extension] || 'application/octet-stream';
+}
+
+function resolveAttachmentExtension(mimeType, originalName = '') {
+  const resolvedMimeType = resolveAttachmentMimeType(mimeType, originalName);
+  if (MIME_EXTENSIONS[resolvedMimeType]) {
+    return MIME_EXTENSIONS[resolvedMimeType];
+  }
+  const originalExtension = extname(originalName || '').toLowerCase();
+  if (/^\.[a-z0-9]+$/.test(originalExtension)) {
+    return originalExtension;
+  }
+  return '.bin';
+}
+
+function getAttachmentDisplayName(attachment) {
+  const originalName = sanitizeOriginalAttachmentName(attachment?.originalName || '');
+  if (originalName) return originalName;
+  return typeof attachment?.filename === 'string' ? attachment.filename : '';
+}
+
+function sanitizeQueuedFollowUpAttachments(images) {
   return (images || [])
     .map((image) => {
       const filename = typeof image?.filename === 'string' ? image.filename.trim() : '';
       const savedPath = typeof image?.savedPath === 'string' ? image.savedPath.trim() : '';
-      const mimeType = typeof image?.mimeType === 'string' ? image.mimeType.trim() : '';
+      const originalName = sanitizeOriginalAttachmentName(image?.originalName || '');
+      const mimeType = resolveAttachmentMimeType(image?.mimeType, originalName || filename);
       if (!filename || !savedPath) return null;
       return {
         filename,
         savedPath,
-        mimeType: mimeType || 'image/png',
+        ...(originalName ? { originalName } : {}),
+        mimeType,
       };
     })
     .filter(Boolean);
@@ -280,6 +415,7 @@ function serializeQueuedFollowUp(entry) {
     queuedAt: typeof entry?.queuedAt === 'string' ? entry.queuedAt : '',
     images: (entry?.images || []).map((image) => ({
       filename: image.filename,
+      originalName: image.originalName,
       mimeType: image.mimeType,
     })),
   };
@@ -323,9 +459,9 @@ function formatQueuedFollowUpTextEntry(entry, index) {
       lines.push(text);
     }
   }
-  const imageNames = (entry?.images || []).map((image) => image?.filename || '').filter(Boolean);
-  if (imageNames.length > 0) {
-    lines.push(`[Attached images: ${imageNames.join(', ')}]`);
+  const attachmentNames = (entry?.images || []).map((image) => getAttachmentDisplayName(image)).filter(Boolean);
+  if (attachmentNames.length > 0) {
+    lines.push(`[Attached files: ${attachmentNames.join(', ')}]`);
   }
   return lines.join('\n');
 }
@@ -424,7 +560,7 @@ async function flushQueuedFollowUps(sessionId) {
       model: dispatchOptions.model,
       effort: dispatchOptions.effort,
       thinking: dispatchOptions.thinking,
-      preSavedImages: queue.flatMap((entry) => sanitizeQueuedFollowUpImages(entry.images)),
+      preSavedAttachments: queue.flatMap((entry) => sanitizeQueuedFollowUpAttachments(entry.images)),
       recordedUserText: transcriptText,
       queueIfBusy: false,
     });
@@ -597,19 +733,25 @@ function observeDetachedRun(sessionId, runId) {
   }
 }
 
-async function saveImages(images) {
+async function saveAttachments(images) {
   if (!images || images.length === 0) return [];
   await ensureDir(CHAT_IMAGES_DIR);
   return Promise.all(images.map(async (img) => {
-    const ext = MIME_EXT[img.mimeType] || '.png';
+    const originalName = sanitizeOriginalAttachmentName(img?.originalName || img?.name || '');
+    const mimeType = resolveAttachmentMimeType(img?.mimeType, originalName);
+    const ext = resolveAttachmentExtension(mimeType, originalName);
     const filename = randomBytes(12).toString('hex') + ext;
     const filepath = join(CHAT_IMAGES_DIR, filename);
-    await writeFile(filepath, Buffer.from(img.data, 'base64'));
+    const fileBuffer = Buffer.isBuffer(img?.buffer)
+      ? img.buffer
+      : Buffer.from(typeof img?.data === 'string' ? img.data : '', 'base64');
+    await writeFile(filepath, fileBuffer);
     return {
       filename,
       savedPath: filepath,
-      mimeType: img.mimeType || 'image/png',
-      data: img.data,
+      ...(originalName ? { originalName } : {}),
+      mimeType,
+      ...(typeof img?.data === 'string' ? { data: img.data } : {}),
     };
   }));
 }
@@ -698,10 +840,14 @@ async function enrichSessionMeta(meta) {
   const snapshot = await getHistorySnapshot(meta.id);
   const queuedCount = getFollowUpQueueCount(meta);
   const runActivity = await resolveSessionRunActivity(meta);
+  const boardPlacement = await getBoardPlacement(meta.id);
   const { followUpQueue, recentFollowUpRequestIds, activeRunId, activeRun, ...rest } = meta;
+  const sourceId = resolveSessionSourceId(meta);
   return {
     ...rest,
     appId: resolveEffectiveAppId(meta.appId),
+    sourceId,
+    sourceName: resolveSessionSourceName(meta, sourceId),
     latestSeq: snapshot.latestSeq,
     lastEventAt: snapshot.lastEventAt,
     messageCount: snapshot.messageCount,
@@ -715,6 +861,7 @@ async function enrichSessionMeta(meta) {
       run: runActivity.run,
       queuedCount,
     }),
+    ...(boardPlacement ? { board: boardPlacement } : {}),
   };
 }
 
@@ -799,7 +946,7 @@ function broadcastSessionInvalidation(sessionId) {
     const authSession = client._authSession;
     if (!authSession) return false;
     if (authSession.role === 'owner') {
-      return !session?.visitorId && shouldExposeSession(session);
+      return shouldExposeSession(session);
     }
     if (authSession.role === 'visitor') {
       return authSession.sessionId === sessionId;
@@ -1106,18 +1253,18 @@ function clipCompactionEventText(value, maxChars = 4000) {
   return `${text.slice(0, headChars).trimEnd()}\n[... truncated by RemoteLab ...]\n${text.slice(-tailChars).trimStart()}`;
 }
 
-function formatCompactionImages(images) {
+function formatCompactionAttachments(images) {
   const refs = (images || [])
-    .map((img) => img?.filename || '')
+    .map((img) => getAttachmentDisplayName(img))
     .filter(Boolean);
   if (refs.length === 0) return '';
-  return `[Attached images: ${refs.join(', ')}]`;
+  return `[Attached files: ${refs.join(', ')}]`;
 }
 
 function formatCompactionMessage(evt) {
   const label = evt.role === 'user' ? 'User' : 'Assistant';
   const parts = [];
-  const imageLine = formatCompactionImages(evt.images);
+  const imageLine = formatCompactionAttachments(evt.images);
   if (imageLine) parts.push(imageLine);
   const content = clipCompactionEventText(evt.content);
   if (content) parts.push(content);
@@ -1410,6 +1557,144 @@ async function applyGeneratedSessionGrouping(sessionId, summaryResult) {
   });
 }
 
+function scheduleSessionWorkflowStateSuggestion(session, run) {
+  if (!session?.id || !run || session.archived || isInternalSession(session)) {
+    return false;
+  }
+
+  const suggestionDone = triggerSessionWorkflowStateSuggestion({
+    id: session.id,
+    folder: session.folder,
+    name: session.name || '',
+    group: session.group || '',
+    description: session.description || '',
+    workflowState: session.workflowState || '',
+    workflowPriority: session.workflowPriority || '',
+    tool: run.tool || session.tool,
+    model: run.model || undefined,
+    thinking: false,
+    runState: run.state,
+    queuedCount: getSessionQueueCount(session),
+  });
+
+  suggestionDone.then(async (result) => {
+    const nextWorkflowState = normalizeSessionWorkflowState(result?.workflowState || '');
+    const nextWorkflowPriority = normalizeSessionWorkflowPriority(result?.workflowPriority || '');
+    if (!nextWorkflowState && !nextWorkflowPriority) return;
+    await updateSessionWorkflowClassification(session.id, {
+      workflowState: nextWorkflowState,
+      workflowPriority: nextWorkflowPriority,
+    });
+  }).catch((error) => {
+    console.error(`[workflow-state] Failed to update workflow state for ${session.id?.slice(0, 8)}: ${error.message}`);
+  });
+
+  return true;
+}
+
+function chooseBoardLayoutAnchorSession(sessions, preferredSessionId = '') {
+  const preferred = sessions.find((session) => session.id === preferredSessionId && session.tool);
+  if (preferred) return preferred;
+  return sessions.find((session) => session.tool) || null;
+}
+
+async function applySuggestedBoardLayout(sourceSessionId, activeSessions, suggestion) {
+  const sessionIds = activeSessions
+    .map((session) => session?.id)
+    .filter(Boolean);
+  const result = await replaceBoardLayout(suggestion, {
+    sessionIds,
+    sourceSessionId,
+  });
+  if (result.changed) {
+    broadcastSessionsInvalidation();
+  }
+  return result.layout;
+}
+
+export async function getSessionBoardLayout() {
+  return summarizeBoardLayout(await loadBoardLayout());
+}
+
+export async function rebuildSessionBoardLayout({
+  sessionId = '',
+  tool = '',
+  model,
+  effort,
+  thinking = false,
+} = {}) {
+  const activeSessions = await listSessions({ includeVisitor: true, includeArchived: false });
+  if (activeSessions.length === 0) {
+    return {
+      ok: false,
+      skipped: 'no_sessions',
+      board: summarizeBoardLayout(await loadBoardLayout()),
+    };
+  }
+
+  const anchorSession = chooseBoardLayoutAnchorSession(activeSessions, sessionId);
+  if (!anchorSession) {
+    return {
+      ok: false,
+      skipped: 'no_tool',
+      board: summarizeBoardLayout(await loadBoardLayout()),
+    };
+  }
+
+  const [currentHistory, existingBoardLayout] = await Promise.all([
+    loadHistory(anchorSession.id, { includeBodies: true }),
+    loadBoardLayout(),
+  ]);
+
+  const suggestion = await triggerSessionBoardLayoutSuggestion({
+    id: anchorSession.id,
+    folder: anchorSession.folder,
+    name: anchorSession.name || '',
+    group: anchorSession.group || '',
+    description: anchorSession.description || '',
+    tool: tool || anchorSession.tool,
+    model: model || anchorSession.model || undefined,
+    effort: effort || anchorSession.effort || undefined,
+    thinking,
+    currentHistory,
+    activeSessions,
+    existingBoardLayout,
+  });
+
+  if (!suggestion?.ok || !suggestion.boardLayout) {
+    return {
+      ok: false,
+      error: suggestion?.error || 'Board layout suggestion failed',
+      board: summarizeBoardLayout(existingBoardLayout),
+    };
+  }
+
+  const board = await applySuggestedBoardLayout(anchorSession.id, activeSessions, suggestion.boardLayout);
+  return {
+    ok: true,
+    sourceSessionId: anchorSession.id,
+    board: summarizeBoardLayout(board),
+  };
+}
+
+function scheduleSessionBoardLayoutSuggestion(session, run) {
+  if (!session?.id || !run || session.archived || isInternalSession(session)) {
+    return false;
+  }
+
+  rebuildSessionBoardLayout({
+    sessionId: session.id,
+    tool: run.tool || session.tool,
+    model: run.model || session.model || undefined,
+    effort: run.effort || session.effort || undefined,
+    thinking: false,
+  }).catch((error) => {
+    console.error(`[board-layout] Failed to rebuild board layout from ${session.id?.slice(0, 8)}: ${error.message}`);
+  });
+
+  return true;
+}
+
 function launchEarlySessionLabelSuggestion(sessionId, sessionMeta) {
   const live = ensureLiveSession(sessionId);
   if (live.earlyTitlePromise) {
@@ -1684,6 +1969,10 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
   }
 
   queueSessionCompletionTargets(latestSession, finalizedRun, manifest);
+  if (!manifest?.internalOperation) {
+    scheduleSessionWorkflowStateSuggestion(latestSession, finalizedRun);
+    scheduleSessionBoardLayoutSuggestion(latestSession, finalizedRun);
+  }
 
   const needsRename = isSessionAutoRenamePending(latestSession);
   const needsGrouping = !latestSession.group || !latestSession.description;
@@ -1912,14 +2201,16 @@ export async function startDetachedRunObservers() {
   await resumePendingCompletionTargets();
 }
 
-export async function listSessions({ includeVisitor = false, includeArchived = true, appId = '', includeQueuedMessages = false } = {}) {
+export async function listSessions({ includeVisitor = false, includeArchived = true, appId = '', sourceId = '', includeQueuedMessages = false } = {}) {
   const metas = await reconcileSessionsMetaList(await loadSessionsMeta());
   const normalizedAppId = normalizeAppId(appId);
+  const normalizedSourceId = normalizeAppId(sourceId);
   const filtered = metas
     .filter((meta) => includeVisitor || !meta.visitorId)
     .filter((meta) => shouldExposeSession(meta))
     .filter((meta) => includeArchived || !meta.archived)
     .filter((meta) => !normalizedAppId || resolveEffectiveAppId(meta.appId) === normalizedAppId)
+    .filter((meta) => !normalizedSourceId || resolveSessionSourceId(meta) === normalizedSourceId)
     .sort((a, b) => (
       getSessionPinSortRank(b) - getSessionPinSortRank(a)
       || getSessionSortTime(b) - getSessionSortTime(a)
@@ -1948,6 +2239,11 @@ export async function createSession(folder, tool, name, extra = {}) {
   const externalTriggerId = typeof extra.externalTriggerId === 'string' ? extra.externalTriggerId.trim() : '';
   const requestedAppId = normalizeAppId(extra.appId);
   const requestedAppName = normalizeSessionAppName(extra.appName);
+  const requestedSourceId = normalizeAppId(extra.sourceId);
+  const requestedSourceName = normalizeSessionSourceName(extra.sourceName);
+  const requestedVisitorName = normalizeSessionVisitorName(extra.visitorName);
+  const requestedUserId = typeof extra.userId === 'string' ? extra.userId.trim() : '';
+  const requestedUserName = normalizeSessionUserName(extra.userName);
   const created = await withSessionsMetaMutation(async (metas, saveSessionsMeta) => {
     if (externalTriggerId) {
       const existingIndex = metas.findIndex((meta) => meta.externalTriggerId === externalTriggerId && !meta.archived);
@@ -1968,8 +2264,45 @@ export async function createSession(folder, tool, name, extra = {}) {
           changed = true;
         }
 
+        const workflowState = normalizeSessionWorkflowState(extra.workflowState || '');
+        if (workflowState && updated.workflowState !== workflowState) {
+          updated.workflowState = workflowState;
+          changed = true;
+        }
+
+        const workflowPriority = normalizeSessionWorkflowPriority(extra.workflowPriority || '');
+        if (workflowPriority && updated.workflowPriority !== workflowPriority) {
+          updated.workflowPriority = workflowPriority;
+          changed = true;
+        }
+
         if (requestedAppName && updated.appName !== requestedAppName) {
           updated.appName = requestedAppName;
+          changed = true;
+        }
+
+        if (requestedSourceId && updated.sourceId !== requestedSourceId) {
+          updated.sourceId = requestedSourceId;
+          changed = true;
+        }
+
+        if (requestedSourceName && updated.sourceName !== requestedSourceName) {
+          updated.sourceName = requestedSourceName;
+          changed = true;
+        }
+
+        if (requestedVisitorName && updated.visitorName !== requestedVisitorName) {
+          updated.visitorName = requestedVisitorName;
+          changed = true;
+        }
+
+        if (requestedUserId && updated.userId !== requestedUserId) {
+          updated.userId = requestedUserId;
+          changed = true;
+        }
+
+        if (requestedUserName && updated.userName !== requestedUserName) {
+          updated.userName = requestedUserName;
           changed = true;
         }
 
@@ -2007,6 +2340,8 @@ export async function createSession(folder, tool, name, extra = {}) {
     const now = nowIso();
     const group = normalizeSessionGroup(extra.group || '');
     const description = normalizeSessionDescription(extra.description || '');
+    const workflowState = normalizeSessionWorkflowState(extra.workflowState || '');
+    const workflowPriority = normalizeSessionWorkflowPriority(extra.workflowPriority || '');
     const completionTargets = sanitizeEmailCompletionTargets(extra.completionTargets || []);
 
     const session = {
@@ -2022,8 +2357,15 @@ export async function createSession(folder, tool, name, extra = {}) {
 
     if (group) session.group = group;
     if (description) session.description = description;
+    if (workflowState) session.workflowState = workflowState;
+    if (workflowPriority) session.workflowPriority = workflowPriority;
     if (requestedAppName) session.appName = requestedAppName;
+    if (requestedSourceId) session.sourceId = requestedSourceId;
+    if (requestedSourceName) session.sourceName = requestedSourceName;
     if (extra.visitorId) session.visitorId = extra.visitorId;
+    if (requestedVisitorName) session.visitorName = requestedVisitorName;
+    if (requestedUserId) session.userId = requestedUserId;
+    if (requestedUserName) session.userName = requestedUserName;
     if (extra.systemPrompt) session.systemPrompt = extra.systemPrompt;
     if (extra.internalRole) session.internalRole = extra.internalRole;
     if (extra.compactsSessionId) session.compactsSessionId = extra.compactsSessionId;
@@ -2039,7 +2381,7 @@ export async function createSession(folder, tool, name, extra = {}) {
     return { session, created: true, changed: true };
   });
 
-  if ((created.created || created.changed) && !created.session.visitorId && shouldExposeSession(created.session)) {
+  if ((created.created || created.changed) && shouldExposeSession(created.session)) {
     broadcastSessionsInvalidation();
   }
 
@@ -2072,7 +2414,7 @@ export async function setSessionArchived(id, archived = true) {
     return enrichSessionMeta(result.meta);
   }
 
-  if (!current.visitorId) {
+  if (shouldExposeSession(current)) {
     broadcastSessionsInvalidation();
   }
   broadcastSessionInvalidation(id);
@@ -2094,7 +2436,7 @@ export async function setSessionPinned(id, pinned = true) {
   });
 
   if (!result.meta) return null;
-  if (result.changed && !result.meta.visitorId) {
+  if (result.changed && shouldExposeSession(result.meta)) {
     broadcastSessionsInvalidation();
   }
   if (result.changed) {
@@ -2154,6 +2496,62 @@ export async function updateSessionGrouping(id, patch = {}) {
     if (changed) {
       session.updatedAt = nowIso();
     }
+    return changed;
+  });
+
+  if (!result.meta) return null;
+  if (result.changed) {
+    broadcastSessionInvalidation(id);
+  }
+  return enrichSessionMeta(result.meta);
+}
+
+export async function updateSessionWorkflowState(id, workflowState) {
+  return updateSessionWorkflowClassification(id, { workflowState });
+}
+
+export async function updateSessionWorkflowPriority(id, workflowPriority) {
+  return updateSessionWorkflowClassification(id, { workflowPriority });
+}
+
+export async function updateSessionWorkflowClassification(id, payload = {}) {
+  const {
+    workflowState,
+    workflowPriority,
+  } = payload;
+  const nextWorkflowState = normalizeSessionWorkflowState(workflowState || '');
+  const hasWorkflowState = Object.prototype.hasOwnProperty.call(payload, 'workflowState');
+  const nextWorkflowPriority = normalizeSessionWorkflowPriority(workflowPriority || '');
+  const hasWorkflowPriority = Object.prototype.hasOwnProperty.call(payload, 'workflowPriority');
+  const result = await mutateSessionMeta(id, (session) => {
+    const currentWorkflowState = normalizeSessionWorkflowState(session.workflowState || '');
+    const currentWorkflowPriority = normalizeSessionWorkflowPriority(session.workflowPriority || '');
+    let changed = false;
+
+    if (hasWorkflowState) {
+      if (nextWorkflowState) {
+        if (currentWorkflowState !== nextWorkflowState) {
+          session.workflowState = nextWorkflowState;
+          changed = true;
+        }
+      } else if (currentWorkflowState) {
+        delete session.workflowState;
+        changed = true;
+      }
+    }
+
+    if (hasWorkflowPriority) {
+      if (nextWorkflowPriority) {
+        if (currentWorkflowPriority !== nextWorkflowPriority) {
+          session.workflowPriority = nextWorkflowPriority;
+          changed = true;
+        }
+      } else if (currentWorkflowPriority) {
+        delete session.workflowPriority;
+        changed = true;
+      }
+    }
+
     return changed;
   });
 
@@ -2334,7 +2732,7 @@ export async function updateSessionRuntimePreferences(id, patch = {}) {
     await clearPersistedResumeIds(id);
   }
   broadcastSessionInvalidation(id);
-  if (!result.meta.visitorId) {
+  if (shouldExposeSession(result.meta)) {
     broadcastSessionsInvalidation();
   }
   return enrichSessionMeta(result.meta);
@@ -2473,9 +2871,9 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
 
   if ((hasActiveRun || hasPendingCompact || getFollowUpQueueCount(sessionMeta) > 0) && options.queueIfBusy !== false) {
     const normalizedText = text.trim();
-    const queuedImages = options.preSavedImages?.length > 0
-      ? sanitizeQueuedFollowUpImages(options.preSavedImages)
-      : sanitizeQueuedFollowUpImages(await saveImages(images));
+    const queuedImages = options.preSavedAttachments?.length > 0
+      ? sanitizeQueuedFollowUpAttachments(options.preSavedAttachments)
+      : sanitizeQueuedFollowUpAttachments(await saveAttachments(images));
     const queuedOptions = sanitizeQueuedFollowUpOptions(options);
     const queuedEntry = {
       requestId,
@@ -2513,10 +2911,14 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
   const recordedUserText = typeof options.recordedUserText === 'string' && options.recordedUserText.trim()
     ? options.recordedUserText.trim()
     : normalizedText;
-  const savedImages = options.preSavedImages?.length > 0
-    ? sanitizeQueuedFollowUpImages(options.preSavedImages)
-    : await saveImages(images);
-  const imageRefs = savedImages.map((img) => ({ filename: img.filename, mimeType: img.mimeType }));
+  const savedImages = options.preSavedAttachments?.length > 0
+    ? sanitizeQueuedFollowUpAttachments(options.preSavedAttachments)
+    : await saveAttachments(images);
+  const imageRefs = savedImages.map((img) => ({
+    filename: img.filename,
+    ...(img.originalName ? { originalName: img.originalName } : {}),
+    mimeType: img.mimeType,
+  }));
   const isFirstRecordedUserMessage =
     options.recordUserMessage !== false
     && (snapshot.userMessageCount || 0) === 0;
@@ -2692,6 +3094,8 @@ export async function forkSession(sessionId) {
     appId: source.appId || '',
     appName: source.appName || '',
     systemPrompt: source.systemPrompt || '',
+    userId: source.userId || '',
+    userName: source.userName || '',
     forkedFromSessionId: source.id,
     forkedFromSeq: source.latestSeq || 0,
     rootSessionId: source.rootSessionId || source.id,

@@ -377,12 +377,108 @@ async function fetchAppsList() {
   const data = await fetchJsonOrRedirect("/api/apps");
   availableApps = Array.isArray(data.apps) ? data.apps : [];
   refreshAppCatalog();
+  if (typeof renderSettingsAppsPanel === "function") {
+    renderSettingsAppsPanel();
+  }
+  if (typeof renderUserAppOptions === "function") {
+    renderUserAppOptions();
+  }
+  if (typeof renderSettingsUsersPanel === "function") {
+    renderSettingsUsersPanel();
+  }
   return availableApps;
+}
+
+async function createAppRecord(payload = {}) {
+  const data = await fetchJsonOrRedirect("/api/apps", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  await fetchAppsList();
+  return data.app || null;
+}
+
+async function updateAppRecord(appId, payload = {}) {
+  const data = await fetchJsonOrRedirect(`/api/apps/${encodeURIComponent(appId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  await fetchAppsList();
+  return data.app || null;
+}
+
+async function deleteAppRecord(appId) {
+  await fetchJsonOrRedirect(`/api/apps/${encodeURIComponent(appId)}`, {
+    method: "DELETE",
+  });
+  await fetchAppsList();
+}
+
+async function createVisitorRecord(payload = {}) {
+  const data = await fetchJsonOrRedirect("/api/visitors", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return data.visitor || null;
+}
+
+async function updateVisitorRecord(visitorId, payload = {}) {
+  const data = await fetchJsonOrRedirect(`/api/visitors/${encodeURIComponent(visitorId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return data.visitor || null;
+}
+
+async function fetchUsersList() {
+  if (visitorMode) return [];
+  const data = await fetchJsonOrRedirect("/api/users");
+  availableUsers = Array.isArray(data.users) ? data.users : [];
+  refreshAppCatalog();
+  if (typeof renderSettingsUsersPanel === "function") {
+    renderSettingsUsersPanel();
+  }
+  return availableUsers;
+}
+
+async function createUserRecord(payload = {}) {
+  const data = await fetchJsonOrRedirect("/api/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  await fetchUsersList();
+  if (data.session) {
+    upsertSession(data.session);
+  }
+  return { user: data.user || null, session: data.session || null };
+}
+
+async function updateUserRecord(userId, payload = {}) {
+  const data = await fetchJsonOrRedirect(`/api/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  await fetchUsersList();
+  return data.user || null;
+}
+
+async function deleteUserRecord(userId) {
+  await fetchJsonOrRedirect(`/api/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
+  await fetchUsersList();
 }
 
 async function fetchSessionsList() {
   if (visitorMode) return [];
-  const data = await fetchJsonOrRedirect("/api/sessions");
+  const data = await fetchJsonOrRedirect('/api/sessions?includeVisitor=1');
+  sessionBoardLayout = data.board || null;
   const previousMap = new Map(sessions.map((session) => [session.id, session]));
   sessions = (data.sessions || []).map((session) => normalizeSessionRecord(session, previousMap.get(session.id) || null));
   hasLoadedSessions = true;
@@ -574,7 +670,7 @@ async function refreshRealtimeViews() {
   }
 }
 
-async function bootstrapViaHttp() {
+async function bootstrapViaHttp({ deferOwnerRestore = false } = {}) {
   if (visitorMode && visitorSessionId) {
     currentSessionId = visitorSessionId;
     attachSession(visitorSessionId, { id: visitorSessionId, name: "Session", status: "idle" });
@@ -582,7 +678,9 @@ async function bootstrapViaHttp() {
     return;
   }
   await fetchSessionsList();
-  restoreOwnerSessionSelection();
+  if (!deferOwnerRestore) {
+    restoreOwnerSessionSelection();
+  }
 }
 
 async function setupPushNotifications() {

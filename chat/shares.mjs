@@ -1,10 +1,12 @@
 import { randomBytes } from 'crypto';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { CHAT_IMAGES_DIR, CHAT_SHARE_SNAPSHOTS_DIR } from '../lib/config.mjs';
 import { createSerialTaskQueue, ensureDir, readJson, writeJsonAtomic } from './fs-utils.mjs';
 
 const runShareMutation = createSerialTaskQueue();
+const SHARE_ID_PATTERN = /^snap_[a-f0-9]{48}$/;
+const SHARE_ASSET_ID_PATTERN = /^asset_[a-f0-9]{24}$/;
 
 async function ensureSharesDir() {
   await ensureDir(CHAT_SHARE_SNAPSHOTS_DIR);
@@ -14,13 +16,40 @@ function shareSnapshotPath(id) {
   return join(CHAT_SHARE_SNAPSHOTS_DIR, `${id}.json`);
 }
 
+function shareAssetsDir(id) {
+  return join(CHAT_SHARE_SNAPSHOTS_DIR, `${id}.assets`);
+}
+
+function shareAssetPath(id, assetId) {
+  return join(shareAssetsDir(id), assetId);
+}
+
 function generateShareId() {
   return `snap_${randomBytes(24).toString('hex')}`;
 }
 
-async function readImageBase64(image) {
+function generateShareAssetId() {
+  return `asset_${randomBytes(12).toString('hex')}`;
+}
+
+function isValidShareId(id) {
+  return typeof id === 'string' && SHARE_ID_PATTERN.test(id);
+}
+
+function isValidShareAssetId(id) {
+  return typeof id === 'string' && SHARE_ASSET_ID_PATTERN.test(id);
+}
+
+function buildShareAssetUrl(shareId, assetId) {
+  return `/share-asset/${shareId}/${assetId}`;
+}
+
+async function readAttachmentBuffer(image) {
   if (!image || typeof image !== 'object') return null;
-  if (typeof image.data === 'string' && image.data) return image.data;
+  if (typeof image.data === 'string' && image.data) {
+    const buffer = Buffer.from(image.data, 'base64');
+    if (buffer.length > 0) return buffer;
+  }
 
   const filename = typeof image.filename === 'string' ? image.filename : null;
   const candidates = [];
@@ -33,24 +62,46 @@ async function readImageBase64(image) {
 
   for (const filepath of candidates) {
     try {
-      return (await readFile(filepath)).toString('base64');
+      return await readFile(filepath);
     } catch {}
   }
 
   return null;
 }
 
-async function sanitizeImage(image) {
-  const data = await readImageBase64(image);
-  if (!data) return null;
+async function persistShareAttachment(shareId, image) {
+  const buffer = await readAttachmentBuffer(image);
+  if (!buffer || buffer.length === 0) return null;
+
+  const assetId = generateShareAssetId();
+  await ensureDir(shareAssetsDir(shareId));
+  await writeFile(shareAssetPath(shareId, assetId), buffer);
+
   return {
+    assetId,
     filename: typeof image?.filename === 'string' ? image.filename : undefined,
-    mimeType: typeof image?.mimeType === 'string' && image.mimeType ? image.mimeType : 'image/png',
-    data,
+    originalName: typeof image?.originalName === 'string' ? image.originalName : undefined,
+    mimeType: typeof image?.mimeType === 'string' && image.mimeType ? image.mimeType : 'application/octet-stream',
+    url: buildShareAssetUrl(shareId, assetId),
   };
 }
 
-async function sanitizeMessageEvent(event) {
+async function sanitizeAttachment(image, shareId) {
+  if (shareId) {
+    return persistShareAttachment(shareId, image);
+  }
+
+  const buffer = await readAttachmentBuffer(image);
+  if (!buffer || buffer.length === 0) return null;
+  return {
+    filename: typeof image?.filename === 'string' ? image.filename : undefined,
+    originalName: typeof image?.originalName === 'string' ? image.originalName : undefined,
+    mimeType: typeof image?.mimeType === 'string' && image.mimeType ? image.mimeType : 'application/octet-stream',
+    data: buffer.toString('base64'),
+  };
+}
+
+async function sanitizeMessageEvent(event, shareId) {
   const snapshot = {
     type: 'message',
     id: event.id,
@@ -59,18 +110,18 @@ async function sanitizeMessageEvent(event) {
     content: typeof event.content === 'string' ? event.content : '',
   };
   if (Array.isArray(event.images) && event.images.length > 0) {
-    const images = (await Promise.all(event.images.map(sanitizeImage))).filter(Boolean);
+    const images = (await Promise.all(event.images.map((image) => sanitizeAttachment(image, shareId)))).filter(Boolean);
     if (images.length > 0) snapshot.images = images;
   }
   return snapshot;
 }
 
-async function sanitizeEvent(event) {
+async function sanitizeEvent(event, shareId) {
   if (!event || typeof event !== 'object' || typeof event.type !== 'string') return null;
 
   switch (event.type) {
     case 'message':
-      return sanitizeMessageEvent(event);
+      return sanitizeMessageEvent(event, shareId);
     case 'tool_use':
       return {
         type: 'tool_use',
@@ -144,8 +195,9 @@ export async function buildSanitizedSnapshot(session, history, extra = {}) {
   const createdAt = typeof extra.createdAt === 'string' && extra.createdAt
     ? extra.createdAt
     : new Date().toISOString();
+  const shareId = typeof extra.id === 'string' && extra.id ? extra.id : null;
   const events = Array.isArray(history)
-    ? (await Promise.all(history.map(sanitizeEvent))).filter(Boolean)
+    ? (await Promise.all(history.map((event) => sanitizeEvent(event, shareId)))).filter(Boolean)
     : [];
 
   const snapshot = {
@@ -163,6 +215,74 @@ export async function buildSanitizedSnapshot(session, history, extra = {}) {
   }
 
   return snapshot;
+}
+
+function snapshotNeedsAttachmentMigration(snapshot) {
+  return Array.isArray(snapshot?.events) && snapshot.events.some((event) =>
+    Array.isArray(event?.images) && event.images.some((image) =>
+      image
+      && typeof image === 'object'
+      && (
+        (typeof image.data === 'string' && image.data)
+        || (typeof image.savedPath === 'string' && image.savedPath)
+      ),
+    ),
+  );
+}
+
+async function migrateSnapshotAttachments(id, snapshot) {
+  let changed = false;
+  const events = await Promise.all((snapshot.events || []).map(async (event) => {
+    if (!Array.isArray(event?.images) || event.images.length === 0) return event;
+
+    let eventChanged = false;
+    const nextImages = [];
+    for (const image of event.images) {
+      if (!image || typeof image !== 'object') continue;
+      if (typeof image.url === 'string' && image.url && isValidShareAssetId(image.assetId)) {
+        if ('data' in image || 'savedPath' in image) {
+          const { data, savedPath, ...rest } = image;
+          nextImages.push(rest);
+          changed = true;
+          eventChanged = true;
+          continue;
+        }
+        nextImages.push(image);
+        continue;
+      }
+
+      const externalized = await persistShareAttachment(id, image);
+      if (externalized) {
+        nextImages.push(externalized);
+      }
+      changed = true;
+      eventChanged = true;
+    }
+
+    if (!eventChanged) return event;
+    const nextEvent = { ...event };
+    if (nextImages.length > 0) nextEvent.images = nextImages;
+    else delete nextEvent.images;
+    return nextEvent;
+  }));
+
+  if (!changed) return snapshot;
+  const nextSnapshot = {
+    ...snapshot,
+    events,
+  };
+  await writeJsonAtomic(shareSnapshotPath(id), nextSnapshot);
+  return nextSnapshot;
+}
+
+async function maybeMigrateShareSnapshot(id, snapshot) {
+  if (!snapshotNeedsAttachmentMigration(snapshot)) return snapshot;
+  return runShareMutation(async () => {
+    const current = await readJson(shareSnapshotPath(id), null);
+    if (!current || current.id !== id || !Array.isArray(current.events)) return null;
+    if (!snapshotNeedsAttachmentMigration(current)) return current;
+    return migrateSnapshotAttachments(id, current);
+  });
 }
 
 export async function createShareSnapshot(session, history) {
@@ -184,8 +304,28 @@ export async function createShareSnapshot(session, history) {
 }
 
 export async function getShareSnapshot(id) {
-  if (!id || typeof id !== 'string' || !/^snap_[a-f0-9]{48}$/.test(id)) return null;
+  if (!isValidShareId(id)) return null;
   const snapshot = await readJson(shareSnapshotPath(id), null);
   if (!snapshot || snapshot.id !== id || !Array.isArray(snapshot.events)) return null;
-  return snapshot;
+  return maybeMigrateShareSnapshot(id, snapshot);
+}
+
+export async function getShareAsset(id, assetId) {
+  if (!isValidShareId(id) || !isValidShareAssetId(assetId)) return null;
+  const snapshot = await getShareSnapshot(id);
+  if (!snapshot) return null;
+
+  for (const event of snapshot.events) {
+    for (const image of event?.images || []) {
+      if (image?.assetId !== assetId) continue;
+      return {
+        filepath: shareAssetPath(id, assetId),
+        mimeType: typeof image?.mimeType === 'string' && image.mimeType ? image.mimeType : 'application/octet-stream',
+        filename: typeof image?.filename === 'string' ? image.filename : undefined,
+        originalName: typeof image?.originalName === 'string' ? image.originalName : undefined,
+      };
+    }
+  }
+
+  return null;
 }

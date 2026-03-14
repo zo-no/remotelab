@@ -100,6 +100,9 @@ function createContext({
     },
   };
   const document = {
+    body: {
+      classList: makeClassList(),
+    },
     addEventListener() {},
     removeEventListener() {},
     getElementById() {
@@ -172,15 +175,23 @@ function createContext({
     sessionTemplateSelect: makeEventTarget(),
     saveTemplateBtn: makeEventTarget(),
     tabSessions: makeEventTarget(),
+    tabBoard: makeEventTarget(),
     tabSettings: makeEventTarget(),
     sessionListFooter: makeEventTarget(),
+    newAppBtn: makeEventTarget(),
     newSessionBtn: makeEventTarget(),
+    boardPanel: {
+      classList: {
+        toggle() {},
+      },
+    },
     settingsPanel: {
       classList: {
         toggle() {},
       },
     },
     sessionList: { style: {} },
+    sidebarOverlay: makeEventTarget(),
     sidebarFilters: {
       classList: {
         toggle() {},
@@ -200,6 +211,7 @@ function createContext({
       return 'req_test';
     },
     visitorMode: false,
+    isDesktop: true,
     selectedTool: null,
     selectedModel: null,
     currentToolReasoningKind: 'toggle',

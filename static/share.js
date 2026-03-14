@@ -216,6 +216,52 @@
     return currentThinkingBlock.body;
   }
 
+  function getAttachmentDisplayName(attachment) {
+    const originalName = typeof attachment?.originalName === "string"
+      ? attachment.originalName.trim()
+      : "";
+    if (originalName) return originalName;
+    const filename = typeof attachment?.filename === "string"
+      ? attachment.filename.trim()
+      : "";
+    return filename || "attachment";
+  }
+
+  function createAttachmentNode(attachment) {
+    const mimeType = typeof attachment?.mimeType === "string"
+      ? attachment.mimeType
+      : "application/octet-stream";
+    const src = typeof attachment?.url === "string" && attachment.url
+      ? attachment.url
+      : (attachment?.data ? `data:${mimeType};base64,${attachment.data}` : "");
+    if (!src) return null;
+    if (mimeType.startsWith("image/")) {
+      const imgEl = document.createElement("img");
+      imgEl.src = src;
+      imgEl.alt = getAttachmentDisplayName(attachment);
+      imgEl.loading = "lazy";
+      imgEl.addEventListener("click", () => window.open(src, "_blank", "noopener,noreferrer"));
+      return imgEl;
+    }
+    if (mimeType.startsWith("video/")) {
+      const videoEl = document.createElement("video");
+      videoEl.src = src;
+      videoEl.controls = true;
+      videoEl.preload = "metadata";
+      videoEl.playsInline = true;
+      return videoEl;
+    }
+
+    const link = document.createElement("a");
+    link.href = src;
+    link.textContent = getAttachmentDisplayName(attachment);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.download = getAttachmentDisplayName(attachment);
+    link.className = "attachment-link";
+    return link;
+  }
+
   function renderMessage(event) {
     const role = event.role || "assistant";
     if (inThinkingBlock) finalizeThinkingBlock();
@@ -231,13 +277,9 @@
         const imgWrap = document.createElement("div");
         imgWrap.className = "msg-images";
         for (const image of event.images) {
-          if (!image?.data || !image?.mimeType) continue;
-          const imgEl = document.createElement("img");
-          imgEl.src = `data:${image.mimeType};base64,${image.data}`;
-          imgEl.alt = "shared image";
-          imgEl.loading = "lazy";
-          imgEl.addEventListener("click", () => window.open(imgEl.src, "_blank", "noopener,noreferrer"));
-          imgWrap.appendChild(imgEl);
+          const attachmentNode = createAttachmentNode(image);
+          if (!attachmentNode) continue;
+          imgWrap.appendChild(attachmentNode);
         }
         if (imgWrap.childNodes.length > 0) {
           bubble.appendChild(imgWrap);

@@ -158,7 +158,7 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 ### Share-Link Visitor State Must Come From Auth, Not URL (2026-03-06)
 - A one-time `/?visitor=1` redirect is only a bootstrap hint. After the frontend cleans that query param, refreshes still carry the visitor cookie but no longer carry the URL marker.
 - If the UI only checks the URL to decide visitor mode, a refresh silently falls back into owner-style initialization and immediately calls owner-only APIs.
-- Reliable pattern: query `/api/auth/me` on every page load, derive mode from the authenticated role, and then decide whether to load owner-only surfaces like tools, models, settings, sidebar state, or push registration.
+- Reliable pattern: derive mode from authenticated role before any owner-only requests, but do not force that through a blocking extra round-trip. If the HTML render already knows the auth session, inline a small bootstrap payload (for example owner vs visitor plus visitor session IDs) and let the frontend use `/api/auth/me` only as a fallback or non-HTML API surface.
 
 ### Hidden Markdown Blocks Work Best As Parser Extensions (2026-03-06)
 - For `marked`, custom block + inline extensions are a clean way to consume tags like `<private>...</private>` and `<hide>...</hide>` so the UI hides them while the raw message text stays intact for history and model context.

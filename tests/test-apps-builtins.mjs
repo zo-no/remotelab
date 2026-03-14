@@ -12,11 +12,15 @@ process.env.HOME = tempHome;
 const appsModule = await import(pathToFileURL(join(repoRoot, 'chat', 'apps.mjs')).href);
 
 const {
+  BASIC_CHAT_APP_ID,
+  CREATE_APP_APP_ID,
   DEFAULT_APP_ID,
   EMAIL_APP_ID,
+  VIDEO_CUT_APP_ID,
   createApp,
   deleteApp,
   getApp,
+  getAppByShareToken,
   isBuiltinAppId,
   listApps,
   updateApp,
@@ -26,13 +30,19 @@ try {
   const initial = await listApps();
   assert.deepEqual(
     initial.map((app) => app.id),
-    ['chat', 'email'],
-    'built-in apps should include chat plus shipped connector app scopes',
+    ['chat', 'email', 'app_basic_chat', 'app_create_app', 'app_video_cut'],
+    'built-in apps should include connector scopes plus shipped starter apps',
   );
   assert.equal(DEFAULT_APP_ID, 'chat');
   assert.equal(EMAIL_APP_ID, 'email');
+  assert.equal(BASIC_CHAT_APP_ID, 'app_basic_chat');
+  assert.equal(CREATE_APP_APP_ID, 'app_create_app');
+  assert.equal(VIDEO_CUT_APP_ID, 'app_video_cut');
   assert.equal(isBuiltinAppId('Chat'), true);
   assert.equal(isBuiltinAppId('Email'), true);
+  assert.equal(isBuiltinAppId('app_basic_chat'), true);
+  assert.equal(isBuiltinAppId('app_create_app'), true);
+  assert.equal(isBuiltinAppId('app_video_cut'), true);
   assert.equal(isBuiltinAppId('github'), false);
   assert.equal(isBuiltinAppId('custom-app'), false);
 
@@ -48,6 +58,38 @@ try {
   assert.equal(emailApp?.builtin, true);
   assert.equal(emailApp?.templateSelectable, false);
   assert.equal(emailApp?.showInSidebarWhenEmpty, false);
+
+  const basicChatApp = await getApp(BASIC_CHAT_APP_ID);
+  assert.equal(basicChatApp?.id, BASIC_CHAT_APP_ID);
+  assert.equal(basicChatApp?.builtin, true);
+  assert.equal(basicChatApp?.templateSelectable, true);
+  assert.equal(basicChatApp?.shareEnabled, false);
+  assert.equal(basicChatApp?.shareToken, undefined);
+
+  const createAppStarter = await getApp(CREATE_APP_APP_ID);
+  assert.equal(createAppStarter?.id, CREATE_APP_APP_ID);
+  assert.equal(createAppStarter?.builtin, true);
+  assert.equal(createAppStarter?.templateSelectable, true);
+  assert.equal(createAppStarter?.tool, 'codex');
+  assert.equal(createAppStarter?.shareEnabled, false);
+  assert.equal(createAppStarter?.shareToken, undefined);
+  assert.match(createAppStarter?.systemPrompt || '', /POST \/api\/apps|PATCH \/api\/apps/i);
+  assert.match(createAppStarter?.systemPrompt || '', /share link|\/app\/\{shareToken\}|other people/i);
+  assert.match(createAppStarter?.welcomeMessage || '', /SOP|工作流|RemoteLab App/i);
+  assert.match(createAppStarter?.welcomeMessage || '', /SOP|工作流/i);
+  assert.match(createAppStarter?.welcomeMessage || '', /分享给别人的链接|分享方式|share/i);
+
+  const videoCutApp = await getApp(VIDEO_CUT_APP_ID);
+  assert.equal(videoCutApp?.id, VIDEO_CUT_APP_ID);
+  assert.equal(videoCutApp?.builtin, true);
+  assert.equal(videoCutApp?.templateSelectable, true);
+  assert.equal(videoCutApp?.tool, 'codex');
+  assert.equal(videoCutApp?.shareEnabled, true);
+  assert.match(videoCutApp?.systemPrompt || '', /Video Cut Review|video-cut workflow|~\/code\/video-cut/i);
+  assert.match(videoCutApp?.systemPrompt || '', /kept-content review|Never skip the kept-content review gate/i);
+  assert.match(videoCutApp?.welcomeMessage || '', /上传一段原始视频|uploaded source video/i);
+  assert.match(videoCutApp?.welcomeMessage || '', /Video Cut Review|video-cut 工作流/i);
+  assert.equal((await getAppByShareToken(videoCutApp?.shareToken))?.id, VIDEO_CUT_APP_ID);
 
   assert.equal(await getApp('feishu'), null);
 

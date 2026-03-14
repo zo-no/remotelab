@@ -7,6 +7,7 @@ function applyVisitorMode() {
   document.body.classList.add("visitor-mode");
   // Hide sidebar toggle, new session button, and management UI
   if (menuBtn) menuBtn.style.display = "none";
+  if (newAppBtn) newAppBtn.style.display = "none";
   if (newSessionBtn) newSessionBtn.style.display = "none";
   // Hide tool/model selectors and context management (visitors use defaults)
   if (inlineToolSelect) inlineToolSelect.style.display = "none";
@@ -28,14 +29,27 @@ function applyVisitorMode() {
 // ---- Init ----
 initResponsiveLayout();
 
-async function initApp() {
+async function resolveInitialAuthInfo() {
+  const bootstrapAuthInfo =
+    typeof getBootstrapAuthInfo === "function"
+      ? getBootstrapAuthInfo()
+      : null;
+  if (bootstrapAuthInfo) {
+    return bootstrapAuthInfo;
+  }
   try {
-    const info = await fetchJsonOrRedirect("/api/auth/me");
-    if (info.role === "visitor" && info.sessionId) {
-      visitorSessionId = info.sessionId;
-      applyVisitorMode();
-    }
-  } catch {}
+    return await fetchJsonOrRedirect("/api/auth/me");
+  } catch {
+    return null;
+  }
+}
+
+async function initApp() {
+  const authInfo = await resolveInitialAuthInfo();
+  if (authInfo?.role === "visitor" && authInfo.sessionId) {
+    visitorSessionId = authInfo.sessionId;
+    applyVisitorMode();
+  }
 
   const url = new URL(window.location.href);
   if (url.searchParams.has("visitor")) {
@@ -46,13 +60,31 @@ async function initApp() {
   syncAddToolModal();
   syncForkButton();
   syncShareButton();
-  if (!visitorMode) {
-    await loadInlineTools();
-    await fetchAppsList();
-    initializePushNotifications();
+  if (visitorMode) {
+    await bootstrapViaHttp();
+    connect();
+    return;
   }
-  await bootstrapViaHttp();
+
+  initializePushNotifications();
+
+  const toolsPromise = loadInlineTools({ skipModelLoad: true });
+  const sessionsPromise = bootstrapViaHttp({ deferOwnerRestore: true });
+  const appsPromise = fetchAppsList().catch((error) => {
+    console.warn("[apps] Failed to load apps:", error.message);
+    return [];
+  });
+  const usersPromise = fetchUsersList().catch((error) => {
+    console.warn("[users] Failed to load users:", error.message);
+    return [];
+  });
+
+  await Promise.all([toolsPromise, sessionsPromise]);
+  restoreOwnerSessionSelection();
   connect();
+  void loadModelsForCurrentTool();
+  void appsPromise;
+  void usersPromise;
 }
 
 initApp();

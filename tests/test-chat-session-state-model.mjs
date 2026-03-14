@@ -58,6 +58,13 @@ function makeSession(overrides = {}) {
   };
 }
 
+const boardLayout = {
+  columns: [
+    { key: 'focus_now', label: 'Focus now', order: 10, description: 'Highest attention' },
+    { key: 'shared_tracks', label: 'Shared tracks', order: 20, description: 'Grouped active work' },
+  ],
+};
+
 const runningSession = makeSession({
   activity: makeActivity({
     run: { state: 'running', phase: 'accepted', runId: 'run-1' },
@@ -101,6 +108,68 @@ const renameFailedSession = makeSession({
 const renameFailedStatus = model.getSessionStatusSummary(renameFailedSession);
 assert.equal(renameFailedStatus.primary.key, 'rename-failed');
 assert.equal(renameFailedStatus.primary.title, 'rename crashed');
+
+assert.equal(
+  JSON.stringify(Array.from(model.getBoardColumns(boardLayout), (column) => column.key)),
+  JSON.stringify(['focus_now', 'shared_tracks']),
+  'board columns should come from the model-defined layout in left-to-right order',
+);
+
+const fallbackBoardColumn = model.getSessionBoardColumn(makeSession(), null, []);
+assert.equal(fallbackBoardColumn.key, 'unassigned');
+
+const focusBoardColumn = model.getSessionBoardColumn(
+  makeSession({
+    board: {
+      columnKey: 'focus_now',
+      columnLabel: 'Focus now',
+      columnOrder: 10,
+      order: 20,
+      priority: 'high',
+    },
+  }),
+  boardLayout,
+);
+assert.equal(focusBoardColumn.key, 'focus_now');
+
+assert.equal(model.normalizeSessionWorkflowPriority('P1'), 'high');
+assert.equal(model.normalizeSessionWorkflowPriority('normal'), 'medium');
+assert.equal(model.normalizeSessionWorkflowPriority('later'), 'low');
+
+const explicitHighPriority = model.getSessionBoardPriority(
+  makeSession({ board: { priority: 'urgent' } }),
+);
+assert.equal(explicitHighPriority.key, 'high');
+assert.equal(explicitHighPriority.rank, 3);
+
+const workflowPriorityFallback = model.getSessionBoardPriority(
+  makeSession({ workflowPriority: 'done-later', board: {} }),
+);
+assert.equal(workflowPriorityFallback.key, 'medium', 'unknown priority strings should fall back to medium attention');
+
+assert.ok(
+  model.compareBoardSessions(
+    makeSession({ board: { order: 10, priority: 'low' }, updatedAt: '2026-03-14T12:00:00.000Z' }),
+    makeSession({ board: { order: 20, priority: 'high' }, updatedAt: '2026-03-14T13:00:00.000Z' }),
+  ) < 0,
+  'explicit board order should sort sessions before priority and recency',
+);
+
+assert.ok(
+  model.compareBoardSessions(
+    makeSession({ board: { priority: 'high' }, updatedAt: '2026-03-14T12:00:00.000Z' }),
+    makeSession({ board: { priority: 'low' }, updatedAt: '2026-03-14T13:00:00.000Z' }),
+  ) < 0,
+  'higher board priority should sort before lower board priority when explicit order ties',
+);
+
+assert.ok(
+  model.compareBoardSessions(
+    makeSession({ board: { priority: 'medium' }, pinned: true, updatedAt: '2026-03-14T12:00:00.000Z' }),
+    makeSession({ board: { priority: 'medium' }, updatedAt: '2026-03-14T13:00:00.000Z' }),
+  ) < 0,
+  'pinned sessions should break ties inside a board column',
+);
 
 const toolFallbackStatus = model.getSessionStatusSummary(
   makeSession({ tool: 'codex' }),

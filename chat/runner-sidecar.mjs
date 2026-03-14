@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { createToolInvocation, prependImagePaths, resolveCommand, resolveCwd } from './process-runner.mjs';
+import { createToolInvocation, prependAttachmentPaths, resolveCommand, resolveCwd } from './process-runner.mjs';
 import {
   buildCodexContextMetricsPayload,
   readLatestCodexSessionMetrics,
@@ -83,7 +83,7 @@ async function main() {
     process.exit(1);
   }
 
-  const prompt = prependImagePaths(manifest.prompt || '', manifest.options?.images || []);
+  const prompt = prependAttachmentPaths(manifest.prompt || '', manifest.options?.images || []);
   const { command, args } = await createToolInvocation(manifest.tool, prompt, {
     dangerouslySkipPermissions: true,
     claudeSessionId: manifest.options?.claudeSessionId,

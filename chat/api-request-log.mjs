@@ -111,6 +111,7 @@ function classifyApiRoute(method, pathname) {
   if (pathname.startsWith('/api/apps/') && method === 'PATCH') return 'PATCH /api/apps/:appId';
   if (pathname.startsWith('/api/apps/') && method === 'DELETE') return 'DELETE /api/apps/:appId';
   if (pathname.startsWith('/api/images/') && method === 'GET') return 'GET /api/images/:imageName';
+  if (pathname.startsWith('/api/media/') && method === 'GET') return 'GET /api/media/:mediaName';
   if (pathname === '/api/sessions' && method === 'POST') return 'POST /api/sessions';
 
   if (pathname.startsWith('/api/sessions/')) {

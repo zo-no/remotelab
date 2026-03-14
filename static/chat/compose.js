@@ -10,7 +10,7 @@ function sendMessage(existingRequestId) {
 
   renderOptimisticMessage(text, queuedImages, Date.now());
 
-  const msg = { action: "send", text: text || "(image)" };
+  const msg = { action: "send", text: text || "(attachment)" };
   msg.requestId = requestId;
   if (!visitorMode) {
     if (selectedTool) msg.tool = selectedTool;
@@ -23,8 +23,10 @@ function sendMessage(existingRequestId) {
   }
   if (queuedImages.length > 0) {
     msg.images = queuedImages.map((img) => ({
-      data: img.data,
+      file: img.file,
+      originalName: img.originalName,
       mimeType: img.mimeType,
+      objectUrl: img.objectUrl,
     }));
   }
   msgInput.value = "";
@@ -314,10 +316,11 @@ function renderOptimisticMessage(text, images, timestamp = Date.now()) {
     const imgWrap = document.createElement("div");
     imgWrap.className = "msg-images";
     for (const img of images) {
-      const imgEl = document.createElement("img");
-      imgEl.src = `data:${img.mimeType};base64,${img.data}`;
-      imgEl.alt = "attached image";
-      imgWrap.appendChild(imgEl);
+      const attachmentNode = typeof createMessageAttachmentNode === "function"
+        ? createMessageAttachmentNode(img)
+        : null;
+      if (!attachmentNode) continue;
+      imgWrap.appendChild(attachmentNode);
     }
     bubble.appendChild(imgWrap);
   }
@@ -345,12 +348,35 @@ let activeTab = normalizeSidebarTab(
   pendingNavigationState.tab ||
     localStorage.getItem(ACTIVE_SIDEBAR_TAB_STORAGE_KEY) ||
     "sessions",
-); // "sessions" | "settings"
+); // "sessions" | "board" | "settings"
 
-function switchTab(tab, { syncState = true } = {}) {
+let boardSidebarExpanded = false;
+
+function canExpandBoardSidebar() {
+  return !visitorMode && isDesktop && activeTab === "board";
+}
+
+function setBoardSidebarExpanded(expanded) {
+  const nextExpanded = canExpandBoardSidebar() && expanded === true;
+  if (boardSidebarExpanded === nextExpanded) return;
+  boardSidebarExpanded = nextExpanded;
+  document.body.classList.toggle("board-tab-expanded", nextExpanded);
+}
+
+function syncBoardSidebarExpansion({ expandBoard = false } = {}) {
+  if (!canExpandBoardSidebar()) {
+    setBoardSidebarExpanded(false);
+    return;
+  }
+  setBoardSidebarExpanded(expandBoard);
+}
+
+function switchTab(tab, { syncState = true, expandBoard = false } = {}) {
   activeTab = normalizeSidebarTab(tab);
   const showingSessions = activeTab === "sessions";
+  const showingBoard = activeTab === "board";
   tabSessions.classList.toggle("active", activeTab === "sessions");
+  tabBoard?.classList.toggle("active", activeTab === "board");
   tabSettings.classList.toggle("active", activeTab === "settings");
   if (typeof syncSidebarFiltersVisibility === "function") {
     syncSidebarFiltersVisibility(showingSessions);
@@ -358,14 +384,44 @@ function switchTab(tab, { syncState = true } = {}) {
     sidebarFilters.classList.toggle("hidden", !showingSessions);
   }
   sessionList.style.display = showingSessions ? "" : "none";
+  boardPanel?.classList.toggle("visible", showingBoard);
   settingsPanel.classList.toggle("visible", activeTab === "settings");
-  sessionListFooter.classList.toggle("hidden", !showingSessions);
-  newSessionBtn.classList.toggle("hidden", !showingSessions);
+  document.body.classList.toggle("board-tab-active", showingBoard);
+  syncBoardSidebarExpansion({ expandBoard: showingBoard && expandBoard });
+  sessionListFooter.classList.toggle("hidden", activeTab === "settings");
+  newAppBtn.classList.toggle("hidden", activeTab === "settings");
+  newSessionBtn.classList.toggle("hidden", activeTab === "settings");
+  if (activeTab === "settings" && !visitorMode && typeof fetchAppsList === "function") {
+    void fetchAppsList().catch((error) => {
+      console.warn("[apps] Failed to refresh apps for settings:", error.message);
+    });
+    if (typeof fetchUsersList === "function") {
+      void fetchUsersList().catch((error) => {
+        console.warn("[users] Failed to refresh users for settings:", error.message);
+      });
+    }
+  }
   if (syncState) {
     syncBrowserState();
   }
 }
 
 tabSessions.addEventListener("click", () => switchTab("sessions"));
+tabBoard?.addEventListener("click", () => switchTab("board", { expandBoard: true }));
 tabSettings.addEventListener("click", () => switchTab("settings"));
+
+sidebarOverlay?.addEventListener("pointerenter", () => {
+  if (!canExpandBoardSidebar()) return;
+  setBoardSidebarExpanded(true);
+});
+
+sidebarOverlay?.addEventListener("pointerleave", () => {
+  if (!canExpandBoardSidebar()) return;
+  setBoardSidebarExpanded(false);
+});
+
+window.matchMedia?.("(min-width: 768px)")?.addEventListener?.("change", () => {
+  syncBoardSidebarExpansion({ expandBoard: false });
+});
+
 switchTab(activeTab, { syncState: false });

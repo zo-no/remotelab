@@ -10,6 +10,7 @@ import { spawn } from 'child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(__dirname);
 const cookie = 'session_token=test-session';
+const visitorCookie = 'session_token=visitor-session';
 
 function randomPort() {
   return 43000 + Math.floor(Math.random() * 10000);
@@ -17,6 +18,18 @@ function randomPort() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function appendOutput(buffer, chunk, limit = 8000) {
+  const next = `${buffer}${chunk}`;
+  return next.length <= limit ? next : next.slice(-limit);
+}
+
+function formatStartupOutput(stdout, stderr) {
+  const sections = [];
+  if (stderr.trim()) sections.push(`stderr:\n${stderr.trim()}`);
+  if (stdout.trim()) sections.push(`stdout:\n${stdout.trim()}`);
+  return sections.join('\n\n');
 }
 
 async function waitFor(predicate, description, timeoutMs = 10000, intervalMs = 100) {
@@ -72,6 +85,13 @@ function setupTempHome() {
     join(configDir, 'auth-sessions.json'),
     JSON.stringify({
       'test-session': { expiry: Date.now() + 60 * 60 * 1000, role: 'owner' },
+      'visitor-session': {
+        expiry: Date.now() + 60 * 60 * 1000,
+        role: 'visitor',
+        appId: 'shared-app',
+        sessionId: 'visitor-session-id',
+        visitorId: 'visitor-123',
+      },
     }, null, 2),
     'utf8',
   );
@@ -91,14 +111,42 @@ async function startServer({ home, port }) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  await waitFor(async () => {
-    try {
-      const res = await request(port, 'GET', '/login', null, { Cookie: '' });
-      return res.status === 200;
-    } catch {
-      return false;
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk) => {
+    stdout = appendOutput(stdout, chunk);
+  });
+  child.stderr?.on('data', (chunk) => {
+    stderr = appendOutput(stderr, chunk);
+  });
+
+  try {
+    await waitFor(async () => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        const exitLabel = child.signalCode ? `signal ${child.signalCode}` : `code ${child.exitCode}`;
+        const output = formatStartupOutput(stdout, stderr);
+        throw new Error(
+          output
+            ? `Server exited during startup with ${exitLabel}\n\n${output}`
+            : `Server exited during startup with ${exitLabel}`,
+        );
+      }
+      try {
+        const res = await request(port, 'GET', '/login', null, { Cookie: '' });
+        return res.status === 200;
+      } catch {
+        return false;
+      }
+    }, 'server startup');
+  } catch (error) {
+    const output = formatStartupOutput(stdout, stderr);
+    if (!output || String(error.message).includes(output)) {
+      throw error;
     }
-  }, 'server startup');
+    throw new Error(`${error.message}\n\n${output}`);
+  }
 
   return { child };
 }
@@ -133,14 +181,38 @@ async function main() {
     assert.match(page.text, /<meta name="theme-color" content="#ffffff" media="\(prefers-color-scheme: light\)">/);
     assert.match(page.text, /<meta name="theme-color" content="#1e1e1e" media="\(prefers-color-scheme: dark\)">/);
     assert.match(page.text, /@media \(prefers-color-scheme: dark\)/);
+    assert.match(page.text, /window\.__REMOTELAB_BOOTSTRAP__ = \{"auth":\{"role":"owner"\}\};/);
     assert.match(page.text, /<script src="\/chat\/bootstrap\.js(?:\?v=[^"]*)?"/);
     assert.match(page.text, /<script src="\/chat\/session-http\.js(?:\?v=[^"]*)?"/);
     assert.match(page.text, /<script src="\/chat\/tooling\.js(?:\?v=[^"]*)?"/);
     assert.match(page.text, /<script src="\/chat\/realtime\.js(?:\?v=[^"]*)?"/);
     assert.match(page.text, /<script src="\/chat\/ui\.js(?:\?v=[^"]*)?"/);
     assert.match(page.text, /<script src="\/chat\/compose\.js(?:\?v=[^"]*)?"/);
+
+    const visitorPage = await request(port, 'GET', '/', null, { Cookie: visitorCookie });
+    assert.equal(visitorPage.status, 200, 'chat page should also render for visitor session');
+    assert.match(
+      visitorPage.text,
+      /window\.__REMOTELAB_BOOTSTRAP__ = \{"auth":\{"role":"visitor","appId":"shared-app","sessionId":"visitor-session-id","visitorId":"visitor-123"\}\};/,
+      'visitor page should inline auth bootstrap data from the server render',
+    );
     assert.match(page.text, /<script src="\/chat\/init\.js(?:\?v=[^"]*)?"/);
-    assert.match(page.text, /id="appFilterSelect"/);
+    assert.doesNotMatch(page.text, /id="appFilterSelect"/);
+    assert.match(page.text, /id="sourceFilterSelect"/);
+    assert.match(page.text, /id="sessionAppFilterSelect"/);
+    assert.match(page.text, /id="userFilterSelect"/);
+    assert.match(page.text, /id="newAppBtn"/);
+    assert.match(page.text, /id="settingsAppsList"/);
+    assert.match(page.text, /id="tabBoard"/);
+    assert.match(page.text, /id="boardPanel"/);
+    assert.match(page.text, /id="settingsUsersList"/);
+    assert.match(page.text, /id="newUserNameInput"/);
+    assert.match(page.text, /id="createUserBtn"/);
+    assert.match(page.text, /id="newAppNameInput"/);
+    assert.match(page.text, /id="newAppToolSelect"/);
+    assert.match(page.text, /id="newAppWelcomeInput"/);
+    assert.match(page.text, /id="newAppSystemPromptInput"/);
+    assert.match(page.text, /id="createAppConfigBtn"/);
     assert.match(page.text, /id="tabSettings"/);
     assert.doesNotMatch(page.text, /id="collapseBtn"/, 'desktop sidebar should no longer expose a collapse control');
     assert.doesNotMatch(page.text, /id="tabProgress"/);
@@ -150,6 +222,10 @@ async function main() {
     assert.match(page.text, /\.header-btn,\s*\.sidebar-tab,\s*\.sidebar-filter-select,\s*\.new-session-btn,\s*\.session-action-btn,\s*\.session-item,\s*\.folder-group-header,\s*\.archived-section-header\s*\{[\s\S]*?-webkit-tap-highlight-color:\s*transparent;/, 'sidebar interactions should suppress the mobile tap highlight flash');
     assert.match(page.text, /--app-height:\s*100dvh/);
     assert.match(page.text, /--keyboard-inset-height:\s*0px/);
+    assert.match(page.text, /--sidebar-width-expanded:\s*min\(80vw, calc\(100vw - 240px\)\);/);
+    assert.match(page.text, /body\.board-tab-expanded\s*\{[\s\S]*?--sidebar-width:\s*var\(--sidebar-width-expanded\);/, 'desktop board hover mode should widen the sidebar via CSS variables');
+    assert.match(page.text, /\.board-column-attention\s*\{[\s\S]*?border-radius:\s*999px;/, 'board columns should surface a compact high-priority count');
+    assert.match(page.text, /\.board-priority-pill\s*\{[\s\S]*?border-radius:\s*999px;/, 'board cards should render compact priority pills');
     assert.match(page.text, /\.app-shell\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?grid-template-rows:\s*auto minmax\(0, 1fr\);/, 'app shell should reserve a fixed header row and a flexible body row');
     assert.match(page.text, /\.app-container\s*\{[\s\S]*?min-height:\s*0;/);
     assert.match(page.text, /\.chat-area\s*\{[\s\S]*?grid-template-rows:\s*minmax\(0, 1fr\) auto auto;[\s\S]*?min-height:\s*0;/, 'chat area should model content, queued panel, and composer as explicit rows');
@@ -165,6 +241,8 @@ async function main() {
     assert.ok(!page.text.includes('/chat.js?v='), 'chat page should not pin the chat frontend to a versioned URL');
     assert.match(page.text, /\/marked\.min\.js\?v=/, 'chat page should fingerprint marked.min.js alongside the split chat assets');
     assert.match(page.text, /\/manifest\.json\?v=/, 'chat page should fingerprint the manifest URL so installed PWAs refresh policy changes');
+    assert.match(page.text, /title="Attach media"/, 'chat page should advertise media uploads in the composer');
+    assert.match(page.text, /accept="image\/\*,video\/\*"/, 'chat page should allow both image and video selection');
 
     const manifest = await request(port, 'GET', '/manifest.json');
     assert.equal(manifest.status, 200, 'manifest should load');
@@ -183,6 +261,9 @@ async function main() {
     assert.equal(apps.status, 200, 'owner apps endpoint should be available');
     assert.match(apps.text, /"id":"chat"/);
     assert.match(apps.text, /"id":"email"/);
+    assert.match(apps.text, /"id":"app_basic_chat"/);
+    assert.match(apps.text, /"id":"app_create_app"/);
+    assert.match(apps.text, /"id":"app_video_cut"/);
     assert.doesNotMatch(apps.text, /"id":"feishu"/);
     assert.doesNotMatch(apps.text, /"id":"github"/);
     assert.doesNotMatch(apps.text, /"id":"automation"/);
@@ -241,6 +322,16 @@ async function main() {
     assert.ok(splitAsset.headers.etag, 'split asset should expose an ETag');
     assert.match(splitAsset.text, /const buildInfo = window\.__REMOTELAB_BUILD__ \|\| \{\};/);
 
+    const sessionHttpAsset = await request(port, 'GET', '/chat/session-http.js');
+    assert.equal(sessionHttpAsset.status, 200, 'session http asset should load');
+    if (/getEffectiveSessionAppId\(/.test(sessionHttpAsset.text)) {
+      assert.match(
+        splitAsset.text,
+        /function getEffectiveSessionAppId\(/,
+        'bootstrap asset should define the effective app helper used by session-http',
+      );
+    }
+
     const versionedSplitAsset = await request(port, 'GET', '/chat/bootstrap.js?v=test-build');
     assert.equal(versionedSplitAsset.status, 200, 'versioned split chat asset should load');
     assert.equal(
@@ -268,16 +359,25 @@ async function main() {
     assert.match(toolingAsset.text, /window\.visualViewport\?\.addEventListener\("resize", \(\) => requestLayoutPass\("visual-viewport-resize"\)\)/);
     assert.doesNotMatch(toolingAsset.text, /window\.visualViewport\?\.addEventListener\("scroll"/);
     assert.match(toolingAsset.text, /function focusComposer\(/);
+    assert.match(toolingAsset.text, /const modelResponseCache = new Map\(\);/);
+    assert.match(toolingAsset.text, /async function fetchModelResponse\(/);
 
     const uiAsset = await request(port, 'GET', '/chat/ui.js');
     assert.equal(uiAsset.status, 200, 'ui asset should load');
     assert.match(uiAsset.text, /focusComposer\(\{ preventScroll: true \}\)/);
     assert.match(uiAsset.text, /requestLayoutPass\("composer-images"\)/);
+    assert.match(uiAsset.text, /\/api\/media\//, 'ui asset should load persisted media attachments from the media route');
 
     const composeAsset = await request(port, 'GET', '/chat/compose.js');
     assert.equal(composeAsset.status, 200, 'compose asset should load');
     assert.match(composeAsset.text, /focusComposer\(\{ force: true, preventScroll: true \}\)/);
     assert.match(composeAsset.text, /window\.RemoteLabLayout\?\.subscribe/);
+
+    const initAsset = await request(port, 'GET', '/chat/init.js');
+    assert.equal(initAsset.status, 200, 'init asset should load');
+    assert.match(initAsset.text, /typeof getBootstrapAuthInfo === "function"/);
+    assert.match(initAsset.text, /loadInlineTools\(\{ skipModelLoad: true \}\)/);
+    assert.match(initAsset.text, /bootstrapViaHttp\(\{ deferOwnerRestore: true \}\)/);
 
     const tokenLogin = await request(
       port,

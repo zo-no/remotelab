@@ -720,7 +720,7 @@ Tooling and settings:
 - `GET /api/models?tool=...`
 - `GET /api/autocomplete`
 - `GET /api/browse`
-- `GET /api/images/:filename`
+- `GET /api/media/:filename` (with legacy `/api/images/:filename` alias)
 
 Apps and shares:
 

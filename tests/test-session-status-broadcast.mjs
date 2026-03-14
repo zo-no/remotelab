@@ -196,8 +196,8 @@ assert.equal(
   ownerWs.messages.some(
     (msg) => msg.type === 'session_invalidated' && msg.sessionId === visitorSession.id,
   ),
-  false,
-  'owner clients must not receive visitor session invalidations',
+  true,
+  'owner clients should receive visitor session invalidations for unified session views',
 );
 
 assert.equal(

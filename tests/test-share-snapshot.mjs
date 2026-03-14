@@ -26,12 +26,13 @@ function request(method, path, { body, headers = {} } = {}) {
       path: url.pathname + url.search,
       headers,
     }, (res) => {
-      let chunks = '';
+      const chunks = [];
       res.on('data', (chunk) => {
-        chunks += chunk;
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       });
       res.on('end', () => {
-        resolve({ status: res.statusCode, headers: res.headers, body: chunks });
+        const buffer = Buffer.concat(chunks);
+        resolve({ status: res.statusCode, headers: res.headers, body: buffer.toString('utf8'), buffer });
       });
     });
     req.on('error', reject);
@@ -219,10 +220,21 @@ async function main() {
   assert.ok(!JSON.stringify(storedSnapshot).includes('savedPath'), 'snapshot should not leak internal file paths');
   assert.ok(storedSnapshot.events.some((event) => event.type === 'message' && /Please review this snippet/.test(event.content || '')));
   assert.ok(storedSnapshot.events.some((event) => event.type === 'message' && /shared snapshot ok/.test(event.content || '')));
+  const storedUserEvent = storedSnapshot.events.find((event) => event.type === 'message' && /Please review this snippet/.test(event.content || ''));
+  assert.ok(storedUserEvent?.images?.length === 1, 'user attachment should be preserved');
+  const storedAttachment = storedUserEvent.images[0];
+  assert.match(storedAttachment.assetId || '', /^asset_[a-f0-9]{24}$/, 'share attachment should be externalized');
+  assert.strictEqual(storedAttachment.url, `/share-asset/${shareId}/${storedAttachment.assetId}`, 'share attachment should point at a public share asset URL');
+  assert.ok(!('data' in storedAttachment), 'share snapshot should not inline attachment bytes');
+  const storedAssetPath = join(configDir, 'shared-snapshots', `${shareId}.assets`, storedAttachment.assetId);
+  assert.ok(existsSync(storedAssetPath), 'share asset should be persisted alongside the snapshot');
 
   const publicShareRes = await request('GET', sharePayload.share.url);
   assert.strictEqual(publicShareRes.status, 200, 'public share page should load without auth');
+  assert.strictEqual(publicShareRes.headers['cache-control'], 'public, no-cache, max-age=0, must-revalidate', 'share shell should require validator rechecks');
+  assert.ok(publicShareRes.headers.etag, 'share shell should expose an ETag');
   assert.match(publicShareRes.headers['content-security-policy'] || '', /connect-src 'none'/, 'share page CSP should block network access');
+  assert.match(publicShareRes.headers['content-security-policy'] || '', /media-src 'self' data: blob:/, 'share page CSP should allow public media playback');
   assert.strictEqual(publicShareRes.headers['referrer-policy'], 'no-referrer', 'share page should suppress referrer leakage');
   assert.match(publicShareRes.body, /Read-only snapshot/, 'share page should be read-only');
   assert.match(publicShareRes.body, /<meta name="color-scheme" content="light dark">/);
@@ -231,9 +243,102 @@ async function main() {
   assert.match(publicShareRes.body, /@media \(prefers-color-scheme: dark\)/);
   assert.match(publicShareRes.body, /\/favicon\.ico\?v=/, 'share page should fingerprint icon URLs for immutable caching');
   assert.match(publicShareRes.body, /\/icon\.svg\?v=/, 'share page should fingerprint svg icon URLs for immutable caching');
+  assert.ok(publicShareRes.body.includes(`/share-payload/${shareId}.js`), 'share shell should bootstrap an external payload resource');
+  assert.ok(!publicShareRes.body.includes('window.__REMOTELAB_SHARE__ ='), 'share shell should not inline the snapshot payload');
+  assert.ok(!publicShareRes.body.includes('Please review this snippet.'), 'share shell should not inline conversation bodies');
   assert.ok(!publicShareRes.body.includes('msgInput'), 'share page should not include live chat input');
   assert.ok(!publicShareRes.body.includes('/api/auth/me'), 'share page should not bootstrap owner auth UI');
   assert.ok(!publicShareRes.body.includes('/ws'), 'share page should not connect to live websocket');
+  const publicShare304Res = await request('GET', sharePayload.share.url, {
+    headers: {
+      'If-None-Match': publicShareRes.headers.etag,
+    },
+  });
+  assert.strictEqual(publicShare304Res.status, 304, 'unchanged share shell should support 304 validation');
+
+  const payloadRes = await request('GET', `/share-payload/${shareId}.js`);
+  assert.strictEqual(payloadRes.status, 200, 'public share payload should load without auth');
+  assert.strictEqual(payloadRes.headers['cache-control'], 'public, no-cache, max-age=0, must-revalidate', 'share payload should require validator rechecks');
+  assert.ok(payloadRes.headers.etag, 'share payload should expose an ETag');
+  assert.match(payloadRes.headers['content-type'] || '', /^application\/javascript;/, 'share payload should be served as JavaScript');
+  assert.ok(payloadRes.body.includes('window.__REMOTELAB_SHARE__ ='), 'share payload should assign the snapshot data');
+  assert.ok(payloadRes.body.includes('Please review this snippet.'), 'share payload should include conversation bodies');
+  assert.ok(payloadRes.body.includes(storedAttachment.url), 'share payload should reference external attachment URLs');
+  assert.ok(!payloadRes.body.includes('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0WQAAAAASUVORK5CYII='), 'share payload should not inline attachment base64');
+  const payload304Res = await request('GET', `/share-payload/${shareId}.js`, {
+    headers: {
+      'If-None-Match': payloadRes.headers.etag,
+    },
+  });
+  assert.strictEqual(payload304Res.status, 304, 'unchanged share payload should support 304 validation');
+
+  const assetRes = await request('GET', storedAttachment.url);
+  assert.strictEqual(assetRes.status, 200, 'public share attachment should load without auth');
+  assert.strictEqual(assetRes.headers['cache-control'], 'public, no-cache, max-age=0, must-revalidate', 'share asset should require validator rechecks');
+  assert.ok(assetRes.headers.etag, 'share asset should expose an ETag');
+  assert.strictEqual(assetRes.headers['content-type'], 'image/png', 'share asset should retain its attachment MIME type');
+  assert.ok(assetRes.buffer.length > 0, 'share asset should return binary content');
+  const asset304Res = await request('GET', storedAttachment.url, {
+    headers: {
+      'If-None-Match': assetRes.headers.etag,
+    },
+  });
+  assert.strictEqual(asset304Res.status, 304, 'unchanged share asset should support 304 validation');
+
+  const legacyShareId = `snap_${'a'.repeat(48)}`;
+  const legacySharePath = join(configDir, 'shared-snapshots', `${legacyShareId}.json`);
+  writeFileSync(legacySharePath, JSON.stringify({
+    version: 1,
+    id: legacyShareId,
+    createdAt: new Date(0).toISOString(),
+    session: {
+      name: 'Legacy attachment share',
+      tool: 'codex',
+      created: new Date(0).toISOString(),
+    },
+    events: [{
+      type: 'message',
+      id: 'evt_legacy_001',
+      timestamp: 1,
+      role: 'user',
+      content: 'Legacy attachment body',
+      images: [{
+        filename: 'legacy-inline.png',
+        mimeType: 'image/png',
+        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0WQAAAAASUVORK5CYII=',
+      }],
+    }],
+    view: { mode: 'share' },
+  }, null, 2), 'utf8');
+  const legacyShareRes = await request('GET', `/share/${legacyShareId}`);
+  assert.strictEqual(legacyShareRes.status, 200, 'legacy inline-data shares should still load');
+  const migratedLegacySnapshot = JSON.parse(readFileSync(legacySharePath, 'utf8'));
+  const migratedLegacyAttachment = migratedLegacySnapshot.events[0].images[0];
+  assert.match(migratedLegacyAttachment.assetId || '', /^asset_[a-f0-9]{24}$/, 'legacy inline shares should migrate to external assets');
+  assert.ok(migratedLegacyAttachment.url, 'legacy inline shares should gain public asset URLs');
+  assert.ok(!('data' in migratedLegacyAttachment), 'legacy inline shares should drop embedded base64 after migration');
+  assert.ok(existsSync(join(configDir, 'shared-snapshots', `${legacyShareId}.assets`, migratedLegacyAttachment.assetId)), 'legacy migration should materialize asset files');
+
+  rmSync(snapshotPath, { force: true });
+  rmSync(join(configDir, 'shared-snapshots', `${shareId}.assets`), { recursive: true, force: true });
+  const deletedShareRes = await request('GET', sharePayload.share.url, {
+    headers: {
+      'If-None-Match': publicShareRes.headers.etag,
+    },
+  });
+  assert.strictEqual(deletedShareRes.status, 404, 'deleted shares should return 404 instead of reusing a cached shell');
+  const deletedPayloadRes = await request('GET', `/share-payload/${shareId}.js`, {
+    headers: {
+      'If-None-Match': payloadRes.headers.etag,
+    },
+  });
+  assert.strictEqual(deletedPayloadRes.status, 404, 'deleted share payloads should return 404 instead of 304');
+  const deletedAssetRes = await request('GET', storedAttachment.url, {
+    headers: {
+      'If-None-Match': assetRes.headers.etag,
+    },
+  });
+  assert.strictEqual(deletedAssetRes.status, 404, 'deleted share assets should return 404 instead of 304');
 
   const unauthenticatedRemovedRouteRes = await request('GET', `/capture/${session.id}`);
   assert.strictEqual(unauthenticatedRemovedRouteRes.status, 302, 'unknown owner routes should still require auth');

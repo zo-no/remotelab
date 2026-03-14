@@ -71,12 +71,18 @@ export async function createToolInvocation(toolId, prompt, options = {}) {
   return { command, adapter, args, isClaudeFamily, isCodexFamily };
 }
 
-/**
- * Build a prompt with image file paths prepended.
- */
-export function prependImagePaths(prompt, images) {
-  const paths = (images || []).map((img) => img.savedPath).filter(Boolean);
+function describeAttachmentLabel(attachment) {
+  const mimeType = typeof attachment?.mimeType === 'string' ? attachment.mimeType : '';
+  if (mimeType.startsWith('video/')) return 'video';
+  if (mimeType.startsWith('image/')) return 'image';
+  return 'file';
+}
+
+export function prependAttachmentPaths(prompt, images) {
+  const paths = (images || [])
+    .map((img) => ({ savedPath: img?.savedPath, label: describeAttachmentLabel(img) }))
+    .filter((entry) => entry.savedPath);
   if (paths.length === 0) return prompt;
-  const refs = paths.map((path) => `[User attached image: ${path}]`).join('\n');
+  const refs = paths.map((entry) => `[User attached ${entry.label}: ${entry.savedPath}]`).join('\n');
   return `${refs}\n\n${prompt}`;
 }
