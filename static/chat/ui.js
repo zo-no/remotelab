@@ -540,10 +540,41 @@ function getSessionMetaStatusInfo(session) {
 
 function buildSessionMetaParts(session) {
   const parts = [];
+  parts.push(...renderSessionScopeContext(session));
   const countHtml = renderSessionMessageCount(session);
   if (countHtml) parts.push(countHtml);
   const statusHtml = renderSessionStatusHtml(getSessionMetaStatusInfo(session));
   if (statusHtml) parts.push(statusHtml);
+  return parts;
+}
+
+function renderSessionScopeContext(session) {
+  const parts = [];
+  const sourceName = typeof getEffectiveSessionSourceName === "function"
+    ? getEffectiveSessionSourceName(session)
+    : "";
+  if (sourceName) {
+    parts.push(`<span title="Session source">${esc(sourceName)}</span>`);
+  }
+
+  const templateAppId = typeof getEffectiveSessionTemplateAppId === "function"
+    ? getEffectiveSessionTemplateAppId(session)
+    : "";
+  if (templateAppId) {
+    const appEntry = typeof getSessionAppCatalogEntry === "function"
+      ? getSessionAppCatalogEntry(templateAppId)
+      : null;
+    const appName = appEntry?.name || session?.appName || "App";
+    parts.push(`<span title="Session app">App: ${esc(appName)}</span>`);
+  }
+
+  if (session?.visitorId) {
+    const visitorLabel = typeof session?.visitorName === "string" && session.visitorName.trim()
+      ? `Visitor: ${session.visitorName.trim()}`
+      : (session?.visitorId ? "Visitor" : "Owner");
+    parts.push(`<span title="Session owner scope">${esc(visitorLabel)}</span>`);
+  }
+
   return parts;
 }
 
