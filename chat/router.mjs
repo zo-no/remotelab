@@ -112,6 +112,21 @@ let cachedPageBuildInfo = null;
 const frontendBuildWatchers = [];
 let frontendBuildInvalidationTimer = null;
 
+async function listSessionsForClient(options = {}) {
+  const sessions = await listSessions({ ...options, includeBoardData: false });
+  return sessions.map(stripBoardDataFromSession);
+}
+
+async function getSessionForClient(id, options = {}) {
+  return stripBoardDataFromSession(await getSession(id, { ...options, includeBoardData: false }));
+}
+
+function stripBoardDataFromSession(session) {
+  if (!session || typeof session !== 'object') return session;
+  const { board, task, ...rest } = session;
+  return rest;
+}
+
 const staticMimeTypesByExtension = {
   '.css': 'text/css; charset=utf-8',
   '.gif': 'image/gif',
@@ -393,14 +408,14 @@ async function createOwnerTemplatedSession({ folder = '~', tool = '', name = '',
   session = await applyAppTemplateToSession(session.id, app.id) || session;
   if (app.welcomeMessage) {
     await appendEvent(session.id, messageEvent('assistant', app.welcomeMessage));
-    session = await getSession(session.id) || session;
+    session = await getSessionForClient(session.id) || session;
   }
   return session;
 }
 
 async function ensureUserSeedSession(user, { folder = '~', tool = '' } = {}) {
   if (!user?.id) return null;
-  const existing = (await listSessions({ includeVisitor: true })).find((session) => session.userId === user.id);
+  const existing = (await listSessionsForClient({ includeVisitor: true })).find((session) => session.userId === user.id);
   if (existing) return existing;
   const app = await getApp(user.defaultAppId || user.appIds?.[0] || '');
   if (!app || !isTemplateAppScopeId(app.id)) return null;
@@ -444,7 +459,7 @@ function buildVisitorSessionExternalTriggerId(appId, visitorId) {
 
 async function findReusableVisitorSession(appId, visitorId) {
   if (!appId || !visitorId) return null;
-  const sessionsForApp = await listSessions({ includeVisitor: true, appId });
+  const sessionsForApp = await listSessionsForClient({ includeVisitor: true, appId });
   return sessionsForApp.find((session) => session.visitorId === visitorId && !session.archived)
     || sessionsForApp.find((session) => session.visitorId === visitorId)
     || null;
@@ -1122,25 +1137,21 @@ export async function handleRequest(req, res) {
     const view = typeof parsedUrl.query.view === 'string'
       ? String(parsedUrl.query.view || '').trim().toLowerCase()
       : '';
-    const [sessionList, board, taskBoard] = await Promise.all([
-      listSessions({
-        includeVisitor,
-        appId: typeof parsedUrl.query.appId === 'string' ? parsedUrl.query.appId : '',
-        sourceId: typeof parsedUrl.query.sourceId === 'string' ? parsedUrl.query.sourceId : '',
-      }),
-      getSessionBoardLayout(),
-      getTaskBoardState(),
-    ]);
+    const sessionList = await listSessionsForClient({
+      includeVisitor,
+      appId: typeof parsedUrl.query.appId === 'string' ? parsedUrl.query.appId : '',
+      sourceId: typeof parsedUrl.query.sourceId === 'string' ? parsedUrl.query.sourceId : '',
+    });
     const folderFilter = parsedUrl.query.folder;
     const filtered = folderFilter
       ? sessionList.filter((session) => session.folder === folderFilter)
       : sessionList;
     const sessionRefs = filtered.map(createSessionSummaryRef);
     if (view === 'refs') {
-      writeJsonCached(req, res, { sessionRefs, board, taskBoard });
+      writeJsonCached(req, res, { sessionRefs });
       return;
     }
-    writeJsonCached(req, res, { sessions: filtered, sessionRefs, board, taskBoard });
+    writeJsonCached(req, res, { sessions: filtered, sessionRefs });
     return;
   }
 
@@ -1192,7 +1203,7 @@ export async function handleRequest(req, res) {
     const view = typeof parsedUrl.query.view === 'string'
       ? String(parsedUrl.query.view || '').trim().toLowerCase()
       : '';
-    const session = await getSession(sessionId, { includeQueuedMessages: view !== 'summary' });
+    const session = await getSessionForClient(sessionId, { includeQueuedMessages: view !== 'summary' });
     if (!session) {
       writeJson(res, 404, { error: 'Session not found' });
       return;
@@ -1325,13 +1336,13 @@ export async function handleRequest(req, res) {
       }) || session;
     }
     if (!session) {
-      session = await getSession(sessionId);
+      session = await getSessionForClient(sessionId);
     }
     if (!session) {
       writeJson(res, 404, { error: 'Session not found' });
       return;
     }
-    writeJson(res, 200, { session });
+    writeJson(res, 200, { session: stripBoardDataFromSession(session) });
     return;
   }
 
@@ -1371,12 +1382,12 @@ export async function handleRequest(req, res) {
               requestId,
             })
           : await sendMessage(sessionId, payload.text.trim(), payload.images || [], messageOptions);
-        writeJson(res, outcome.duplicate ? 200 : 202, {
+      writeJson(res, outcome.duplicate ? 200 : 202, {
           requestId: requestId || outcome.run?.requestId || null,
           duplicate: outcome.duplicate,
           queued: outcome.queued,
           run: outcome.run,
-          session: outcome.session,
+          session: stripBoardDataFromSession(outcome.session),
         });
       } catch (error) {
         const statusCode = error?.code === 'SESSION_ARCHIVED' ? 409 : 400;
@@ -1389,7 +1400,7 @@ export async function handleRequest(req, res) {
       if (!requireSessionAccess(res, authSession, sessionId)) return;
       const run = await cancelActiveRun(sessionId);
       if (!run) {
-        const session = await getSession(sessionId);
+        const session = await getSessionForClient(sessionId);
         if (session && session.activity?.run?.state !== 'running') {
           writeJson(res, 200, { run: null, session });
           return;
@@ -1410,7 +1421,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to compact session' });
         return;
       }
-      writeJson(res, 200, { ok: true, session: await getSession(sessionId) });
+      writeJson(res, 200, { ok: true, session: await getSessionForClient(sessionId) });
       return;
     }
 
@@ -1423,7 +1434,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to drop tool results' });
         return;
       }
-      writeJson(res, 200, { ok: true, session: await getSession(sessionId) });
+      writeJson(res, 200, { ok: true, session: await getSessionForClient(sessionId) });
       return;
     }
 
@@ -1448,7 +1459,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 400, { error: 'appId is required' });
         return;
       }
-      const session = await getSession(sessionId);
+      const session = await getSessionForClient(sessionId);
       if (!session) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
@@ -1466,7 +1477,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to apply template' });
         return;
       }
-      writeJson(res, 200, { session: updated });
+      writeJson(res, 200, { session: stripBoardDataFromSession(updated) });
       return;
     }
 
@@ -1488,7 +1499,7 @@ export async function handleRequest(req, res) {
           return;
         }
       }
-      const session = await getSession(sessionId);
+      const session = await getSessionForClient(sessionId);
       if (!session) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
@@ -1508,7 +1519,7 @@ export async function handleRequest(req, res) {
 
     if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'sessions' && sessionId && action === 'fork') {
       if (!requireSessionAccess(res, authSession, sessionId)) return;
-      const source = await getSession(sessionId);
+      const source = await getSessionForClient(sessionId);
       if (!source) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
@@ -1526,7 +1537,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to fork session' });
         return;
       }
-      writeJson(res, 201, { session });
+      writeJson(res, 201, { session: stripBoardDataFromSession(session) });
       return;
     }
   }
@@ -1539,7 +1550,7 @@ export async function handleRequest(req, res) {
       return;
     }
 
-    const session = await getSession(id);
+    const session = await getSessionForClient(id);
     if (!session) {
       writeJson(res, 404, { error: 'Session not found' });
       return;
@@ -1643,12 +1654,12 @@ export async function handleRequest(req, res) {
         session = await applyAppTemplateToSession(session.id, requestedApp.id) || session;
         if (requestedApp.welcomeMessage) {
           await appendEvent(session.id, messageEvent('assistant', requestedApp.welcomeMessage));
-          session = await getSession(session.id) || session;
+          session = await getSessionForClient(session.id) || session;
         }
       }
 
       res.writeHead(201, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ session }));
+      res.end(JSON.stringify({ session: stripBoardDataFromSession(session) }));
     } catch {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -2025,7 +2036,7 @@ export async function handleRequest(req, res) {
           tool: typeof payload.tool === 'string' ? payload.tool.trim() : '',
         });
       res.writeHead(201, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ user, session }));
+      res.end(JSON.stringify({ user, session: stripBoardDataFromSession(session) }));
     } catch {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid request body' }));

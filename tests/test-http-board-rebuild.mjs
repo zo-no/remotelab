@@ -208,19 +208,38 @@ try {
       'board rebuild should persist the model-defined columns',
     );
 
+    const board = await request(port, 'GET', '/api/board');
+    assert.equal(board.status, 200, 'dedicated board endpoint should still succeed');
+    assert.deepEqual(
+      board.json?.board?.columns?.map((column) => column.key),
+      ['focus_now', 'shared_tracks'],
+      'dedicated board endpoint should expose the persisted board layout',
+    );
+
     const list = await request(port, 'GET', '/api/sessions');
     assert.equal(list.status, 200, 'session listing should succeed after rebuild');
-    assert.deepEqual(
-      list.json?.board?.columns?.map((column) => column.key),
-      ['focus_now', 'shared_tracks'],
-      'session listing should expose the board layout summary',
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(list.json || {}, 'board'),
+      false,
+      'session listing should omit the board layout summary',
     );
 
     const byId = new Map((list.json?.sessions || []).map((session) => [session.id, session]));
-    assert.equal(byId.get(first.id)?.board?.columnKey, 'focus_now', 'anchor session should land in the focus column');
-    assert.equal(byId.get(first.id)?.board?.priority, 'high', 'anchor session should keep the high priority placement');
-    assert.equal(byId.get(second.id)?.board?.columnKey, 'shared_tracks', 'related work should reuse a shared track column');
-    assert.equal(byId.get(third.id)?.board?.columnKey, 'shared_tracks', 'similar work should not splinter into duplicate columns');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(byId.get(first.id) || {}, 'board'),
+      false,
+      'session listing should omit per-session board metadata',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(byId.get(second.id) || {}, 'board'),
+      false,
+      'session listing should omit related session board metadata',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(byId.get(third.id) || {}, 'board'),
+      false,
+      'session listing should omit per-session board metadata for all sessions',
+    );
 
     console.log('test-http-board-rebuild: ok');
   } finally {

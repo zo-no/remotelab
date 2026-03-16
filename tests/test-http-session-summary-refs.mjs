@@ -126,12 +126,32 @@ try {
 
     const list = await request(port, 'GET', '/api/sessions');
     assert.equal(list.status, 200, 'default session list should succeed');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(list.json || {}, 'board'),
+      false,
+      'default session list should omit board layout data',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(list.json || {}, 'taskBoard'),
+      false,
+      'default session list should omit task board state',
+    );
     const listRef = (list.json.sessionRefs || []).find((entry) => entry.id === sessionId);
     assert.ok(listRef, 'default session list should include per-session summary refs');
 
     const refs = await request(port, 'GET', '/api/sessions?view=refs');
     assert.equal(refs.status, 200, 'refs-only session list should succeed');
     assert.equal(Array.isArray(refs.json.sessions), false, 'refs-only session list should omit full session payloads');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(refs.json || {}, 'board'),
+      false,
+      'refs-only session list should omit board layout data',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(refs.json || {}, 'taskBoard'),
+      false,
+      'refs-only session list should omit task board state',
+    );
     const ref = (refs.json.sessionRefs || []).find((entry) => entry.id === sessionId);
     assert.ok(ref, 'refs-only session list should include the created session ref');
     assert.equal(typeof ref.summaryEtag, 'string', 'session refs should expose a summary etag');
@@ -140,6 +160,16 @@ try {
     assert.equal(summary.status, 200, 'summary session route should succeed');
     assert.equal(summary.headers.etag, ref.summaryEtag, 'summary route ETag should match the list ref tag');
     assert.equal(
+      Object.prototype.hasOwnProperty.call(summary.json?.session || {}, 'board'),
+      false,
+      'summary route should omit board metadata',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(summary.json?.session || {}, 'task'),
+      false,
+      'summary route should omit task board metadata',
+    );
+    assert.equal(
       Object.prototype.hasOwnProperty.call(summary.json.session, 'queuedMessages'),
       false,
       'summary route should omit queuedMessages',
@@ -147,6 +177,16 @@ try {
 
     const detail = await request(port, 'GET', `/api/sessions/${sessionId}`);
     assert.equal(detail.status, 200, 'detail session route should still succeed');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(detail.json?.session || {}, 'board'),
+      false,
+      'detail route should omit board metadata',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(detail.json?.session || {}, 'task'),
+      false,
+      'detail route should omit task board metadata',
+    );
     assert.equal(Array.isArray(detail.json.session.queuedMessages), true, 'detail route should keep queuedMessages for the attached session view');
 
     const summary304 = await request(port, 'GET', `/api/sessions/${sessionId}?view=summary`, null, {

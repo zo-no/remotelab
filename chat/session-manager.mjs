@@ -870,13 +870,16 @@ async function resolveVisibleTaskBoardState(sessionMetas = null) {
 }
 
 async function enrichSessionMeta(meta, options = {}) {
-  const taskBoardState = options?.taskBoardState || await resolveVisibleTaskBoardState();
+  const includeBoardData = options?.includeBoardData !== false;
+  const taskBoardState = includeBoardData
+    ? (options?.taskBoardState || await resolveVisibleTaskBoardState())
+    : null;
   const live = liveSessions.get(meta.id);
   const snapshot = await getHistorySnapshot(meta.id);
   const queuedCount = getFollowUpQueueCount(meta);
   const runActivity = await resolveSessionRunActivity(meta);
-  const boardPlacement = await getBoardPlacement(meta.id);
-  const task = getTaskForSession(taskBoardState, meta.id);
+  const boardPlacement = includeBoardData ? await getBoardPlacement(meta.id) : null;
+  const task = includeBoardData ? getTaskForSession(taskBoardState, meta.id) : null;
   const { followUpQueue, recentFollowUpRequestIds, activeRunId, activeRun, ...rest } = meta;
   const sourceId = resolveSessionSourceId(meta);
   return {
@@ -2339,9 +2342,16 @@ export async function startDetachedRunObservers() {
   await resumePendingCompletionTargets();
 }
 
-export async function listSessions({ includeVisitor = false, includeArchived = true, appId = '', sourceId = '', includeQueuedMessages = false } = {}) {
+export async function listSessions({
+  includeVisitor = false,
+  includeArchived = true,
+  appId = '',
+  sourceId = '',
+  includeQueuedMessages = false,
+  includeBoardData = true,
+} = {}) {
   const metas = await reconcileSessionsMetaList(await loadSessionsMeta());
-  const taskBoardState = await resolveVisibleTaskBoardState(metas);
+  const taskBoardState = includeBoardData ? await resolveVisibleTaskBoardState(metas) : null;
   const normalizedAppId = normalizeAppId(appId);
   const normalizedSourceId = normalizeAppId(sourceId);
   const filtered = metas
@@ -2354,15 +2364,20 @@ export async function listSessions({ includeVisitor = false, includeArchived = t
       getSessionPinSortRank(b) - getSessionPinSortRank(a)
       || getSessionSortTime(b) - getSessionSortTime(a)
     ));
-  return Promise.all(filtered.map((meta) => enrichSessionMetaForClient(meta, { includeQueuedMessages, taskBoardState })));
+  return Promise.all(filtered.map((meta) => enrichSessionMetaForClient(meta, {
+    includeQueuedMessages,
+    includeBoardData,
+    taskBoardState,
+  })));
 }
 
 export async function getSession(id, options = {}) {
   const metas = await reconcileSessionsMetaList(await loadSessionsMeta());
-  const taskBoardState = await resolveVisibleTaskBoardState(metas);
+  const includeBoardData = options?.includeBoardData !== false;
+  const taskBoardState = includeBoardData ? await resolveVisibleTaskBoardState(metas) : null;
   const meta = await reconcileSessionMeta(metas.find((entry) => entry.id === id) || await findSessionMeta(id));
   if (!meta) return null;
-  return enrichSessionMetaForClient(meta, { ...options, taskBoardState });
+  return enrichSessionMetaForClient(meta, { ...options, includeBoardData, taskBoardState });
 }
 
 export async function getSessionEventsAfter(sessionId, afterSeq = 0, options = {}) {

@@ -237,10 +237,13 @@ async function main() {
 
     const sessionList = await request(port, 'GET', '/api/sessions?includeVisitor=1');
     assert.equal(sessionList.status, 200, `expected session list to succeed: ${sessionList.text}`);
-    assert.ok(Array.isArray(sessionList.json?.taskBoard?.tasks), 'session list payload should include task board');
     assert.ok(
-      sessionList.json?.sessions?.every((session) => session?.task?.id && session?.task?.title),
-      'every session should carry its resolved task metadata after rebuild',
+      Object.prototype.hasOwnProperty.call(sessionList.json || {}, 'taskBoard') === false,
+      'session list payload should omit task board state',
+    );
+    assert.ok(
+      (sessionList.json?.sessions || []).every((session) => !Object.prototype.hasOwnProperty.call(session || {}, 'task')),
+      'session list payload should omit per-session task board metadata',
     );
   } finally {
     server?.child?.kill('SIGTERM');

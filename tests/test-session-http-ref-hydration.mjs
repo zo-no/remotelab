@@ -221,8 +221,6 @@ function createContext() {
             { id: 'changed-session', summaryEtag: '"etag-changed-new"' },
             { id: 'unchanged-session', summaryEtag: '"etag-unchanged"' },
           ],
-          board: null,
-          taskBoard: null,
         }, {
           etag: '"etag-refs"',
           url: 'http://127.0.0.1/api/sessions?includeVisitor=1&view=refs',
