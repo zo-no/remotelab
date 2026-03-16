@@ -142,7 +142,7 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - Refresh restore, sidebar tab restore, and notification-open behavior should not each pick their own session separately; drive all three from the same `session`/`tab` deep-link contract plus one persisted local fallback.
 - Good precedence is: explicit notification/URL target first, then last locally active session, then most recently updated session.
 - Push notifications should carry the target session URL in their payload, and existing app windows should receive an in-page message to switch sessions without a forced reload. Fresh windows can fall back to `openWindow(url)`.
-- To make "latest session" meaningful, persist a session-level recency field like `updatedAt` and sort session listings/fallback selection by it.
+- To make "latest session" meaningful, sort by real session activity rather than every metadata write. Archive/unarchive should not bump the active-list recency signal; keep archive ordering on its own `archivedAt` path.
 
 ### Open Local Config Should Fail Per Record, Not Per File (2026-03-06)
 - Once provider/tool extensibility relies on user-editable local JSON, a single bad record must be skipped with a clear log instead of breaking the entire picker/API response.
@@ -397,6 +397,7 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - In RemoteLab's invalidation-only realtime model, a `session_invalidated` event should refresh only the affected session (`/api/sessions/:id`, plus `/events` when that session is open), not the entire owner session list.
 - Reserve whole-list refreshes like `sessions_invalidated` for collection-shape changes such as create, archive, or unarchive; rename/group/tool/status changes can be reconciled with a per-session refresh and local sidebar rerender.
 - Coalesce repeated per-session invalidations client-side so active runs do not fan out into bursts of overlapping sidebar requests.
+- For collection-shape actions with noticeable latency, such as archive/unarchive, optimistic sidebar hide/show on click makes the UI feel immediate as long as the client can roll back cleanly if the HTTP mutation fails.
 
 ### Usage Metrics Should Normalize To Context Window Size (2026-03-10)
 - Provider usage fields are not directly comparable: Claude-style runtimes split cached prompt tokens into separate fields, while Codex-style runtimes report full prompt size in `input_tokens` and expose cached tokens only as a subset annotation.
