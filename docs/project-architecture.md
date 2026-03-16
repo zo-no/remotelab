@@ -695,6 +695,7 @@ The main chat plane is almost entirely driven through `chat/router.mjs`.
 Sessions:
 
 - `GET /api/sessions`
+- `GET /api/sessions/archived`
 - `POST /api/sessions`
 - `GET /api/sessions/:id`
 - `PATCH /api/sessions/:id`
@@ -705,6 +706,8 @@ Sessions:
 - `POST /api/sessions/:id/compact`
 - `POST /api/sessions/:id/drop-tools`
 - `POST /api/sessions/:id/share`
+
+`GET /api/sessions` is the owner sidebar collection and returns active-session metadata only. Archived sessions are fetched separately through `GET /api/sessions/archived` so the default bootstrap path stays small without introducing pagination.
 
 The session event route is completeness-first: it returns the full event index after the given cursor. Heavy thinking and tool bodies stay deferred behind the per-event body route so session switches do not depend on a paged history fetch.
 

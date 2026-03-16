@@ -3,6 +3,10 @@ export function parseSessionGetRoute(pathname) {
     return { kind: 'list' };
   }
 
+  if (pathname === '/api/sessions/archived') {
+    return { kind: 'archived-list' };
+  }
+
   const parts = pathname.split('/').filter(Boolean);
   if (parts[0] !== 'api' || parts[1] !== 'sessions') {
     return null;

@@ -207,27 +207,10 @@ function buildJsonCacheKey(url) {
 }
 
 const SESSION_LIST_URL = "/api/sessions?includeVisitor=1";
-const SESSION_LIST_REFS_URL = "/api/sessions?includeVisitor=1&view=refs";
+const ARCHIVED_SESSION_LIST_URL = "/api/sessions/archived?includeVisitor=1";
 
-function getCachedJsonEntry(url) {
-  return jsonResponseCache.get(buildJsonCacheKey(url)) || null;
-}
-
-function getCachedJsonEtag(url) {
-  return getCachedJsonEntry(url)?.etag || "";
-}
-
-function getSessionSummaryUrl(sessionId) {
-  return `/api/sessions/${encodeURIComponent(sessionId)}?view=summary`;
-}
-
-function createSessionRefsMap(refs) {
-  const map = new Map();
-  for (const ref of Array.isArray(refs) ? refs : []) {
-    if (!ref?.id) continue;
-    map.set(ref.id, typeof ref.summaryEtag === "string" ? ref.summaryEtag : "");
-  }
-  return map;
+function getSessionSidebarUrl(sessionId) {
+  return `/api/sessions/${encodeURIComponent(sessionId)}?view=sidebar`;
 }
 
 async function fetchJsonOrRedirect(url, options = {}) {
@@ -371,18 +354,32 @@ function normalizeSessionRecord(session, previous = null) {
     ...session,
     appId: getEffectiveSessionAppId(session),
   };
-  if (typeof session?.summaryEtag === "string" && session.summaryEtag) {
-    normalized.summaryEtag = session.summaryEtag;
-  } else if (typeof previous?.summaryEtag === "string" && previous.summaryEtag) {
-    normalized.summaryEtag = previous.summaryEtag;
-  } else {
-    delete normalized.summaryEtag;
-  }
   if (!Object.prototype.hasOwnProperty.call(session || {}, "queuedMessages")) {
     if (queueCount > 0 && Array.isArray(previous?.queuedMessages)) {
       normalized.queuedMessages = previous.queuedMessages;
     } else {
       delete normalized.queuedMessages;
+    }
+  }
+  if (!Object.prototype.hasOwnProperty.call(session || {}, "model")) {
+    if (typeof previous?.model === "string") {
+      normalized.model = previous.model;
+    } else {
+      delete normalized.model;
+    }
+  }
+  if (!Object.prototype.hasOwnProperty.call(session || {}, "effort")) {
+    if (typeof previous?.effort === "string") {
+      normalized.effort = previous.effort;
+    } else {
+      delete normalized.effort;
+    }
+  }
+  if (!Object.prototype.hasOwnProperty.call(session || {}, "thinking")) {
+    if (previous?.thinking === true) {
+      normalized.thinking = true;
+    } else {
+      delete normalized.thinking;
     }
   }
   return normalized;
@@ -403,23 +400,44 @@ function upsertSession(session) {
   return normalized;
 }
 
-function getCachedSessionSummary(sessionId, previous = null) {
-  const cached = getCachedJsonEntry(getSessionSummaryUrl(sessionId));
-  if (!cached?.data?.session?.id) return null;
-  return normalizeSessionRecord(
-    {
-      ...cached.data.session,
-      ...(cached.etag ? { summaryEtag: cached.etag } : {}),
-    },
-    previous,
-  );
+function mergeUniqueSessions(entries = []) {
+  const merged = [];
+  const seenIds = new Set();
+  for (const entry of entries) {
+    if (!entry?.id || seenIds.has(entry.id)) continue;
+    seenIds.add(entry.id);
+    merged.push(entry);
+  }
+  return merged;
 }
 
-function applySessionListState(nextSessions, { board = null, taskBoard = null } = {}) {
+function applySessionListState(nextSessions, {
+  board = null,
+  taskBoard = null,
+  archivedCount: nextArchivedCount = archivedSessionCount,
+} = {}) {
   sessionBoardLayout = board;
   taskBoardState = taskBoard;
-  sessions = Array.isArray(nextSessions) ? nextSessions : [];
+  const previousMap = new Map(sessions.map((session) => [session.id, session]));
+  const activeSessions = (Array.isArray(nextSessions) ? nextSessions : [])
+    .map((session) => normalizeSessionRecord(session, previousMap.get(session?.id) || null))
+    .filter(Boolean);
+  const preservedArchived = sessions
+    .filter((session) => session?.archived === true)
+    .map((session) => normalizeSessionRecord(session, previousMap.get(session?.id) || null))
+    .filter(Boolean);
+  const preservedCurrent = currentSessionId
+    ? normalizeSessionRecord(previousMap.get(currentSessionId) || null, previousMap.get(currentSessionId) || null)
+    : null;
+  sessions = mergeUniqueSessions([
+    ...activeSessions,
+    ...preservedArchived,
+    ...(preservedCurrent?.archived === true ? [preservedCurrent] : []),
+  ]);
   hasLoadedSessions = true;
+  if (Number.isInteger(nextArchivedCount) && nextArchivedCount >= 0) {
+    archivedSessionCount = nextArchivedCount;
+  }
   refreshAppCatalog();
   renderSessionList();
   if (currentSessionId && !sessions.some((session) => session.id === currentSessionId)) {
@@ -432,53 +450,66 @@ function applySessionListState(nextSessions, { board = null, taskBoard = null } 
   return sessions;
 }
 
-async function fetchSessionSummary(sessionId) {
-  const url = getSessionSummaryUrl(sessionId);
-  const data = await fetchJsonOrRedirect(url);
-  const summaryEtag = getCachedJsonEtag(url);
-  return upsertSession(summaryEtag ? { ...data.session, summaryEtag } : data.session);
+function applyArchivedSessionListState(nextSessions, {
+  archivedCount: nextArchivedCount = null,
+} = {}) {
+  const previousMap = new Map(sessions.map((session) => [session.id, session]));
+  const preservedActive = sessions
+    .filter((session) => session?.archived !== true)
+    .map((session) => normalizeSessionRecord(session, previousMap.get(session?.id) || null))
+    .filter(Boolean);
+  const archivedSessions = (Array.isArray(nextSessions) ? nextSessions : [])
+    .map((session) => normalizeSessionRecord(session, previousMap.get(session?.id) || null))
+    .filter(Boolean);
+  sessions = mergeUniqueSessions([...preservedActive, ...archivedSessions]);
+  archivedSessionsLoaded = true;
+  archivedSessionsLoading = false;
+  archivedSessionCount = Number.isInteger(nextArchivedCount) && nextArchivedCount >= 0
+    ? nextArchivedCount
+    : archivedSessions.length;
+  refreshAppCatalog();
+  renderSessionList();
+  return archivedSessions;
 }
 
-async function hydrateSessionSummaries(sessionIds = []) {
-  const queue = [...new Set(
-    (Array.isArray(sessionIds) ? sessionIds : [])
-      .filter((sessionId) => sessionId && (!hasAttachedSession || sessionId !== currentSessionId)),
-  )];
-  if (queue.length === 0) return [];
+async function fetchSessionSidebar(sessionId) {
+  const url = getSessionSidebarUrl(sessionId);
+  const data = await fetchJsonOrRedirect(url);
+  return upsertSession(data.session);
+}
 
-  const refreshed = [];
-  const batchSize = 6;
-  let needsRender = false;
-
-  for (let index = 0; index < queue.length; index += batchSize) {
-    const batch = queue.slice(index, index + batchSize);
-    const results = await Promise.all(batch.map(async (sessionId) => {
-      try {
-        return await fetchSessionSummary(sessionId);
-      } catch (error) {
-        if (error?.message === "Session not found") {
-          const nextSessions = sessions.filter((session) => session.id !== sessionId);
-          if (nextSessions.length !== sessions.length) {
-            sessions = nextSessions;
-            refreshAppCatalog();
-            needsRender = true;
-          }
-          return null;
-        }
-        throw error;
-      }
-    }));
-    if (results.some(Boolean)) {
-      refreshed.push(...results.filter(Boolean));
-      needsRender = true;
-    }
-    if (needsRender) {
-      renderSessionList();
-      needsRender = false;
-    }
+async function fetchArchivedSessions() {
+  if (visitorMode) return [];
+  if (archivedSessionsRefreshPromise) {
+    return archivedSessionsRefreshPromise;
+  }
+  if (!archivedSessionsLoaded && archivedSessionCount === 0) {
+    archivedSessionsLoaded = true;
+    archivedSessionsLoading = false;
+    renderSessionList();
+    return [];
   }
 
-  return refreshed;
+  archivedSessionsLoading = true;
+  renderSessionList();
+  const request = (async () => {
+    try {
+      const data = await fetchJsonOrRedirect(ARCHIVED_SESSION_LIST_URL);
+      return applyArchivedSessionListState(data.sessions || [], {
+        archivedCount: Number.isInteger(data.archivedCount)
+          ? data.archivedCount
+          : (Array.isArray(data.sessions) ? data.sessions.length : 0),
+      });
+    } catch (error) {
+      archivedSessionsLoading = false;
+      renderSessionList();
+      throw error;
+    } finally {
+      archivedSessionsRefreshPromise = null;
+    }
+  })();
+  archivedSessionsRefreshPromise = request;
+  return request;
 }
 
 async function fetchAppsList() {
@@ -586,77 +617,12 @@ async function deleteUserRecord(userId) {
 
 async function fetchSessionsList() {
   if (visitorMode) return [];
-  const previousMap = new Map(sessions.map((session) => [session.id, session]));
-
-  if (!hasLoadedSessions) {
-    const data = await fetchJsonOrRedirect(SESSION_LIST_URL);
-    const refsMap = createSessionRefsMap(data.sessionRefs);
-    const nextSessions = (data.sessions || []).map((session) => normalizeSessionRecord(
-      refsMap.has(session.id)
-        ? { ...session, summaryEtag: refsMap.get(session.id) }
-        : session,
-      previousMap.get(session.id) || null,
-    ));
-    return applySessionListState(nextSessions, {
-      board: data.board || null,
-      taskBoard: data.taskBoard || null,
-    });
-  }
-
-  const data = await fetchJsonOrRedirect(SESSION_LIST_REFS_URL);
-  const refs = Array.isArray(data.sessionRefs) ? data.sessionRefs : [];
-  const nextSessions = [];
-  const staleIds = [];
-  const staleSummaryEtags = new Map();
-  const seenIds = new Set();
-
-  for (const ref of refs) {
-    const sessionId = typeof ref?.id === "string" ? ref.id : "";
-    if (!sessionId || seenIds.has(sessionId)) continue;
-    seenIds.add(sessionId);
-
-    const summaryEtag = typeof ref?.summaryEtag === "string" ? ref.summaryEtag : "";
-    const previous = previousMap.get(sessionId) || null;
-    const cachedSummary = getCachedSessionSummary(sessionId, previous);
-
-    if (previous?.summaryEtag && previous.summaryEtag === summaryEtag) {
-      nextSessions.push(previous);
-      continue;
-    }
-
-    if (cachedSummary?.summaryEtag && cachedSummary.summaryEtag === summaryEtag) {
-      nextSessions.push(cachedSummary);
-      continue;
-    }
-
-    if (previous) {
-      nextSessions.push(previous);
-    } else if (cachedSummary) {
-      nextSessions.push(cachedSummary);
-    } else {
-      nextSessions.push(normalizeSessionRecord({ id: sessionId }, null));
-    }
-    staleIds.push(sessionId);
-    if (summaryEtag) {
-      staleSummaryEtags.set(sessionId, summaryEtag);
-    }
-  }
-
-  applySessionListState(nextSessions, {
+  const data = await fetchJsonOrRedirect(SESSION_LIST_URL);
+  applySessionListState(data.sessions || [], {
     board: data.board || null,
     taskBoard: data.taskBoard || null,
+    archivedCount: Number.isInteger(data.archivedCount) ? data.archivedCount : 0,
   });
-
-  if (hasAttachedSession && currentSessionId && staleIds.includes(currentSessionId)) {
-    await refreshCurrentSession().catch(() => {});
-    const current = sessions.find((session) => session.id === currentSessionId);
-    const refreshedSummaryEtag = staleSummaryEtags.get(currentSessionId);
-    if (current && refreshedSummaryEtag) {
-      current.summaryEtag = refreshedSummaryEtag;
-    }
-  }
-
-  await hydrateSessionSummaries(staleIds);
   return sessions;
 }
 
@@ -794,7 +760,7 @@ async function refreshSidebarSession(sessionId) {
   }
   const request = (async () => {
     try {
-      const session = await fetchSessionSummary(sessionId);
+      const session = await fetchSessionSidebar(sessionId);
       if (session) {
         renderSessionList();
       }
@@ -830,6 +796,9 @@ async function refreshRealtimeViews() {
   }
 
   await fetchSessionsList().catch(() => {});
+  if (archivedSessionsLoaded) {
+    await fetchArchivedSessions().catch(() => {});
+  }
   if (currentSessionId) {
     await refreshCurrentSession().catch(() => {});
   }

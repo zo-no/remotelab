@@ -71,6 +71,7 @@ import {
   updateVisitor,
 } from './visitors.mjs';
 import { createShareSnapshot, getShareAsset, getShareSnapshot } from './shares.mjs';
+import { createSessionDetail, createSessionListItem } from './session-api-shapes.mjs';
 import { parseSessionGetRoute } from './session-route-utils.mjs';
 import { readBody } from '../lib/utils.mjs';
 import {
@@ -117,14 +118,21 @@ async function listSessionsForClient(options = {}) {
   return sessions.map(stripBoardDataFromSession);
 }
 
+async function listSessionListItemsForClient(options = {}) {
+  const sessions = await listSessions({ ...options, includeBoardData: false });
+  return sessions.map(createSessionListItem);
+}
+
 async function getSessionForClient(id, options = {}) {
   return stripBoardDataFromSession(await getSession(id, { ...options, includeBoardData: false }));
 }
 
+async function getSessionListItemForClient(id, options = {}) {
+  return createSessionListItem(await getSession(id, { ...options, includeBoardData: false }));
+}
+
 function stripBoardDataFromSession(session) {
-  if (!session || typeof session !== 'object') return session;
-  const { board, task, ...rest } = session;
-  return rest;
+  return createSessionDetail(session);
 }
 
 const staticMimeTypesByExtension = {
@@ -734,7 +742,7 @@ function writeJsonCached(req, res, payload, {
 }
 
 function createSessionSummaryPayload(session) {
-  return { session };
+  return { session: createSessionListItem(session) };
 }
 
 function createSessionSummaryEtag(session) {
@@ -742,9 +750,10 @@ function createSessionSummaryEtag(session) {
 }
 
 function createSessionSummaryRef(session) {
+  const projected = createSessionListItem(session);
   return {
-    id: session.id,
-    summaryEtag: createSessionSummaryEtag(session),
+    id: projected?.id,
+    summaryEtag: createSessionSummaryEtag(projected),
   };
 }
 
@@ -1131,14 +1140,15 @@ export async function handleRequest(req, res) {
 
   const sessionGetRoute = req.method === 'GET' ? parseSessionGetRoute(pathname) : null;
 
-  if (sessionGetRoute?.kind === 'list') {
+  if (sessionGetRoute?.kind === 'list' || sessionGetRoute?.kind === 'archived-list') {
     const includeVisitor = authSession?.role === 'owner'
       && ['1', 'true', 'yes'].includes(String(parsedUrl.query.includeVisitor || '').toLowerCase());
     const view = typeof parsedUrl.query.view === 'string'
       ? String(parsedUrl.query.view || '').trim().toLowerCase()
       : '';
-    const sessionList = await listSessionsForClient({
+    const sessionList = await listSessionListItemsForClient({
       includeVisitor,
+      includeArchived: true,
       appId: typeof parsedUrl.query.appId === 'string' ? parsedUrl.query.appId : '',
       sourceId: typeof parsedUrl.query.sourceId === 'string' ? parsedUrl.query.sourceId : '',
     });
@@ -1146,12 +1156,23 @@ export async function handleRequest(req, res) {
     const filtered = folderFilter
       ? sessionList.filter((session) => session.folder === folderFilter)
       : sessionList;
-    const sessionRefs = filtered.map(createSessionSummaryRef);
+    const archivedSessions = filtered.filter((session) => session?.archived === true);
+    const activeSessions = filtered.filter((session) => session?.archived !== true);
+    const targetSessions = sessionGetRoute.kind === 'archived-list'
+      ? archivedSessions
+      : activeSessions;
+    const sessionRefs = targetSessions.map(createSessionSummaryRef).filter((ref) => ref?.id);
     if (view === 'refs') {
-      writeJsonCached(req, res, { sessionRefs });
+      writeJsonCached(req, res, {
+        sessionRefs,
+        archivedCount: archivedSessions.length,
+      });
       return;
     }
-    writeJsonCached(req, res, { sessions: filtered, sessionRefs });
+    writeJsonCached(req, res, {
+      sessions: targetSessions,
+      archivedCount: archivedSessions.length,
+    });
     return;
   }
 
@@ -1203,7 +1224,9 @@ export async function handleRequest(req, res) {
     const view = typeof parsedUrl.query.view === 'string'
       ? String(parsedUrl.query.view || '').trim().toLowerCase()
       : '';
-    const session = await getSessionForClient(sessionId, { includeQueuedMessages: view !== 'summary' });
+    const session = view === 'summary' || view === 'sidebar'
+      ? await getSessionListItemForClient(sessionId)
+      : await getSessionForClient(sessionId, { includeQueuedMessages: true });
     if (!session) {
       writeJson(res, 404, { error: 'Session not found' });
       return;

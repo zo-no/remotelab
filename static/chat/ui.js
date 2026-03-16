@@ -1273,16 +1273,34 @@ function renderArchivedSection() {
   header.className = "archived-section-header";
   const isCollapsed = localStorage.getItem("archivedCollapsed") !== "false";
   if (isCollapsed) header.classList.add("collapsed");
-  header.innerHTML = `<span class="folder-chevron">${renderUiIcon("chevron-down")}</span><span class="archived-label">Archive</span><span class="folder-count">${archivedSessions.length}</span>`;
+  const archivedCount = archivedSessionsLoaded ? archivedSessions.length : archivedSessionCount;
+  header.innerHTML = `<span class="folder-chevron">${renderUiIcon("chevron-down")}</span><span class="archived-label">Archive</span><span class="folder-count">${archivedCount}</span>`;
   header.addEventListener("click", () => {
     header.classList.toggle("collapsed");
     localStorage.setItem("archivedCollapsed", header.classList.contains("collapsed") ? "true" : "false");
+    if (!header.classList.contains("collapsed") && !archivedSessionsLoaded && !archivedSessionsLoading && archivedSessionCount > 0) {
+      Promise.resolve(fetchArchivedSessions()).catch((error) => {
+        console.warn("[sessions] Failed to load archived sessions:", error.message);
+      });
+    }
   });
 
   const items = document.createElement("div");
   items.className = "archived-items";
 
-  if (archivedSessions.length === 0) {
+  if (!isCollapsed && !archivedSessionsLoaded && archivedSessionCount > 0) {
+    if (!archivedSessionsLoading) {
+      Promise.resolve(fetchArchivedSessions()).catch((error) => {
+        console.warn("[sessions] Failed to load archived sessions:", error.message);
+      });
+    }
+    const loading = document.createElement("div");
+    loading.className = "archived-empty";
+    loading.textContent = archivedSessionsLoading
+      ? "Loading archived sessions…"
+      : "Load archived sessions…";
+    items.appendChild(loading);
+  } else if (archivedSessions.length === 0) {
     const empty = document.createElement("div");
     empty.className = "archived-empty";
     empty.textContent = getFilteredSessionEmptyText({ archived: true });

@@ -291,6 +291,11 @@ function applyOptimisticSessionArchiveState(sessionId, archived) {
   const previous = sessions[index];
   const next = buildOptimisticArchivedSession(previous, archived);
   if (!next) return null;
+  if (previous?.archived !== true && archived) {
+    archivedSessionCount += 1;
+  } else if (previous?.archived === true && !archived) {
+    archivedSessionCount = Math.max(0, archivedSessionCount - 1);
+  }
   sessions[index] = next;
   sortSessionsInPlace();
   refreshAppCatalog();
@@ -305,6 +310,12 @@ function applyOptimisticSessionArchiveState(sessionId, archived) {
 function restoreOptimisticSessionSnapshot(session) {
   if (!session?.id) return;
   const index = sessions.findIndex((entry) => entry.id === session.id);
+  const current = index === -1 ? null : sessions[index];
+  if (current?.archived !== true && session.archived === true) {
+    archivedSessionCount += 1;
+  } else if (current?.archived === true && session.archived !== true) {
+    archivedSessionCount = Math.max(0, archivedSessionCount - 1);
+  }
   if (index === -1) {
     sessions.push(session);
   } else {
@@ -331,6 +342,9 @@ function handleWsMessage(msg) {
 
     case "sessions_invalidated":
       fetchSessionsList().catch(() => {});
+      if (archivedSessionsLoaded) {
+        fetchArchivedSessions().catch(() => {});
+      }
       break;
 
     case "session_invalidated":
