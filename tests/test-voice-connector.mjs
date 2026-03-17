@@ -106,10 +106,7 @@ const renderedPrompt = buildRemoteLabMessage({
   transcript: 'Give me a quick status update.',
   metadata: { microphone: 'usb' },
 })
-assert.match(renderedPrompt, /Inbound voice interaction from a local hardware connector\./)
-assert.match(renderedPrompt, /Connector ID: living-room-speaker/)
-assert.match(renderedPrompt, /Transcript:\nGive me a quick status update\./)
-assert.match(renderedPrompt, /speak aloud through the speaker/i)
+assert.equal(renderedPrompt, 'Give me a quick status update.')
 
 assert.equal(normalizeSpokenReplyText('  <private>hidden</private>  Spoken reply.  '), 'Spoken reply.')
 
@@ -203,7 +200,7 @@ try {
 
   assert.match(submitPayload?.requestId || '', /^voice:living-room-speaker:wake_1$/)
   assert.equal(submitPayload?.tool, 'codex')
-  assert.match(submitPayload?.text || '', /Transcript:\n你好，介绍一下你自己。/)
+  assert.equal(submitPayload?.text || '', '你好，介绍一下你自己。')
 
   assert.equal(reply.sessionId, 'sess_voice_1')
   assert.equal(reply.runId, 'run_voice_1')
@@ -215,5 +212,5 @@ try {
 
 console.log('ok - voice connector config defaults load correctly')
 console.log('ok - voice ingress normalization handles JSON and plain text')
-console.log('ok - voice prompts stay speech-first')
+console.log('ok - voice messages stay transcript-first')
 console.log('ok - RemoteLab roundtrip uses the voice app scope')

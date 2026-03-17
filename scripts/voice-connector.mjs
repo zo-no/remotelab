@@ -366,21 +366,7 @@ function buildSessionDescription(config, summary) {
 }
 
 function buildRemoteLabMessage(summary) {
-  const metadataEntries = Object.entries(summary?.metadata || {})
-  return [
-    'Inbound voice interaction from a local hardware connector.',
-    summary?.connectorId ? `Connector ID: ${summary.connectorId}` : '',
-    summary?.roomName ? `Room: ${summary.roomName}` : '',
-    summary?.wakeWord ? `Wake word: ${summary.wakeWord}` : '',
-    summary?.detectedAt ? `Detected at: ${summary.detectedAt}` : '',
-    summary?.source ? `Source: ${summary.source}` : '',
-    metadataEntries.length > 0 ? `Metadata: ${JSON.stringify(summary.metadata)}` : '',
-    '',
-    'Transcript:',
-    summary?.transcript || '[empty transcript]',
-    '',
-    'Write the exact reply text to speak aloud through the speaker.',
-  ].filter(Boolean).join('\n')
+  return trimString(summary?.transcript)
 }
 
 function normalizeSpokenReplyText(text) {
