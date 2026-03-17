@@ -2,12 +2,44 @@
 
 (function attachRemoteLabSessionStateModel(root) {
   const defaultBoardColumn = {
-    key: "unassigned",
-    label: "Unassigned",
-    title: "Sessions that are not yet arranged by the board model.",
-    emptyText: "Nothing here yet",
-    order: 0,
+    key: "open",
+    label: "Open",
+    title: "Sessions that are ready for more work.",
+    emptyText: "No open sessions",
+    order: 20,
   };
+
+  const sessionBoardColumnSpecs = [
+    {
+      key: "active_now",
+      label: "Active",
+      title: "Running, queued, or compacting sessions.",
+      emptyText: "No active sessions",
+      order: 0,
+    },
+    {
+      key: "waiting_user",
+      label: "Waiting",
+      title: "Sessions blocked on your input or approval.",
+      emptyText: "Nothing waiting on you",
+      order: 10,
+    },
+    { ...defaultBoardColumn },
+    {
+      key: "parked",
+      label: "Parked",
+      title: "Sessions intentionally paused for later.",
+      emptyText: "Nothing parked",
+      order: 30,
+    },
+    {
+      key: "done",
+      label: "Done",
+      title: "Completed sessions kept for reference.",
+      emptyText: "No completed sessions",
+      order: 40,
+    },
+  ];
 
   const workflowPrioritySpecs = {
     high: {
@@ -30,6 +62,33 @@
       rank: 1,
       className: "board-priority-low",
       title: "Safe to leave for later.",
+    },
+  };
+
+  const workflowStatusSpecs = {
+    waiting_user: {
+      key: "waiting_user",
+      label: "waiting",
+      className: "status-waiting-user",
+      dotClass: "",
+      itemClass: "",
+      title: "Waiting on user input",
+    },
+    done: {
+      key: "done",
+      label: "done",
+      className: "status-done",
+      dotClass: "",
+      itemClass: "",
+      title: "Current task complete",
+    },
+    parked: {
+      key: "parked",
+      label: "parked",
+      className: "status-parked",
+      dotClass: "",
+      itemClass: "",
+      title: "Parked for later",
     },
   };
 
@@ -95,69 +154,24 @@
     return { ...workflowPrioritySpecs[normalized] };
   }
 
+  function getWorkflowStatusInfo(value) {
+    const normalized = normalizeSessionWorkflowState(value);
+    if (!normalized || !workflowStatusSpecs[normalized]) return null;
+    return { ...workflowStatusSpecs[normalized] };
+  }
+
   function getSessionSortTime(session) {
     const stamp = session?.lastEventAt || session?.updatedAt || session?.created || "";
     const time = new Date(stamp).getTime();
     return Number.isFinite(time) ? time : 0;
   }
 
-  function normalizeBoardColumnKey(value) {
-    return typeof value === "string"
-      ? value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
-      : "";
+  function cloneBoardColumn(column) {
+    return { ...(column || defaultBoardColumn) };
   }
 
-  function normalizeBoardLayout(layout, sessions = []) {
-    const rawColumns = Array.isArray(layout?.columns) ? layout.columns : [];
-    const sessionList = Array.isArray(sessions) ? sessions : [];
-    const columns = [];
-    const seenKeys = new Set();
-
-    for (const entry of rawColumns) {
-      const key = normalizeBoardColumnKey(entry?.key || entry?.label);
-      const label = typeof entry?.label === "string" && entry.label.trim()
-        ? entry.label.trim()
-        : "";
-      if (!key || !label || seenKeys.has(key)) continue;
-      columns.push({
-        key,
-        label,
-        title: typeof entry?.description === "string" && entry.description.trim()
-          ? entry.description.trim()
-          : (typeof entry?.title === "string" ? entry.title.trim() : ""),
-        emptyText: typeof entry?.emptyText === "string" && entry.emptyText.trim()
-          ? entry.emptyText.trim()
-          : `No sessions in ${label}`,
-        order: Number.isInteger(entry?.order) ? entry.order : columns.length * 10,
-      });
-      seenKeys.add(key);
-    }
-
-    for (const session of sessionList) {
-      const key = normalizeBoardColumnKey(session?.board?.columnKey || session?.board?.columnLabel);
-      const label = typeof session?.board?.columnLabel === "string" && session.board.columnLabel.trim()
-        ? session.board.columnLabel.trim()
-        : "";
-      if (!key || !label || seenKeys.has(key)) continue;
-      columns.push({
-        key,
-        label,
-        title: "",
-        emptyText: `No sessions in ${label}`,
-        order: Number.isInteger(session?.board?.columnOrder) ? session.board.columnOrder : columns.length * 10,
-      });
-      seenKeys.add(key);
-    }
-
-    if (columns.length === 0) {
-      return [{ ...defaultBoardColumn }];
-    }
-
-    columns.sort((a, b) => (
-      (Number.isInteger(a.order) ? a.order : 9999) - (Number.isInteger(b.order) ? b.order : 9999)
-      || a.label.localeCompare(b.label)
-    ));
-    return columns;
+  function getBoardColumnSpec(key) {
+    return sessionBoardColumnSpecs.find((column) => column.key === key) || defaultBoardColumn;
   }
 
   function normalizeSessionActivity(session) {
@@ -206,6 +220,23 @@
     return activity.run.state === "running"
       || activity.queue.state === "queued"
       || activity.compact.state === "pending";
+  }
+
+  function deriveSessionBoardColumnKey(session) {
+    const activity = normalizeSessionActivity(session);
+    if (
+      activity.run.state === "running"
+      || activity.queue.state === "queued"
+      || activity.compact.state === "pending"
+    ) {
+      return "active_now";
+    }
+
+    const workflowState = normalizeSessionWorkflowState(session?.workflowState || "");
+    if (workflowState === "waiting_user") return "waiting_user";
+    if (workflowState === "done") return "done";
+    if (workflowState === "parked") return "parked";
+    return defaultBoardColumn.key;
   }
 
   function getSessionPrimaryStatus(session, options = {}) {
@@ -273,26 +304,41 @@
     return getSessionStatusSummary(session, options).primary;
   }
 
-  function getBoardColumns(layout, sessions = []) {
-    return normalizeBoardLayout(layout, sessions).map((column) => ({ ...column }));
+  function getBoardColumns(_layout, sessions = []) {
+    const sessionList = Array.isArray(sessions) ? sessions : [];
+    const counts = new Map(sessionBoardColumnSpecs.map((column) => [column.key, 0]));
+    for (const session of sessionList) {
+      const key = deriveSessionBoardColumnKey(session);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+
+    const columns = sessionBoardColumnSpecs
+      .filter((column) => sessionList.length === 0 ? column.key === defaultBoardColumn.key : (counts.get(column.key) || 0) > 0)
+      .map(cloneBoardColumn);
+
+    return columns.length > 0 ? columns : [cloneBoardColumn(defaultBoardColumn)];
   }
 
   function getSessionBoardColumn(session, layout, sessions = []) {
     const columns = getBoardColumns(layout, sessions);
-    const requestedKey = normalizeBoardColumnKey(session?.board?.columnKey || session?.board?.columnLabel);
-    return columns.find((column) => column.key === requestedKey) || columns[0] || { ...defaultBoardColumn };
+    const derivedKey = deriveSessionBoardColumnKey(session);
+    return columns.find((column) => column.key === derivedKey)
+      || cloneBoardColumn(getBoardColumnSpec(derivedKey))
+      || columns[0]
+      || cloneBoardColumn(defaultBoardColumn);
   }
 
   function getSessionBoardPriority(session) {
-    const explicitPriority = getWorkflowPriorityInfo(session?.board?.priority || session?.workflowPriority);
+    const explicitPriority = getWorkflowPriorityInfo(session?.workflowPriority);
     if (explicitPriority) return explicitPriority;
+    const workflowState = normalizeSessionWorkflowState(session?.workflowState || "");
+    if (workflowState === "waiting_user") return getWorkflowPriorityInfo("high");
+    if (workflowState === "done") return getWorkflowPriorityInfo("low");
     return getWorkflowPriorityInfo("medium");
   }
 
-  function getSessionBoardOrder(session) {
-    return Number.isInteger(session?.board?.order)
-      ? session.board.order
-      : 9999;
+  function getSessionBoardOrder(_session) {
+    return 0;
   }
 
   function compareBoardSessions(a, b) {
@@ -314,6 +360,7 @@
     normalizeSessionWorkflowState,
     normalizeSessionActivity,
     isSessionBusy,
+    getWorkflowStatusInfo,
     getSessionPrimaryStatus,
     getSessionStatusSummary,
     getSessionVisualStatus,

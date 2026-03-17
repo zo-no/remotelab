@@ -26,13 +26,9 @@ import {
   getHistory,
   getRunState,
   getSession,
-  getSessionBoardLayout,
-  getTaskBoardState,
   getSessionEventsAfter,
   getSessionTimelineEvents,
   listSessions,
-  rebuildSessionBoardLayout,
-  rebuildTaskBoardState,
   renameSession,
   saveSessionAsTemplate,
   sendMessage,
@@ -849,10 +845,6 @@ function serializeJsonForScript(value) {
 
 function isOwnerOnlyRoute(pathname, method) {
   if (pathname === '/api/sessions' && (method === 'GET' || method === 'POST')) return true;
-  if (pathname === '/api/board' && method === 'GET') return true;
-  if (pathname === '/api/board/rebuild' && method === 'POST') return true;
-  if (pathname === '/api/task-board' && method === 'GET') return true;
-  if (pathname === '/api/task-board/rebuild' && method === 'POST') return true;
   if (pathname.startsWith('/api/sessions/') && pathname.endsWith('/share') && method === 'POST') return true;
   if (pathname.startsWith('/api/sessions/') && pathname.endsWith('/fork') && method === 'POST') return true;
   if (pathname.startsWith('/api/sessions/') && pathname.endsWith('/delegate') && method === 'POST') return true;
@@ -1184,48 +1176,6 @@ export async function handleRequest(req, res) {
       sessions: targetSessions,
       archivedCount: archivedSessions.length,
     });
-    return;
-  }
-
-  if (pathname === '/api/board' && req.method === 'GET') {
-    writeJsonCached(req, res, { board: await getSessionBoardLayout() });
-    return;
-  }
-
-  if (pathname === '/api/board/rebuild' && req.method === 'POST') {
-    let body = {};
-    try {
-      const raw = await readBody(req, 10240);
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-      body = {};
-    }
-
-    const result = await rebuildSessionBoardLayout({
-      sessionId: typeof body?.sessionId === 'string' ? body.sessionId : '',
-    });
-    writeJson(res, 200, result);
-    return;
-  }
-
-  if (pathname === '/api/task-board' && req.method === 'GET') {
-    writeJsonCached(req, res, { taskBoard: await getTaskBoardState() });
-    return;
-  }
-
-  if (pathname === '/api/task-board/rebuild' && req.method === 'POST') {
-    let body = {};
-    try {
-      const raw = await readBody(req, 10240);
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-      body = {};
-    }
-
-    const result = await rebuildTaskBoardState({
-      sessionId: typeof body?.sessionId === 'string' ? body.sessionId : '',
-    });
-    writeJson(res, 200, result);
     return;
   }
 

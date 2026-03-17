@@ -97,13 +97,12 @@ function createContext() {
         appId: 'chat',
       },
     ],
-    sessionBoardLayout: null,
-    taskBoardState: null,
     jsonResponseCache: new Map(),
     renderedEventState: {
       sessionId: 'current-session',
       latestSeq: 42,
       eventCount: 3,
+      eventBaseKeys: ['1:message', '2:thinking_block:running'],
       eventKeys: ['1:message', '2:thinking_block:running'],
       runState: 'running',
       runningBlockExpanded: false,
@@ -218,6 +217,44 @@ assert.equal(
   }),
   true,
   'completed sessions should always refresh events to reveal the final visible summary',
+);
+
+context.renderedEventState = {
+  sessionId: 'current-session',
+  latestSeq: 6,
+  eventCount: 2,
+  eventBaseKeys: ['1:message', '2:thinking_block:running'],
+  eventKeys: ['1:message', '2:thinking_block:running:6'],
+  runState: 'running',
+  runningBlockExpanded: true,
+};
+
+const inPlaceRefreshPlan = context.getEventRenderPlan('current-session', [
+  { seq: 1, type: 'message', role: 'user', content: 'Please inspect this run.' },
+  {
+    seq: 2,
+    type: 'thinking_block',
+    state: 'running',
+    blockStartSeq: 2,
+    blockEndSeq: 7,
+    label: 'Earlier reasoning & tool steps · using bash',
+  },
+]);
+
+assert.equal(
+  inPlaceRefreshPlan.mode,
+  'refresh_running_block',
+  'expanded running blocks should refresh in place instead of resetting the whole transcript when only the hidden range grows',
+);
+assert.equal(
+  inPlaceRefreshPlan.events.length,
+  1,
+  'the in-place refresh plan should target exactly one running block',
+);
+assert.equal(
+  inPlaceRefreshPlan.events[0]?.blockEndSeq,
+  7,
+  'the in-place refresh plan should target the newest running block boundary',
 );
 
 console.log('test-session-http-running-refresh: ok');

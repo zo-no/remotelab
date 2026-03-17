@@ -401,6 +401,11 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - Coalesce repeated per-session invalidations client-side so active runs do not fan out into bursts of overlapping sidebar requests.
 - For collection-shape actions with noticeable latency, such as archive/unarchive, optimistic sidebar hide/show on click makes the UI feel immediate as long as the client can roll back cleanly if the HTTP mutation fails.
 
+### Owner Bootstrap Can Restore The Current Session Before The Sidebar List (2026-03-17)
+- If the owner client already knows `currentSessionId` from navigation state or local storage, start the current-session refresh immediately instead of waiting for `/api/sessions` to finish; the main pane can render independently of the sidebar collection.
+- Keep the later restore pass for final selection/fallback logic, but let the known session content race ahead in the common case so the first meaningful paint is the active conversation rather than the full list.
+- When session metadata can arrive before `/api/tools`, latch the session's selected tool locally first and only trigger model loading after the tool catalog exists; otherwise startup parallelism can silently leave the runtime controls on the wrong tool.
+
 ### Usage Metrics Should Normalize To Context Window Size (2026-03-10)
 - Provider usage fields are not directly comparable: Claude-style runtimes split cached prompt tokens into separate fields, while Codex-style runtimes report full prompt size in `input_tokens` and expose cached tokens only as a subset annotation.
 - The user-facing metric should therefore normalize to a canonical `contextTokens` value that represents the actual prompt/context window size loaded for the turn, not raw billable-token accounting.

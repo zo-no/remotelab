@@ -1,14 +1,88 @@
 // ---- Send message ----
+let pendingComposerSend = null;
+
+function hasPendingComposerSend() {
+  return !!pendingComposerSend;
+}
+
+function isComposerPendingForSession(sessionId = currentSessionId) {
+  return !!pendingComposerSend && !!sessionId && pendingComposerSend.sessionId === sessionId;
+}
+
+function isComposerPendingForCurrentSession() {
+  return isComposerPendingForSession(currentSessionId);
+}
+
+function syncComposerPendingUi() {
+  const pendingForCurrentSession = isComposerPendingForCurrentSession();
+  inputArea.classList.toggle("is-pending-send", pendingForCurrentSession);
+  msgInput.readOnly = pendingForCurrentSession;
+
+  if (!composerPendingState) return;
+  if (!pendingForCurrentSession) {
+    composerPendingState.textContent = "";
+    composerPendingState.classList.remove("visible");
+    return;
+  }
+
+  const hasAttachments = Array.isArray(pendingComposerSend?.images) && pendingComposerSend.images.length > 0;
+  composerPendingState.textContent = hasAttachments && !pendingComposerSend?.text
+    ? "Sending attachment…"
+    : "Sending…";
+  composerPendingState.classList.add("visible");
+}
+
+function finalizeComposerPendingSend(requestId) {
+  if (!pendingComposerSend) return false;
+  if (requestId && pendingComposerSend.requestId !== requestId) return false;
+
+  const completedSend = pendingComposerSend;
+  pendingComposerSend = null;
+  clearDraft(completedSend.sessionId);
+  if (currentSessionId === completedSend.sessionId) {
+    msgInput.value = "";
+    autoResizeInput();
+  }
+  pendingImages = [];
+  renderImagePreviews();
+  releaseImageObjectUrls(completedSend.images);
+  syncComposerPendingUi();
+  return true;
+}
+
+function reconcileComposerPendingSendWithSession(session) {
+  if (!pendingComposerSend) return false;
+  if (!session?.id || session.id !== pendingComposerSend.sessionId) return false;
+  const queuedMessages = Array.isArray(session.queuedMessages) ? session.queuedMessages : [];
+  if (!queuedMessages.some((item) => item?.requestId === pendingComposerSend.requestId)) return false;
+  return finalizeComposerPendingSend(pendingComposerSend.requestId);
+}
+
+function reconcileComposerPendingSendWithEvent(event) {
+  if (!pendingComposerSend) return false;
+  if (event?.type !== "message" || event.role !== "user") return false;
+  if (!event.requestId || event.requestId !== pendingComposerSend.requestId) return false;
+  return finalizeComposerPendingSend(event.requestId);
+}
+
 function sendMessage(existingRequestId) {
   const text = msgInput.value.trim();
   const currentSession = getCurrentSession();
+  if (hasPendingComposerSend()) return;
   if ((!text && pendingImages.length === 0) || !currentSessionId || currentSession?.archived) return;
 
   const requestId = existingRequestId || createRequestId();
   const sessionId = currentSessionId;
   const queuedImages = pendingImages.slice();
 
-  renderOptimisticMessage(text, queuedImages, Date.now());
+  pendingComposerSend = {
+    sessionId,
+    requestId,
+    text,
+    images: queuedImages,
+  };
+  syncComposerPendingUi();
+  autoResizeInput();
 
   const msg = { action: "send", text: text || "(attachment)" };
   msg.requestId = requestId;
@@ -29,18 +103,9 @@ function sendMessage(existingRequestId) {
       objectUrl: img.objectUrl,
     }));
   }
-  msgInput.value = "";
-  clearDraft();
-  pendingImages = [];
-  renderImagePreviews();
-  autoResizeInput();
   void dispatchAction(msg).then((ok) => {
-    if (ok) {
-      clearOptimisticMessage();
-      releaseImageObjectUrls(queuedImages);
-      return;
-    }
-    restoreFailedSendState(sessionId, text, queuedImages);
+    if (ok) return;
+    restoreFailedSendState(sessionId, text, queuedImages, requestId);
   });
 }
 
@@ -253,10 +318,11 @@ function restoreDraft() {
     : "";
   msgInput.value = draft ?? "";
   autoResizeInput();
+  syncComposerPendingUi();
 }
-function clearDraft() {
-  if (!currentSessionId) return;
-  localStorage.removeItem(`draft_${currentSessionId}`);
+function clearDraft(sessionId = currentSessionId) {
+  if (!sessionId) return;
+  localStorage.removeItem(`draft_${sessionId}`);
 }
 
 msgInput.addEventListener("input", () => {
@@ -274,10 +340,12 @@ function releaseImageObjectUrls(images = []) {
   }
 }
 
-function restoreFailedSendState(sessionId, text, images) {
-  clearOptimisticMessage();
+function restoreFailedSendState(sessionId, text, images, requestId = "") {
+  if (pendingComposerSend && (!requestId || pendingComposerSend.requestId === requestId)) {
+    pendingComposerSend = null;
+  }
+  syncComposerPendingUi();
   if (sessionId !== currentSessionId) {
-    releaseImageObjectUrls(images);
     return;
   }
 
@@ -290,8 +358,6 @@ function restoreFailedSendState(sessionId, text, images) {
   if (pendingImages.length === 0 && images.length > 0) {
     pendingImages = images;
     renderImagePreviews();
-  } else {
-    releaseImageObjectUrls(images);
   }
 
   if (typeof focusComposer === "function") {
@@ -299,48 +365,6 @@ function restoreFailedSendState(sessionId, text, images) {
   } else {
     msgInput.focus();
   }
-}
-
-function renderOptimisticMessage(text, images, timestamp = Date.now()) {
-  if (emptyState.parentNode === messagesInner) emptyState.remove();
-  // Remove any previous optimistic message
-  clearOptimisticMessage();
-
-  const wrap = document.createElement("div");
-  wrap.className = "msg-user";
-  wrap.id = "optimistic-msg";
-  const bubble = document.createElement("div");
-  bubble.className = "msg-user-bubble msg-pending";
-
-  if (images && images.length > 0) {
-    const imgWrap = document.createElement("div");
-    imgWrap.className = "msg-images";
-    for (const img of images) {
-      const attachmentNode = typeof createMessageAttachmentNode === "function"
-        ? createMessageAttachmentNode(img)
-        : null;
-      if (!attachmentNode) continue;
-      imgWrap.appendChild(attachmentNode);
-    }
-    bubble.appendChild(imgWrap);
-  }
-
-  if (text) {
-    const span = document.createElement("span");
-    span.textContent = text;
-    bubble.appendChild(span);
-  }
-
-  appendMessageTimestamp(bubble, timestamp, "msg-user-time");
-
-  wrap.appendChild(bubble);
-  messagesInner.appendChild(wrap);
-  scrollToBottom();
-}
-
-function clearOptimisticMessage() {
-  const prev = document.getElementById("optimistic-msg");
-  if (prev) prev.remove();
 }
 
 // ---- Sidebar tabs ----

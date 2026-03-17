@@ -58,13 +58,6 @@ function makeSession(overrides = {}) {
   };
 }
 
-const boardLayout = {
-  columns: [
-    { key: 'focus_now', label: 'Focus now', order: 10, description: 'Highest attention' },
-    { key: 'shared_tracks', label: 'Shared tracks', order: 20, description: 'Grouped active work' },
-  ],
-};
-
 const runningSession = makeSession({
   activity: makeActivity({
     run: { state: 'running', phase: 'accepted', runId: 'run-1' },
@@ -110,65 +103,75 @@ assert.equal(renameFailedStatus.primary.key, 'rename-failed');
 assert.equal(renameFailedStatus.primary.title, 'rename crashed');
 
 assert.equal(
-  JSON.stringify(Array.from(model.getBoardColumns(boardLayout), (column) => column.key)),
-  JSON.stringify(['focus_now', 'shared_tracks']),
-  'board columns should come from the model-defined layout in left-to-right order',
+  JSON.stringify(Array.from(model.getBoardColumns(null, [runningSession, queuedSession, makeSession({ workflowState: 'waiting_user' })]), (column) => column.key)),
+  JSON.stringify(['active_now', 'waiting_user']),
+  'board columns should be derived from live session state in left-to-right order',
 );
 
 const fallbackBoardColumn = model.getSessionBoardColumn(makeSession(), null, []);
-assert.equal(fallbackBoardColumn.key, 'unassigned');
+assert.equal(fallbackBoardColumn.key, 'open');
 
-const focusBoardColumn = model.getSessionBoardColumn(
+const waitingBoardColumn = model.getSessionBoardColumn(
   makeSession({
-    board: {
-      columnKey: 'focus_now',
-      columnLabel: 'Focus now',
-      columnOrder: 10,
-      order: 20,
-      priority: 'high',
-    },
+    workflowState: 'waiting_user',
   }),
-  boardLayout,
+  null,
 );
-assert.equal(focusBoardColumn.key, 'focus_now');
+assert.equal(waitingBoardColumn.key, 'waiting_user');
 
 assert.equal(model.normalizeSessionWorkflowPriority('P1'), 'high');
 assert.equal(model.normalizeSessionWorkflowPriority('normal'), 'medium');
 assert.equal(model.normalizeSessionWorkflowPriority('later'), 'low');
 
-const explicitHighPriority = model.getSessionBoardPriority(
-  makeSession({ board: { priority: 'urgent' } }),
+assert.equal(
+  JSON.stringify(model.getWorkflowStatusInfo('waiting-user')),
+  JSON.stringify({
+    key: 'waiting_user',
+    label: 'waiting',
+    className: 'status-waiting-user',
+    dotClass: '',
+    itemClass: '',
+    title: 'Waiting on user input',
+  }),
+  'workflow status info should be normalized from the canonical workflow-state model',
 );
+assert.equal(
+  model.getWorkflowStatusInfo('actively running'),
+  null,
+  'unknown workflow states should not synthesize fake status badges',
+);
+
+const explicitHighPriority = model.getSessionBoardPriority(makeSession({ workflowPriority: 'urgent' }));
 assert.equal(explicitHighPriority.key, 'high');
 assert.equal(explicitHighPriority.rank, 3);
 
 const workflowPriorityFallback = model.getSessionBoardPriority(
-  makeSession({ workflowPriority: 'done-later', board: {} }),
+  makeSession({ workflowPriority: 'done-later' }),
 );
 assert.equal(workflowPriorityFallback.key, 'medium', 'unknown priority strings should fall back to medium attention');
 
 assert.ok(
   model.compareBoardSessions(
-    makeSession({ board: { order: 10, priority: 'low' }, updatedAt: '2026-03-14T12:00:00.000Z' }),
-    makeSession({ board: { order: 20, priority: 'high' }, updatedAt: '2026-03-14T13:00:00.000Z' }),
+    makeSession({ workflowPriority: 'high', updatedAt: '2026-03-14T12:00:00.000Z' }),
+    makeSession({ workflowPriority: 'low', updatedAt: '2026-03-14T13:00:00.000Z' }),
   ) < 0,
-  'explicit board order should sort sessions before priority and recency',
+  'higher derived priority should sort sessions before lower priority',
 );
 
 assert.ok(
   model.compareBoardSessions(
-    makeSession({ board: { priority: 'high' }, updatedAt: '2026-03-14T12:00:00.000Z' }),
-    makeSession({ board: { priority: 'low' }, updatedAt: '2026-03-14T13:00:00.000Z' }),
+    makeSession({ pinned: true, workflowPriority: 'medium', updatedAt: '2026-03-14T12:00:00.000Z' }),
+    makeSession({ workflowPriority: 'medium', updatedAt: '2026-03-14T13:00:00.000Z' }),
   ) < 0,
-  'higher board priority should sort before lower board priority when explicit order ties',
+  'pinned sessions should break ties before recency when priority ties',
 );
 
 assert.ok(
   model.compareBoardSessions(
-    makeSession({ board: { priority: 'medium' }, pinned: true, updatedAt: '2026-03-14T12:00:00.000Z' }),
-    makeSession({ board: { priority: 'medium' }, updatedAt: '2026-03-14T13:00:00.000Z' }),
-  ) < 0,
-  'pinned sessions should break ties inside a board column',
+    makeSession({ workflowPriority: 'medium', updatedAt: '2026-03-14T12:00:00.000Z' }),
+    makeSession({ workflowPriority: 'medium', updatedAt: '2026-03-14T13:00:00.000Z' }),
+  ) > 0,
+  'more recent sessions should sort first when priority and pin state tie',
 );
 
 const toolFallbackStatus = model.getSessionStatusSummary(

@@ -145,7 +145,7 @@ function renderMessage(evt) {
     }
     if (evt.content || evt.bodyAvailable) {
       const span = document.createElement("span");
-      const preview = evt.content || evt.bodyPreview || "Load message…";
+      const preview = evt.content || evt.bodyPreview || "";
       span.textContent = formatDecodedDisplayText(preview);
       bubble.appendChild(span);
       if (markLazyEventBodyNode(span, evt, {
@@ -169,7 +169,9 @@ function renderMessage(evt) {
       const didRender = renderMarkdownIntoNode(content, evt.content);
       if (!didRender) return;
     } else if (evt.bodyAvailable) {
-      content.textContent = "Load message…";
+      if (evt.bodyPreview) {
+        renderMarkdownIntoNode(content, evt.bodyPreview);
+      }
     } else {
       return;
     }
@@ -200,7 +202,7 @@ function createToolCard(evt) {
   body.className = "tool-body";
   body.id = "tool_" + evt.id;
   const pre = document.createElement("pre");
-  pre.textContent = evt.toolInput || (evt.bodyAvailable ? "Load command…" : "");
+  pre.textContent = evt.toolInput || "";
   if (evt.bodyAvailable && !evt.bodyLoaded) {
     pre.dataset.eventSeq = String(evt.seq || "");
     pre.dataset.bodyPending = "true";
@@ -258,7 +260,7 @@ function renderToolResultInto(container, evt) {
       : "");
   const pre = document.createElement("pre");
   pre.className = "tool-result";
-  pre.textContent = evt.output || (evt.bodyAvailable ? "Load result…" : "");
+  pre.textContent = evt.output || "";
   if (evt.bodyAvailable && !evt.bodyLoaded) {
     pre.dataset.eventSeq = String(evt.seq || "");
     pre.dataset.bodyPending = "true";
@@ -289,7 +291,7 @@ function renderReasoningInto(container, evt) {
   if (!container) return null;
   const div = document.createElement("div");
   div.className = "reasoning";
-  div.textContent = evt.content || (evt.bodyAvailable ? "Load thinking…" : "");
+  div.textContent = evt.content || "";
   if (evt.bodyAvailable && !evt.bodyLoaded) {
     div.dataset.eventSeq = String(evt.seq || "");
     div.dataset.bodyPending = "true";
@@ -342,11 +344,67 @@ function createDeferredThinkingBlock(label, { collapsed = true } = {}) {
   };
 }
 
-function createHiddenBlockStatusNode(text) {
-  const div = document.createElement("div");
-  div.className = "reasoning";
-  div.textContent = text;
-  return div;
+function parseEventBlockSeq(value) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function getRenderedEventBlockStartSeq(body) {
+  if (!body) return 0;
+  return parseEventBlockSeq(body.dataset.renderedBlockStartSeq);
+}
+
+function getRenderedEventBlockEndSeq(body) {
+  if (!body) return 0;
+  return parseEventBlockSeq(body.dataset.renderedBlockEndSeq);
+}
+
+function setRenderedEventBlockRange(body, startSeq, endSeq) {
+  if (!body) return;
+  body.dataset.renderedBlockStartSeq = String(startSeq > 0 ? startSeq : 0);
+  body.dataset.renderedBlockEndSeq = String(endSeq > 0 ? endSeq : 0);
+}
+
+function hasRenderedEventBlockContent(body) {
+  if (!body) return false;
+  if (Number.isInteger(body.childElementCount)) {
+    return body.childElementCount > 0;
+  }
+  return Array.isArray(body.children) ? body.children.length > 0 : false;
+}
+
+function shouldAppendEventBlockContent(body, evt, { nestedThinkingBlock = false } = {}) {
+  if (!body || nestedThinkingBlock) return false;
+  const nextStartSeq = parseEventBlockSeq(evt?.blockStartSeq);
+  const nextEndSeq = parseEventBlockSeq(evt?.blockEndSeq);
+  const renderedStartSeq = getRenderedEventBlockStartSeq(body);
+  const renderedEndSeq = getRenderedEventBlockEndSeq(body);
+  if (nextStartSeq < 1 || nextEndSeq < 1) return false;
+  if (renderedStartSeq !== nextStartSeq) return false;
+  if (renderedEndSeq < 1 || nextEndSeq <= renderedEndSeq) return false;
+  return hasRenderedEventBlockContent(body);
+}
+
+function clearEventBlockBody(body) {
+  if (!body) return;
+  body.innerHTML = "";
+}
+
+function renderEventBlockBody(body, hiddenEvents, { nestedThinkingBlock = false } = {}) {
+  if (!body) return;
+  clearEventBlockBody(body);
+  if (nestedThinkingBlock) {
+    const thinking = createDeferredThinkingBlock(buildLoadedHiddenBlockLabel(hiddenEvents), {
+      collapsed: false,
+    });
+    thinking.header.addEventListener("click", () => {
+      thinking.block.classList.toggle("collapsed");
+    });
+    body.appendChild(thinking.block);
+    renderHiddenBlockEventsInto(thinking.body, hiddenEvents);
+    return;
+  }
+  renderHiddenBlockEventsInto(body, hiddenEvents);
 }
 
 function renderHiddenBlockEventsInto(container, events) {
@@ -371,36 +429,88 @@ function renderHiddenBlockEventsInto(container, events) {
 
 async function ensureEventBlockLoaded(sessionId, body, evt, { nestedThinkingBlock = false } = {}) {
   if (!body || !evt) return;
-  const loadState = body.dataset.blockLoaded || "idle";
-  if (loadState === "loaded" || loadState === "loading") return;
+  const nextStartSeq = parseEventBlockSeq(evt?.blockStartSeq);
+  const nextEndSeq = parseEventBlockSeq(evt?.blockEndSeq);
+  const rangeKey = `${nextStartSeq}-${nextEndSeq}`;
+  const currentRangeKey = body.dataset.blockRange || "";
+  const renderedStartSeq = getRenderedEventBlockStartSeq(body);
+  const renderedEndSeq = getRenderedEventBlockEndSeq(body);
+  if (
+    currentRangeKey === rangeKey
+    && renderedStartSeq === nextStartSeq
+    && renderedEndSeq >= nextEndSeq
+  ) {
+    return;
+  }
 
-  body.dataset.blockLoaded = "loading";
-  body.innerHTML = "";
-  body.appendChild(createHiddenBlockStatusNode("Loading hidden steps…"));
+  const appendMode = shouldAppendEventBlockContent(body, evt, { nestedThinkingBlock });
+  const previousRenderedEndSeq = renderedEndSeq;
+
+  body.dataset.blockRange = rangeKey;
+  body.dataset.blockStartSeq = String(nextStartSeq);
+  body.dataset.blockEndSeq = String(nextEndSeq);
 
   try {
     const data = await fetchEventBlock(sessionId, evt.blockStartSeq, evt.blockEndSeq);
+    if ((body.dataset.blockRange || "") !== rangeKey) return;
     const hiddenEvents = Array.isArray(data?.events) ? data.events : [];
-    body.innerHTML = "";
-    if (nestedThinkingBlock) {
-      const thinking = createDeferredThinkingBlock(buildLoadedHiddenBlockLabel(hiddenEvents), {
-        collapsed: false,
-      });
-      thinking.header.addEventListener("click", () => {
-        thinking.block.classList.toggle("collapsed");
-      });
-      body.appendChild(thinking.block);
-      renderHiddenBlockEventsInto(thinking.body, hiddenEvents);
+    if (hiddenEvents.length === 0) return;
+
+    if (appendMode) {
+      const appendedEvents = hiddenEvents.filter(
+        (event) => Number.isInteger(event?.seq) && event.seq > previousRenderedEndSeq,
+      );
+      if (appendedEvents.length > 0) {
+        renderHiddenBlockEventsInto(body, appendedEvents);
+      } else if (
+        getRenderedEventBlockStartSeq(body) !== nextStartSeq
+        || getRenderedEventBlockEndSeq(body) < previousRenderedEndSeq
+      ) {
+        renderEventBlockBody(body, hiddenEvents, { nestedThinkingBlock });
+      }
     } else {
-      renderHiddenBlockEventsInto(body, hiddenEvents);
+      renderEventBlockBody(body, hiddenEvents, { nestedThinkingBlock });
     }
-    body.dataset.blockLoaded = "loaded";
+
+    const updatedRenderedStartSeq = Number.isInteger(hiddenEvents[0]?.seq)
+      ? hiddenEvents[0].seq
+      : nextStartSeq;
+    const updatedRenderedEndSeq = Number.isInteger(hiddenEvents[hiddenEvents.length - 1]?.seq)
+      ? hiddenEvents[hiddenEvents.length - 1].seq
+      : nextEndSeq;
+    setRenderedEventBlockRange(body, updatedRenderedStartSeq, updatedRenderedEndSeq);
   } catch (error) {
+    if ((body.dataset.blockRange || "") !== rangeKey) return;
     console.warn("[event-block] Failed to load hidden block:", error.message);
-    body.innerHTML = "";
-    body.appendChild(createHiddenBlockStatusNode("Failed to load hidden steps."));
-    body.dataset.blockLoaded = "idle";
   }
+}
+
+function findRenderedThinkingBlock(seq) {
+  if (!Number.isInteger(seq)) return null;
+  const targetSeq = String(seq);
+  for (const node of messagesInner.children || []) {
+    if (!node?.classList?.contains("thinking-block")) continue;
+    if (node?.dataset?.eventSeq === targetSeq) return node;
+  }
+  return null;
+}
+
+function refreshExpandedRunningThinkingBlock(sessionId, evt) {
+  if (!sessionId || !evt) return false;
+  const block = findRenderedThinkingBlock(evt.seq);
+  if (!block || block.classList?.contains("collapsed")) return false;
+  const label = block.querySelector(".thinking-label");
+  if (label) {
+    label.textContent = evt.label || "Thinking…";
+  }
+  block.dataset.blockStartSeq = String(Number.isInteger(evt?.blockStartSeq) ? evt.blockStartSeq : 0);
+  block.dataset.blockEndSeq = String(Number.isInteger(evt?.blockEndSeq) ? evt.blockEndSeq : 0);
+  const body = block.querySelector(".thinking-body");
+  if (!body) return false;
+  body.dataset.blockStartSeq = block.dataset.blockStartSeq;
+  body.dataset.blockEndSeq = block.dataset.blockEndSeq;
+  ensureEventBlockLoaded(sessionId, body, evt).catch(() => {});
+  return true;
 }
 
 function renderCollapsedBlock(evt) {
@@ -418,7 +528,6 @@ function renderCollapsedBlock(evt) {
 
   const body = document.createElement("div");
   body.className = "turn-collapse-body";
-  body.dataset.blockLoaded = "idle";
 
   drawer.appendChild(summary);
   drawer.appendChild(body);
@@ -439,7 +548,12 @@ function renderThinkingBlockEvent(evt) {
   const thinking = createDeferredThinkingBlock(evt.label || "Thinking…", {
     collapsed: !expandedByDefault,
   });
-  thinking.body.dataset.blockLoaded = "idle";
+  thinking.block.dataset.eventSeq = String(Number.isInteger(evt?.seq) ? evt.seq : 0);
+  thinking.block.dataset.blockStartSeq = String(Number.isInteger(evt?.blockStartSeq) ? evt.blockStartSeq : 0);
+  thinking.block.dataset.blockEndSeq = String(Number.isInteger(evt?.blockEndSeq) ? evt.blockEndSeq : 0);
+  thinking.body.dataset.blockRange = "";
+  thinking.body.dataset.blockStartSeq = thinking.block.dataset.blockStartSeq;
+  thinking.body.dataset.blockEndSeq = thinking.block.dataset.blockEndSeq;
 
   if (typeof setRunningEventBlockExpanded === "function") {
     setRunningEventBlockExpanded(sessionId, expandedByDefault);
@@ -688,49 +802,17 @@ function renderSessionMessageCount(session) {
   return `<span class="session-item-count" title="Messages in this session">${label}</span>`;
 }
 
-function getWorkflowStatusInfo(value) {
-  const normalized = typeof value === "string"
-    ? value.trim().toLowerCase().replace(/[\s-]+/g, "_")
-    : "";
-  if (["waiting", "waiting_user", "waiting_for_user", "waiting_on_user", "needs_user", "needs_input"].includes(normalized)) {
-    return {
-      key: "waiting_user",
-      label: "waiting",
-      className: "status-waiting-user",
-      dotClass: "",
-      itemClass: "",
-      title: "Waiting on user input",
-    };
-  }
-  if (["done", "complete", "completed", "finished"].includes(normalized)) {
-    return {
-      key: "done",
-      label: "done",
-      className: "status-done",
-      dotClass: "",
-      itemClass: "",
-      title: "Current task complete",
-    };
-  }
-  if (["parked", "paused", "pause", "backlog", "todo"].includes(normalized)) {
-    return {
-      key: "parked",
-      label: "parked",
-      className: "status-parked",
-      dotClass: "",
-      itemClass: "",
-      title: "Parked for later",
-    };
-  }
-  return null;
-}
-
 function getSessionMetaStatusInfo(session) {
   const liveStatus = getSessionStatusSummary(session).primary;
   if (liveStatus?.key && liveStatus.key !== "idle") {
     return liveStatus;
   }
-  return getWorkflowStatusInfo(session?.workflowState) || liveStatus;
+  const workflowStatus = typeof window !== "undefined"
+    && window.RemoteLabSessionStateModel
+    && typeof window.RemoteLabSessionStateModel.getWorkflowStatusInfo === "function"
+    ? window.RemoteLabSessionStateModel.getWorkflowStatusInfo(session?.workflowState)
+    : null;
+  return workflowStatus || liveStatus;
 }
 
 function buildSessionMetaParts(session) {
@@ -823,8 +905,6 @@ function renderSessionStatusHtml(statusInfo) {
   return `<span class="${statusInfo.className}"${title}>● ${esc(statusInfo.label)}</span>`;
 }
 
-const TASK_NOTE_STORAGE_KEY_PREFIX = "remotelab.taskBoardNote.";
-
 function formatBoardTimestampValue(stamp) {
   const parsed = new Date(stamp || "").getTime();
   if (!Number.isFinite(parsed)) return "";
@@ -836,270 +916,11 @@ function formatBoardSessionTimestamp(session) {
   return formatBoardTimestampValue(stamp);
 }
 
-function formatBoardTaskTimestamp(taskEntry) {
-  return formatBoardTimestampValue(taskEntry?.updatedAt || taskEntry?.lastEventAt || "");
-}
-
 function renderBoardPriorityPill(priorityInfo) {
   if (!priorityInfo?.label) return "";
   const title = priorityInfo.title ? ` title="${esc(priorityInfo.title)}"` : "";
   const className = priorityInfo.className ? ` ${priorityInfo.className}` : "";
   return `<span class="board-priority-pill${className}"${title}>${esc(priorityInfo.label)}</span>`;
-}
-
-function getTaskBoardNoteStorageKey(taskId) {
-  return `${TASK_NOTE_STORAGE_KEY_PREFIX}${taskId || ""}`;
-}
-
-function loadTaskBoardNote(taskId) {
-  try {
-    return localStorage.getItem(getTaskBoardNoteStorageKey(taskId)) || "";
-  } catch {
-    return "";
-  }
-}
-
-function saveTaskBoardNote(taskId, value) {
-  try {
-    localStorage.setItem(getTaskBoardNoteStorageKey(taskId), value || "");
-  } catch {}
-}
-
-function normalizeBoardTaskColumnKey(value) {
-  return typeof value === "string"
-    ? value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
-    : "";
-}
-
-function inferFallbackTaskNextActionForUi(session) {
-  const activity = getSessionActivity(session);
-  if (activity.run.state === "running") {
-    return "Let the current run finish, then review the newest output.";
-  }
-  if (activity.queue.state === "queued") {
-    return activity.queue.count === 1
-      ? "Wait for the queued follow-up, then review the newest output."
-      : "Wait for the queued follow-ups, then review the newest output.";
-  }
-  const workflow = getWorkflowStatusInfo(session?.workflowState);
-  if (workflow?.key === "waiting_user") {
-    return "Provide the requested input or approval in the linked session.";
-  }
-  if (workflow?.key === "done") {
-    return "Review only if another iteration is needed.";
-  }
-  return "Open the linked session and decide the next concrete step.";
-}
-
-function buildFallbackTaskMetaFromSession(session) {
-  const groupInfo = getSessionGroupInfo(session);
-  const description = typeof session?.description === "string"
-    ? session.description.trim()
-    : "";
-  return {
-    id: `session_${session.id}`,
-    title: getSessionDisplayName(session),
-    projectLabel: groupInfo?.label || "",
-    boardSummary: description,
-    workingSummary: description,
-    nextAction: inferFallbackTaskNextActionForUi(session),
-    priority: session?.workflowPriority || "medium",
-    columnKey: "unassigned_tasks",
-    columnLabel: "Unassigned tasks",
-    columnOrder: 9999,
-    order: 9999,
-    updatedAt: session?.lastEventAt || session?.updatedAt || session?.created || "",
-  };
-}
-
-function getTaskPriorityInfo(taskEntry) {
-  return getSessionBoardPriority({
-    board: { priority: taskEntry?.priority || "medium" },
-  });
-}
-
-function getTaskEntryStatusInfo(taskEntry) {
-  const sessions = Array.isArray(taskEntry?.sessions) ? taskEntry.sessions : [];
-  for (const session of sessions) {
-    const live = getSessionStatusSummary(session).primary;
-    if (live?.key && live.key !== "idle") {
-      return live;
-    }
-  }
-  for (const session of sessions) {
-    const workflow = getWorkflowStatusInfo(session?.workflowState);
-    if (workflow?.key) return workflow;
-  }
-  return null;
-}
-
-function buildVisibleTaskBoardView() {
-  const visibleSessions = getActiveSessions().filter((session) => matchesCurrentFilters(session));
-  const entries = new Map();
-
-  for (const session of visibleSessions) {
-    const rawTask = session?.task && session.task.id
-      ? session.task
-      : buildFallbackTaskMetaFromSession(session);
-    const taskId = rawTask.id || `session_${session.id}`;
-    let entry = entries.get(taskId);
-    if (!entry) {
-      entry = {
-        ...rawTask,
-        priority: rawTask.priority || session?.workflowPriority || "medium",
-        updatedAt: rawTask.updatedAt || session?.lastEventAt || session?.updatedAt || session?.created || "",
-        sessions: [],
-      };
-      entries.set(taskId, entry);
-    }
-
-    entry.sessions.push(session);
-
-    const sessionUpdatedAt = session?.lastEventAt || session?.updatedAt || session?.created || "";
-    if (
-      sessionUpdatedAt
-      && (
-        !entry.updatedAt
-        || new Date(sessionUpdatedAt).getTime() > new Date(entry.updatedAt).getTime()
-      )
-    ) {
-      entry.updatedAt = sessionUpdatedAt;
-    }
-
-    if (!entry.projectLabel && session?.group) {
-      entry.projectLabel = session.group.trim();
-    }
-    if (!entry.boardSummary && session?.description) {
-      entry.boardSummary = session.description.trim();
-    }
-    if (!entry.workingSummary && session?.description) {
-      entry.workingSummary = session.description.trim();
-    }
-    if (!entry.nextAction) {
-      entry.nextAction = inferFallbackTaskNextActionForUi(session);
-    }
-    if (!entry.priority && session?.workflowPriority) {
-      entry.priority = session.workflowPriority;
-    }
-    if (!entry.columnKey && rawTask.columnKey) {
-      entry.columnKey = rawTask.columnKey;
-      entry.columnLabel = rawTask.columnLabel;
-      entry.columnOrder = rawTask.columnOrder;
-    }
-  }
-
-  const tasks = [...entries.values()].map((entry) => {
-    entry.sessions.sort(compareBoardSessions);
-    entry.sessionCount = entry.sessions.length;
-    entry.priority = entry.priority || "medium";
-    if (!entry.title) {
-      entry.title = entry.sessions[0] ? getSessionDisplayName(entry.sessions[0]) : "Untitled task";
-    }
-    if (!entry.nextAction && entry.sessions[0]) {
-      entry.nextAction = inferFallbackTaskNextActionForUi(entry.sessions[0]);
-    }
-    return entry;
-  });
-
-  const columns = [];
-  const seenColumnKeys = new Set();
-  const stateColumns = Array.isArray(taskBoardState?.columns) ? taskBoardState.columns : [];
-  for (const column of stateColumns) {
-    const key = normalizeBoardTaskColumnKey(column?.key || column?.label);
-    const label = typeof column?.label === "string" ? column.label.trim() : "";
-    if (!key || !label || seenColumnKeys.has(key)) continue;
-    columns.push({
-      key,
-      label,
-      title: typeof column?.description === "string" ? column.description.trim() : "",
-      emptyText: `No tasks in ${label}`,
-      order: Number.isInteger(column?.order) ? column.order : columns.length * 10,
-    });
-    seenColumnKeys.add(key);
-  }
-
-  for (const taskEntry of tasks) {
-    const key = normalizeBoardTaskColumnKey(taskEntry?.columnKey || taskEntry?.columnLabel);
-    const label = typeof taskEntry?.columnLabel === "string" ? taskEntry.columnLabel.trim() : "";
-    if (!key || !label || seenColumnKeys.has(key)) continue;
-    columns.push({
-      key,
-      label,
-      title: "",
-      emptyText: `No tasks in ${label}`,
-      order: Number.isInteger(taskEntry?.columnOrder) ? taskEntry.columnOrder : columns.length * 10,
-    });
-    seenColumnKeys.add(key);
-  }
-
-  if (columns.length === 0) {
-    columns.push({
-      key: "unassigned_tasks",
-      label: "Unassigned tasks",
-      title: "Tasks that are not yet arranged by the task board model.",
-      emptyText: "No tasks yet",
-      order: 0,
-    });
-  }
-
-  columns.sort((a, b) => (
-    (Number.isInteger(a.order) ? a.order : 9999) - (Number.isInteger(b.order) ? b.order : 9999)
-    || a.label.localeCompare(b.label)
-  ));
-
-  return { columns, tasks };
-}
-
-function compareBoardTasks(a, b) {
-  const orderDiff = (Number.isInteger(a?.order) ? a.order : 9999) - (Number.isInteger(b?.order) ? b.order : 9999);
-  if (orderDiff) return orderDiff;
-
-  const priorityDiff = (getTaskPriorityInfo(b)?.rank || 0) - (getTaskPriorityInfo(a)?.rank || 0);
-  if (priorityDiff) return priorityDiff;
-
-  const currentDiff = (b?.sessions || []).some((session) => session.id === currentSessionId)
-    ? 1
-    : 0;
-  const currentOtherDiff = (a?.sessions || []).some((session) => session.id === currentSessionId)
-    ? 1
-    : 0;
-  if (currentDiff !== currentOtherDiff) return currentDiff - currentOtherDiff;
-
-  return new Date(b?.updatedAt || 0).getTime() - new Date(a?.updatedAt || 0).getTime();
-}
-
-function createBoardTaskCard(taskEntry) {
-  const priorityInfo = getTaskPriorityInfo(taskEntry);
-  const taskStatus = getTaskEntryStatusInfo(taskEntry);
-  const card = document.createElement("div");
-  card.className = "board-card board-task-card"
-    + (priorityInfo?.className ? ` ${priorityInfo.className}` : "")
-    + (taskEntry.id === selectedBoardTaskId ? " active" : "");
-
-  const timestamp = formatBoardTaskTimestamp(taskEntry);
-  const summary = typeof taskEntry?.boardSummary === "string" ? taskEntry.boardSummary.trim() : "";
-  const nextAction = typeof taskEntry?.nextAction === "string" ? taskEntry.nextAction.trim() : "";
-  const metaParts = [`${taskEntry.sessionCount || taskEntry.sessions?.length || 0} session${(taskEntry.sessionCount || taskEntry.sessions?.length || 0) === 1 ? "" : "s"}`];
-  const statusHtml = renderSessionStatusHtml(taskStatus);
-  if (statusHtml) metaParts.push(statusHtml);
-
-  card.innerHTML = `
-    <div class="board-card-topline">
-      ${renderBoardPriorityPill(priorityInfo)}
-      ${timestamp ? `<div class="board-card-time">Updated ${esc(timestamp)}</div>` : ""}
-    </div>
-    ${taskEntry.projectLabel ? `<div class="board-task-project">${esc(taskEntry.projectLabel)}</div>` : ""}
-    <div class="board-card-title">${esc(taskEntry.title || "Untitled task")}</div>
-    ${summary ? `<div class="board-card-description">${esc(summary)}</div>` : ""}
-    ${nextAction ? `<div class="board-card-next">Next: ${esc(nextAction)}</div>` : ""}
-    ${metaParts.length > 0 ? `<div class="board-card-meta">${metaParts.join(" · ")}</div>` : ""}`;
-
-  card.addEventListener("click", () => {
-    selectedBoardTaskId = taskEntry.id;
-    renderSessionBoard();
-  });
-
-  return card;
 }
 
 function createBoardSessionCard(session) {
@@ -1138,15 +959,15 @@ function createSessionBoardScroller(sessionList) {
   const scroller = document.createElement("div");
   scroller.className = "board-scroller";
 
-  const columns = getSessionBoardColumns();
+  const visibleSessions = Array.isArray(sessionList) ? sessionList : [];
+  const columns = getSessionBoardColumns(visibleSessions);
   const grouped = new Map(columns.map((column) => [column.key, {
     column,
     sessions: [],
   }]));
-  const visibleSessions = Array.isArray(sessionList) ? sessionList : [];
 
   for (const session of visibleSessions) {
-    const boardColumn = getSessionBoardColumn(session);
+    const boardColumn = getSessionBoardColumn(session, visibleSessions);
     const target = grouped.get(boardColumn.key) || grouped.get(columns[0]?.key);
     target?.sessions.push(session);
   }
@@ -1187,144 +1008,11 @@ function createSessionBoardScroller(sessionList) {
   return scroller;
 }
 
-function renderTaskBoardOverview() {
-  const { columns, tasks } = buildVisibleTaskBoardView();
-  const grouped = new Map(columns.map((column) => [column.key, {
-    column,
-    tasks: [],
-  }]));
-
-  for (const taskEntry of tasks) {
-    const key = normalizeBoardTaskColumnKey(taskEntry?.columnKey || taskEntry?.columnLabel) || columns[0]?.key;
-    const target = grouped.get(key) || grouped.get(columns[0]?.key);
-    target?.tasks.push(taskEntry);
-  }
-
-  const scroller = document.createElement("div");
-  scroller.className = "board-scroller";
-
-  for (const { column, tasks: columnTasks } of grouped.values()) {
-    columnTasks.sort(compareBoardTasks);
-    const highPriorityCount = columnTasks.filter((taskEntry) => getTaskPriorityInfo(taskEntry)?.key === "high").length;
-    const columnEl = document.createElement("div");
-    columnEl.className = "board-column";
-    columnEl.dataset.column = column.key;
-
-    const header = document.createElement("div");
-    header.className = "board-column-header";
-    header.innerHTML = `
-      <span class="board-column-dot"></span>
-      <span class="board-column-title" title="${esc(column.title || column.label)}">${esc(column.label)}</span>
-      ${highPriorityCount > 0 ? `<span class="board-column-attention">${highPriorityCount} high</span>` : ""}
-      <span class="board-column-count">${columnTasks.length}</span>`;
-
-    const body = document.createElement("div");
-    body.className = "board-column-body";
-    if (columnTasks.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "board-card-empty";
-      empty.textContent = column.emptyText || "No tasks";
-      body.appendChild(empty);
-    } else {
-      for (const taskEntry of columnTasks) {
-        body.appendChild(createBoardTaskCard(taskEntry));
-      }
-    }
-
-    columnEl.appendChild(header);
-    columnEl.appendChild(body);
-    scroller.appendChild(columnEl);
-  }
-
-  boardPanel.appendChild(scroller);
-}
-
-function renderTaskBoardDetail(taskEntry) {
-  const wrap = document.createElement("div");
-  wrap.className = "task-board-detail";
-
-  const header = document.createElement("div");
-  header.className = "task-board-detail-header";
-
-  const backBtn = document.createElement("button");
-  backBtn.type = "button";
-  backBtn.className = "task-board-back-btn";
-  backBtn.textContent = "← All tasks";
-  backBtn.addEventListener("click", () => {
-    selectedBoardTaskId = null;
-    renderSessionBoard();
-  });
-
-  const titleWrap = document.createElement("div");
-  titleWrap.className = "task-board-detail-title-wrap";
-  titleWrap.innerHTML = `
-    ${taskEntry.projectLabel ? `<div class="task-board-detail-project">${esc(taskEntry.projectLabel)}</div>` : ""}
-    <div class="task-board-detail-title">${esc(taskEntry.title || "Untitled task")}</div>
-    ${taskEntry.boardSummary ? `<div class="task-board-detail-summary">${esc(taskEntry.boardSummary)}</div>` : ""}`;
-
-  header.appendChild(backBtn);
-  header.appendChild(titleWrap);
-  wrap.appendChild(header);
-
-  const cards = document.createElement("div");
-  cards.className = "task-board-detail-cards";
-
-  const aiCard = document.createElement("section");
-  aiCard.className = "task-board-detail-card";
-  aiCard.innerHTML = `
-    <div class="task-board-detail-card-title">AI Brief</div>
-    ${taskEntry.workingSummary ? `<div class="task-board-detail-body">${esc(taskEntry.workingSummary)}</div>` : `<div class="task-board-detail-muted">No AI working summary yet.</div>`}
-    ${taskEntry.nextAction ? `<div class="task-board-detail-next">Next: ${esc(taskEntry.nextAction)}</div>` : ""}
-    <div class="task-board-detail-meta">${esc(`${taskEntry.sessionCount || taskEntry.sessions?.length || 0} linked session${(taskEntry.sessionCount || taskEntry.sessions?.length || 0) === 1 ? "" : "s"}`)}</div>`;
-
-  const noteCard = document.createElement("section");
-  noteCard.className = "task-board-detail-card";
-  const noteTitle = document.createElement("div");
-  noteTitle.className = "task-board-detail-card-title";
-  noteTitle.textContent = "My Note";
-  const noteHint = document.createElement("div");
-  noteHint.className = "task-board-detail-muted";
-  noteHint.textContent = "Local-only scratchpad. Not sent to the model automatically.";
-  const noteInput = document.createElement("textarea");
-  noteInput.className = "task-board-note-input";
-  noteInput.placeholder = "Capture what is in your head, what to watch, or what you still need to do...";
-  noteInput.value = loadTaskBoardNote(taskEntry.id);
-  noteInput.addEventListener("input", () => {
-    saveTaskBoardNote(taskEntry.id, noteInput.value);
-  });
-  noteCard.appendChild(noteTitle);
-  noteCard.appendChild(noteHint);
-  noteCard.appendChild(noteInput);
-
-  cards.appendChild(aiCard);
-  cards.appendChild(noteCard);
-  wrap.appendChild(cards);
-
-  const sessionsSection = document.createElement("div");
-  sessionsSection.className = "task-board-detail-sessions";
-  sessionsSection.innerHTML = `<div class="task-board-detail-section-title">Sessions in this task</div>`;
-  sessionsSection.appendChild(createSessionBoardScroller(taskEntry.sessions || []));
-  wrap.appendChild(sessionsSection);
-
-  boardPanel.appendChild(wrap);
-}
-
 function renderSessionBoard() {
   if (!boardPanel) return;
   boardPanel.innerHTML = "";
-
-  const { tasks } = buildVisibleTaskBoardView();
-  const selectedTask = tasks.find((taskEntry) => taskEntry.id === selectedBoardTaskId) || null;
-  if (selectedBoardTaskId && !selectedTask) {
-    selectedBoardTaskId = null;
-  }
-
-  if (selectedTask) {
-    renderTaskBoardDetail(selectedTask);
-    return;
-  }
-
-  renderTaskBoardOverview();
+  const visibleSessions = getActiveSessions().filter((session) => matchesCurrentFilters(session));
+  boardPanel.appendChild(createSessionBoardScroller(visibleSessions));
 }
 
 function createActiveSessionItem(session) {
@@ -2500,6 +2188,9 @@ function buildPendingAttachment(file) {
 }
 
 async function addImageFiles(files) {
+  if (typeof hasPendingComposerSend === "function" && hasPendingComposerSend()) {
+    return;
+  }
   for (const file of files) {
     if (pendingImages.length >= 4) break;
     pendingImages.push(buildPendingAttachment(file));
@@ -2519,6 +2210,7 @@ function renderImagePreviews() {
     return;
   }
   imgPreviewStrip.classList.add("has-images");
+  const attachmentsLocked = typeof hasPendingComposerSend === "function" && hasPendingComposerSend();
   pendingImages.forEach((img, i) => {
     const item = document.createElement("div");
     item.className = "img-preview-item";
@@ -2529,7 +2221,9 @@ function renderImagePreviews() {
     removeBtn.title = "Remove attachment";
     removeBtn.setAttribute("aria-label", "Remove attachment");
     removeBtn.innerHTML = renderUiIcon("close");
+    removeBtn.disabled = attachmentsLocked;
     removeBtn.onclick = () => {
+      if (attachmentsLocked) return;
       URL.revokeObjectURL(img.objectUrl);
       pendingImages.splice(i, 1);
       renderImagePreviews();
@@ -2547,7 +2241,12 @@ function renderImagePreviews() {
   }
 }
 
-imgBtn.addEventListener("click", () => imgFileInput.click());
+imgBtn.addEventListener("click", () => {
+  if (typeof hasPendingComposerSend === "function" && hasPendingComposerSend()) {
+    return;
+  }
+  imgFileInput.click();
+});
 imgFileInput.addEventListener("change", () => {
   if (imgFileInput.files.length > 0) addImageFiles(imgFileInput.files);
   imgFileInput.value = "";

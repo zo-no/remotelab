@@ -84,6 +84,7 @@ function createContext({
     value: '',
     scrollHeight: 12,
     style: { height: '' },
+    readOnly: false,
     addEventListener() {},
     focus() {},
     getBoundingClientRect() {
@@ -172,6 +173,7 @@ function createContext({
     compactBtn: makeEventTarget(),
     dropToolsBtn: makeEventTarget(),
     sendBtn: makeEventTarget(),
+    composerPendingState: makeEventTarget(),
     sessionTemplateSelect: makeEventTarget(),
     saveTemplateBtn: makeEventTarget(),
     tabSessions: makeEventTarget(),
@@ -309,3 +311,44 @@ failedSendFocusContext.restoreFailedSendState('session-a', 'retry me', []);
 assert.equal(failedSendFocusContext.focusComposerCalls.length, 1, 'failed-send recovery should invoke the shared focus helper once');
 assert.equal(failedSendFocusContext.focusComposerCalls[0]?.force, true, 'failed-send recovery should force composer focus when rehydrating the draft');
 assert.equal(failedSendFocusContext.focusComposerCalls[0]?.preventScroll, true, 'failed-send recovery should keep the viewport from jumping during draft recovery');
+
+const canonicalSendContext = createContext();
+const canonicalSendCalls = [];
+canonicalSendContext.dispatchAction = async (payload) => {
+  canonicalSendCalls.push(payload);
+  return true;
+};
+vm.runInNewContext(composeSource, canonicalSendContext, { filename: 'static/chat/compose.js' });
+canonicalSendContext.msgInput.value = 'hold the draft until confirmed';
+canonicalSendContext.saveDraft();
+canonicalSendContext.sendMessage();
+await Promise.resolve();
+assert.equal(canonicalSendCalls.length, 1, 'send should still dispatch exactly one message request');
+assert.equal(canonicalSendContext.msgInput.value, 'hold the draft until confirmed', 'send should keep the composer text visible until canonical state confirms it');
+assert.equal(canonicalSendContext.msgInput.readOnly, true, 'composer should become read-only while the send is pending');
+assert.equal(canonicalSendContext.inputArea.classList.contains('is-pending-send'), true, 'pending sends should gray the composer instead of injecting an optimistic chat bubble');
+assert.equal(canonicalSendContext.localStorage.getItem('draft_session-a'), 'hold the draft until confirmed', 'pending sends should keep the draft stored until confirmed');
+assert.equal(canonicalSendContext.composerPendingState.classList.contains('visible'), true, 'pending sends should surface a lightweight sending indicator in the composer');
+canonicalSendContext.reconcileComposerPendingSendWithEvent({
+  type: 'message',
+  role: 'user',
+  requestId: 'req_test',
+});
+assert.equal(canonicalSendContext.msgInput.value, '', 'confirmed sends should clear the composer only after the canonical user event arrives');
+assert.equal(canonicalSendContext.msgInput.readOnly, false, 'confirmed sends should restore the composer input state');
+assert.equal(canonicalSendContext.inputArea.classList.contains('is-pending-send'), false, 'confirmed sends should remove the pending composer styling');
+assert.equal(canonicalSendContext.localStorage.getItem('draft_session-a'), null, 'confirmed sends should clear the stored draft');
+
+const queuedSendContext = createContext();
+queuedSendContext.dispatchAction = async () => true;
+vm.runInNewContext(composeSource, queuedSendContext, { filename: 'static/chat/compose.js' });
+queuedSendContext.msgInput.value = 'queue this follow-up';
+queuedSendContext.saveDraft();
+queuedSendContext.sendMessage();
+await Promise.resolve();
+queuedSendContext.reconcileComposerPendingSendWithSession({
+  id: 'session-a',
+  queuedMessages: [{ requestId: 'req_test' }],
+});
+assert.equal(queuedSendContext.msgInput.value, '', 'queued sends should clear the composer once the server reflects the queued request');
+assert.equal(queuedSendContext.localStorage.getItem('draft_session-a'), null, 'queued sends should also clear the stored draft after server confirmation');

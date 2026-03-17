@@ -1339,6 +1339,19 @@ body {
 
 /* Manual resize keeps the textarea as the single height authority */
 .input-area.is-resized .input-row textarea { max-height: none; }
+.input-area.is-pending-send .input-wrapper {
+  border-color: var(--border);
+  background: var(--bg-secondary);
+}
+.input-area.is-pending-send .input-config-row,
+.input-area.is-pending-send .img-preview-strip,
+.input-area.is-pending-send .input-row {
+  opacity: 0.72;
+  pointer-events: none;
+}
+.input-area.is-pending-send .input-row textarea {
+  color: var(--text-secondary);
+}
 .input-wrapper {
   background: var(--bg);
   border: 1.5px solid var(--border-strong);
@@ -1418,6 +1431,27 @@ body {
   overflow-y: auto;
 }
 .input-row textarea::placeholder { color: var(--text-muted); }
+.composer-pending-state {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.composer-pending-state.visible {
+  display: flex;
+}
+.composer-pending-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.8;
+  flex-shrink: 0;
+}
 .input-footer {
   display: flex;
   align-items: center;
@@ -1545,6 +1579,10 @@ body {
   position: absolute; top: 2px; right: 2px; width: 16px; height: 16px;
   border-radius: 50%; background: var(--image-remove-bg); color: white; border: none;
   font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.img-preview-item .remove-img:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .img-preview-item .remove-img:hover {
   background: var(--image-remove-bg-hover);
@@ -1936,6 +1974,7 @@ body.visitor-mode .gesture-pill { display: none !important; }
           <button class="send-btn" id="sendBtn" disabled title="Send" aria-label="Send" data-icon="send">&#9654;</button>
           <button class="cancel-btn" id="cancelBtn" title="Stop" aria-label="Stop" data-icon="debug-stop" style="display:none">&#9632;</button>
         </div>
+        <div class="composer-pending-state" id="composerPendingState" aria-live="polite"></div>
       </div>
       <div class="input-footer">
         <a href="https://github.com/Ninglo/remotelab" target="_blank" rel="noreferrer noopener">Open source on GitHub ↗</a>

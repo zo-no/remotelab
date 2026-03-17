@@ -1,8 +1,9 @@
 # RemoteLab Setup Contract (Prompt-First)
 
 This document is the setup contract for an AI agent running on the target machine.
+The canonical public copy is `https://raw.githubusercontent.com/Ninglo/remotelab/main/docs/setup.md`, so the setup flow can start from a clean terminal even before the repo exists locally.
 
-The human's default job is simple: copy a prompt into their own AI agent, answer one concentrated context handoff near the start, and only step in again for explicit `[HUMAN]` checkpoints. The configured object is the AI toolchain and its defaults, not a long manual checklist for the human to replay.
+The human's default job is simple: open a fresh terminal on the target machine, paste a prompt into their own AI agent, answer one concentrated context handoff near the start, and only step in again for explicit `[HUMAN]` checkpoints. The configured object is the AI toolchain and its defaults, not a long manual checklist for the human to replay.
 
 ## Copy this prompt
 
@@ -18,7 +19,8 @@ Subdomain: [SUBDOMAIN]
 # For Tailscale mode:
 (No extra config needed — both phone and dev machine must have Tailscale installed and joined to the same tailnet.)
 
-Use `docs/setup.md` in this repository as the setup contract.
+Use `https://raw.githubusercontent.com/Ninglo/remotelab/main/docs/setup.md` as the setup contract.
+Do not assume the repo is already cloned. If `~/code/remotelab` does not exist yet, fetch this contract, clone `https://github.com/Ninglo/remotelab.git` yourself, and continue.
 Keep the workflow inside this chat.
 Before doing work, collect every missing input in one message so I can answer once.
 Do every automatable step yourself.
@@ -66,7 +68,7 @@ The AI should do the rest inside the conversation:
 
 - verify prerequisites: Node.js 18+, `cloudflared` for Cloudflare mode, `tailscale` for Tailscale mode, and at least one supported AI CLI
 - gather the full context packet before starting execution, so the human is not repeatedly re-interrupted for small missing details
-- clone or update the repo at `~/code/remotelab`, run `npm install`, and expose the CLI with `npm link` if needed
+- do not require the human to pre-clone the repo; if `~/code/remotelab` is missing, fetch this contract from its canonical URL, clone `https://github.com/Ninglo/remotelab.git` into `~/code/remotelab`, otherwise update the existing repo, then run `npm install` and expose the CLI with `npm link` if needed
 - prefer `remotelab setup` when it cleanly fits the environment; for Tailscale mode, configure the service directly when the current setup flow is still Cloudflare-oriented
 - generate access auth with `remotelab generate-token`; optionally add password auth with `remotelab set-password`
 - configure the boot-managed owner stack based on network mode:

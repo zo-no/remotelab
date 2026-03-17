@@ -228,7 +228,7 @@ Reusable AI workflows shareable via link. Each App defines: name, systemPrompt, 
 ### P1 — Next Up
 - [ ] Expose AI-controlled session presentation (`title`, `group`, `description`) via session APIs, then validate the AI-owned session UX and consolidate current project-session TODOs into one dedicated prioritization session
 - [ ] Universal control inbox / dispatcher session — a default high-trust chat surface that captures requests, routes substantial work into linked child sessions, and returns session/status links instead of bloating one long thread
-- [ ] Reintroduce task-progress management through session-list grouping rather than reviving a separate Progress summary board; the empty tab shell can host a future Settings or related surface later
+- [ ] Reintroduce task-progress management through session-list grouping rather than reviving a separate Progress summary board; decide explicitly whether the owner-facing board should stay single-layer and session-first, how child/subagent sessions remain mostly hidden, and whether post-reply session hooks should be unified into one per-session pass
 - [ ] Skills framework (file storage + loading mechanism)
 - [ ] Provider registry abstraction — open model selection, local JS/JSON provider config, no more Claude/Codex-only model wiring
 - [ ] Provider management UX — setup/settings should support preset enablement, simple GUI JSON providers, and advanced code mode

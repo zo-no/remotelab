@@ -55,6 +55,7 @@ For setup, deployment, connector, and feature-rollout docs, assume the operator 
 - `feishu-bot-setup.md` — model-first operator + console contract for the RemoteLab Feishu connector
 - `github-auto-triage.md` — model-first GitHub intake and auto-reply rollout contract
 - `remote-capability-monitor.md` — remote-agent capability monitoring backed by a RemoteLab App and review session
+- `tunnel-diagnostics.md` — Cloudflare Tunnel latency probe workflow for separating app cost from edge/tunnel cost
 - `voice-connector.md` — model-first wake-word speaker/microphone connector contract for RemoteLab
 
 ## What Lives In `notes/`

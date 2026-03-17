@@ -449,9 +449,14 @@ function updateStatus(connState, session = getCurrentSession()) {
 }
 
 // ---- Message rendering ----
-function clearMessages() {
+function clearMessages({ preserveRunningBlockExpanded = false } = {}) {
+  const shouldPreserveRunningBlockExpanded =
+    preserveRunningBlockExpanded === true && renderedEventState.runningBlockExpanded === true;
   messagesInner.innerHTML = "";
   resetRenderedEventState();
+  if (shouldPreserveRunningBlockExpanded) {
+    renderedEventState.runningBlockExpanded = true;
+  }
   // Reset thinking block state
   inThinkingBlock = false;
   currentThinkingBlock = null;
@@ -898,14 +903,12 @@ async function hydrateLazyNode(node) {
   const sessionId = currentSessionId;
   const seq = parseInt(node?.dataset?.eventSeq || "", 10);
   if (!sessionId || !seq || node.dataset.bodyPending !== "true") return;
-  node.dataset.bodyPending = "loading";
   try {
     const body = await fetchEventBody(sessionId, seq);
     applyLazyBodyToNode(node, body);
     node.dataset.bodyPending = "false";
   } catch (error) {
     console.warn("[event-body] Failed to load body:", error.message);
-    node.dataset.bodyPending = "true";
   }
 }
 

@@ -22,9 +22,7 @@ import {
 } from './history.mjs';
 import { messageEvent, statusEvent } from './normalizer.mjs';
 import {
-  triggerSessionBoardLayoutSuggestion,
   triggerSessionLabelSuggestion,
-  triggerSessionTaskBoardSuggestion,
   triggerSessionWorkflowStateSuggestion,
 } from './summarizer.mjs';
 import { sendCompletionPush } from './push.mjs';
@@ -75,18 +73,6 @@ import {
   mutateSessionMeta,
   withSessionsMetaMutation,
 } from './session-meta-store.mjs';
-import {
-  getBoardPlacement,
-  loadBoardLayout,
-  replaceBoardLayout,
-  summarizeBoardLayout,
-} from './session-board-layout.mjs';
-import {
-  getTaskBoardStateForSessions,
-  getTaskForSession,
-  replaceTaskBoardState,
-  summarizeTaskBoardState,
-} from './task-board-state.mjs';
 import { dispatchSessionEmailCompletionTargets, sanitizeEmailCompletionTargets } from '../lib/agent-mail-completion-targets.mjs';
 import {
   DEFAULT_APP_ID,
@@ -135,24 +121,6 @@ const VISITOR_TURN_GUARDRAIL = [
 const INTERNAL_SESSION_ROLE_CONTEXT_COMPACTOR = 'context_compactor';
 const AUTO_COMPACT_MARKER_TEXT = 'Older messages above this marker are no longer in the model\'s live context. They remain visible in the transcript, but only the compressed handoff and newer messages below are loaded for continued work.';
 
-function parseBoardAutoUpdatesEnv(value) {
-  if (value === undefined || value === '') {
-    return true;
-  }
-  if (/^(0|false|no|off)$/i.test(value)) {
-    return false;
-  }
-  if (/^(1|true|yes|on|enabled)$/i.test(value)) {
-    return true;
-  }
-  return true;
-}
-
-const AUTO_BOARD_UPDATES_ENABLED = parseBoardAutoUpdatesEnv(
-  process.env.REMOTELAB_BOARD_AUTO_UPDATES
-  || process.env.REMOTELAB_BOARD_AUTO_UPDATE
-  || process.env.REMOTELAB_AUTO_BOARD_UPDATES,
-);
 const CONTEXT_COMPACTOR_SYSTEM_PROMPT = [
   'You are RemoteLab\'s hidden context compactor for a user-facing session.',
   'Your job is to condense older session context into a compact continuation package.',
@@ -1129,25 +1097,11 @@ function getSessionPinSortRank(meta) {
   return meta?.pinned === true ? 1 : 0;
 }
 
-async function resolveVisibleTaskBoardState(sessionMetas = null) {
-  const sourceMetas = Array.isArray(sessionMetas)
-    ? sessionMetas
-    : await reconcileSessionsMetaList(await loadSessionsMeta());
-  const activeSessions = sourceMetas.filter((session) => shouldExposeSession(session) && !session.archived);
-  return getTaskBoardStateForSessions(activeSessions);
-}
-
-async function enrichSessionMeta(meta, options = {}) {
-  const includeBoardData = options?.includeBoardData !== false;
-  const taskBoardState = includeBoardData
-    ? (options?.taskBoardState || await resolveVisibleTaskBoardState())
-    : null;
+async function enrichSessionMeta(meta, _options = {}) {
   const live = liveSessions.get(meta.id);
   const snapshot = await getHistorySnapshot(meta.id);
   const queuedCount = getFollowUpQueueCount(meta);
   const runActivity = await resolveSessionRunActivity(meta);
-  const boardPlacement = includeBoardData ? await getBoardPlacement(meta.id) : null;
-  const task = includeBoardData ? getTaskForSession(taskBoardState, meta.id) : null;
   const { followUpQueue, recentFollowUpRequestIds, activeRunId, activeRun, ...rest } = meta;
   const sourceId = resolveSessionSourceId(meta);
   return {
@@ -1168,8 +1122,6 @@ async function enrichSessionMeta(meta, options = {}) {
       run: runActivity.run,
       queuedCount,
     }),
-    ...(boardPlacement ? { board: boardPlacement } : {}),
-    ...(task ? { task } : {}),
   };
 }
 
@@ -1949,209 +1901,6 @@ function scheduleSessionWorkflowStateSuggestion(session, run) {
   return true;
 }
 
-function chooseBoardLayoutAnchorSession(sessions, preferredSessionId = '') {
-  const preferred = sessions.find((session) => session.id === preferredSessionId && session.tool);
-  if (preferred) return preferred;
-  return sessions.find((session) => session.tool) || null;
-}
-
-async function applySuggestedBoardLayout(sourceSessionId, activeSessions, suggestion) {
-  const sessionIds = activeSessions
-    .map((session) => session?.id)
-    .filter(Boolean);
-  const result = await replaceBoardLayout(suggestion, {
-    sessionIds,
-    sourceSessionId,
-  });
-  if (result.changed) {
-    broadcastSessionsInvalidation();
-  }
-  return result.layout;
-}
-
-async function applySuggestedTaskBoardState(sourceSessionId, activeSessions, suggestion) {
-  const result = await replaceTaskBoardState(suggestion, {
-    sessions: activeSessions,
-    sourceSessionId,
-  });
-  if (result.changed) {
-    broadcastSessionsInvalidation();
-  }
-  return result.state;
-}
-
-export async function getSessionBoardLayout() {
-  return summarizeBoardLayout(await loadBoardLayout());
-}
-
-export async function getTaskBoardState() {
-  return summarizeTaskBoardState(await resolveVisibleTaskBoardState());
-}
-
-export async function rebuildSessionBoardLayout({
-  sessionId = '',
-  tool = '',
-  model,
-  effort,
-  thinking = false,
-} = {}) {
-  const activeSessions = await listSessions({ includeVisitor: true, includeArchived: false });
-  if (activeSessions.length === 0) {
-    return {
-      ok: false,
-      skipped: 'no_sessions',
-      board: summarizeBoardLayout(await loadBoardLayout()),
-    };
-  }
-
-  const anchorSession = chooseBoardLayoutAnchorSession(activeSessions, sessionId);
-  if (!anchorSession) {
-    return {
-      ok: false,
-      skipped: 'no_tool',
-      board: summarizeBoardLayout(await loadBoardLayout()),
-    };
-  }
-
-  const [currentHistory, existingBoardLayout] = await Promise.all([
-    loadHistory(anchorSession.id, { includeBodies: true }),
-    loadBoardLayout(),
-  ]);
-
-  const suggestion = await triggerSessionBoardLayoutSuggestion({
-    id: anchorSession.id,
-    folder: anchorSession.folder,
-    name: anchorSession.name || '',
-    group: anchorSession.group || '',
-    description: anchorSession.description || '',
-    tool: tool || anchorSession.tool,
-    model: model || anchorSession.model || undefined,
-    effort: effort || anchorSession.effort || undefined,
-    thinking,
-    currentHistory,
-    activeSessions,
-    existingBoardLayout,
-  });
-
-  if (!suggestion?.ok || !suggestion.boardLayout) {
-    return {
-      ok: false,
-      error: suggestion?.error || 'Board layout suggestion failed',
-      board: summarizeBoardLayout(existingBoardLayout),
-    };
-  }
-
-  const board = await applySuggestedBoardLayout(anchorSession.id, activeSessions, suggestion.boardLayout);
-  return {
-    ok: true,
-    sourceSessionId: anchorSession.id,
-    board: summarizeBoardLayout(board),
-  };
-}
-
-export async function rebuildTaskBoardState({
-  sessionId = '',
-  tool = '',
-  model,
-  effort,
-  thinking = false,
-} = {}) {
-  const activeSessions = await listSessions({ includeVisitor: true, includeArchived: false });
-  if (activeSessions.length === 0) {
-    return {
-      ok: false,
-      skipped: 'no_sessions',
-      taskBoard: summarizeTaskBoardState(await resolveVisibleTaskBoardState()),
-    };
-  }
-
-  const anchorSession = chooseBoardLayoutAnchorSession(activeSessions, sessionId);
-  if (!anchorSession) {
-    return {
-      ok: false,
-      skipped: 'no_tool',
-      taskBoard: summarizeTaskBoardState(await resolveVisibleTaskBoardState()),
-    };
-  }
-
-  const [currentHistory, existingTaskBoard] = await Promise.all([
-    loadHistory(anchorSession.id, { includeBodies: true }),
-    resolveVisibleTaskBoardState(),
-  ]);
-
-  const suggestion = await triggerSessionTaskBoardSuggestion({
-    id: anchorSession.id,
-    folder: anchorSession.folder,
-    name: anchorSession.name || '',
-    group: anchorSession.group || '',
-    description: anchorSession.description || '',
-    tool: tool || anchorSession.tool,
-    model: model || anchorSession.model || undefined,
-    effort: effort || anchorSession.effort || undefined,
-    thinking,
-    currentHistory,
-    activeSessions,
-    existingTaskBoard,
-  });
-
-  if (!suggestion?.ok || !suggestion.taskBoard) {
-    return {
-      ok: false,
-      error: suggestion?.error || 'Task board suggestion failed',
-      taskBoard: summarizeTaskBoardState(existingTaskBoard),
-    };
-  }
-
-  const taskBoard = await applySuggestedTaskBoardState(anchorSession.id, activeSessions, suggestion.taskBoard);
-  return {
-    ok: true,
-    sourceSessionId: anchorSession.id,
-    taskBoard: summarizeTaskBoardState(taskBoard),
-  };
-}
-
-function scheduleSessionBoardLayoutSuggestion(session, run) {
-  if (!session?.id || !run || session.archived || isInternalSession(session)) {
-    return false;
-  }
-  if (!AUTO_BOARD_UPDATES_ENABLED) {
-    return false;
-  }
-
-  rebuildSessionBoardLayout({
-    sessionId: session.id,
-    tool: run.tool || session.tool,
-    model: run.model || session.model || undefined,
-    effort: run.effort || session.effort || undefined,
-    thinking: false,
-  }).catch((error) => {
-    console.error(`[board-layout] Failed to rebuild board layout from ${session.id?.slice(0, 8)}: ${error.message}`);
-  });
-
-  return true;
-}
-
-function scheduleSessionTaskBoardSuggestion(session, run) {
-  if (!session?.id || !run || session.archived || isInternalSession(session)) {
-    return false;
-  }
-  if (!AUTO_BOARD_UPDATES_ENABLED) {
-    return false;
-  }
-
-  rebuildTaskBoardState({
-    sessionId: session.id,
-    tool: run.tool || session.tool,
-    model: run.model || session.model || undefined,
-    effort: run.effort || session.effort || undefined,
-    thinking: false,
-  }).catch((error) => {
-    console.error(`[task-board] Failed to rebuild task board from ${session.id?.slice(0, 8)}: ${error.message}`);
-  });
-
-  return true;
-}
-
 function launchEarlySessionLabelSuggestion(sessionId, sessionMeta) {
   const live = ensureLiveSession(sessionId);
   if (live.earlyTitlePromise) {
@@ -2433,8 +2182,6 @@ async function finalizeDetachedRun(sessionId, run, manifest, normalizedEvents = 
   queueSessionCompletionTargets(latestSession, finalizedRun, manifest);
   if (!manifest?.internalOperation) {
     scheduleSessionWorkflowStateSuggestion(latestSession, finalizedRun);
-    scheduleSessionTaskBoardSuggestion(latestSession, finalizedRun);
-    scheduleSessionBoardLayoutSuggestion(latestSession, finalizedRun);
   }
 
   const needsRename = isSessionAutoRenamePending(latestSession);
@@ -2533,10 +2280,8 @@ export async function listSessions({
   appId = '',
   sourceId = '',
   includeQueuedMessages = false,
-  includeBoardData = true,
 } = {}) {
   const metas = await loadSessionsMeta();
-  const taskBoardState = includeBoardData ? await resolveVisibleTaskBoardState(metas) : null;
   const normalizedAppId = normalizeAppId(appId);
   const normalizedSourceId = normalizeAppId(sourceId);
   const filtered = metas
@@ -2551,18 +2296,14 @@ export async function listSessions({
     ));
   return Promise.all(filtered.map((meta) => enrichSessionMetaForClient(meta, {
     includeQueuedMessages,
-    includeBoardData,
-    taskBoardState,
   })));
 }
 
 export async function getSession(id, options = {}) {
   const metas = await loadSessionsMeta();
-  const includeBoardData = options?.includeBoardData !== false;
-  const taskBoardState = includeBoardData ? await resolveVisibleTaskBoardState(metas) : null;
   const meta = metas.find((entry) => entry.id === id) || await findSessionMeta(id);
   if (!meta) return null;
-  return enrichSessionMetaForClient(meta, { ...options, includeBoardData, taskBoardState });
+  return enrichSessionMetaForClient(meta, options);
 }
 
 export async function getSessionEventsAfter(sessionId, afterSeq = 0, options = {}) {

@@ -9,6 +9,30 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(__dirname);
 const sessionHttpSource = readFileSync(join(repoRoot, 'static/chat/session-http.js'), 'utf8');
 
+function sliceBetween(source, startToken, endToken) {
+  const start = source.indexOf(startToken);
+  if (start === -1) {
+    throw new Error(`Missing start token: ${startToken}`);
+  }
+  const end = source.indexOf(endToken, start);
+  if (end === -1) {
+    throw new Error(`Missing end token: ${endToken}`);
+  }
+  return source.slice(start, end);
+}
+
+const applyAttachedSessionStateSnippet = sliceBetween(
+  sessionHttpSource,
+  'function applyAttachedSessionState',
+  'async function fetchSessionState',
+);
+
+const bootstrapSnippet = sliceBetween(
+  sessionHttpSource,
+  'function startParallelCurrentSessionBootstrap',
+  'async function setupPushNotifications',
+);
+
 function makeElement() {
   return {
     style: {},
@@ -140,8 +164,6 @@ function createContext() {
         appId: 'chat',
       },
     ],
-    sessionBoardLayout: null,
-    taskBoardState: null,
     jsonResponseCache: new Map(),
     renderedEventState: {
       sessionId: null,
@@ -286,6 +308,115 @@ assert.equal(
   context.sessions.find((session) => session.id === 'unchanged-session')?.name,
   'Stable session',
   'unchanged sessions should remain intact after list hydration',
+);
+
+let preToolModelLoads = 0;
+const preToolAttachContext = {
+  console,
+  Promise,
+  currentSessionId: null,
+  hasAttachedSession: false,
+  currentTokens: 42,
+  contextTokens: makeElement(),
+  compactBtn: makeElement(),
+  dropToolsBtn: makeElement(),
+  headerTitle: makeElement(),
+  inlineToolSelect: makeElement(),
+  selectedTool: 'claude',
+  toolsList: [],
+  getSessionDisplayName(session) {
+    return session?.name || '';
+  },
+  updateStatus() {},
+  renderQueuedMessagePanel() {},
+  loadModelsForCurrentTool() {
+    preToolModelLoads += 1;
+  },
+  restoreDraft() {},
+  renderSessionList() {},
+  syncBrowserState() {},
+  syncForkButton() {},
+  syncShareButton() {},
+};
+preToolAttachContext.globalThis = preToolAttachContext;
+
+vm.runInNewContext(applyAttachedSessionStateSnippet, preToolAttachContext, {
+  filename: 'chat-apply-attached-session-state-pretools-runtime.js',
+});
+
+preToolAttachContext.applyAttachedSessionState('session-pretools', {
+  id: 'session-pretools',
+  name: 'Current session refreshed',
+  tool: 'codex',
+});
+
+assert.equal(
+  preToolAttachContext.selectedTool,
+  'codex',
+  'attaching a session before tools load should still retain the backend-selected tool',
+);
+assert.equal(
+  preToolAttachContext.inlineToolSelect.value,
+  'codex',
+  'attaching a session before tools load should keep the inline tool picker aligned for later hydration',
+);
+assert.equal(
+  preToolModelLoads,
+  0,
+  'attaching a session before tools load should not try to load models until the tool catalog exists',
+);
+
+let refreshStartedBeforeList = false;
+let listResolved = false;
+let resolveList = null;
+let restoreCalls = 0;
+
+const bootstrapContext = {
+  console,
+  visitorMode: false,
+  visitorSessionId: null,
+  currentSessionId: 'session-bootstrap',
+  attachSession() {
+    throw new Error('owner deferred bootstrap should not attach a placeholder session');
+  },
+  refreshCurrentSession() {
+    refreshStartedBeforeList = !listResolved;
+    return new Promise(() => {});
+  },
+  fetchSessionsList() {
+    return new Promise((resolve) => {
+      resolveList = () => {
+        listResolved = true;
+        resolve([]);
+      };
+    });
+  },
+  restoreOwnerSessionSelection() {
+    restoreCalls += 1;
+  },
+};
+bootstrapContext.globalThis = bootstrapContext;
+
+vm.runInNewContext(bootstrapSnippet, bootstrapContext, {
+  filename: 'chat-bootstrap-parallel-runtime.js',
+});
+
+const bootstrapPromise = bootstrapContext.bootstrapViaHttp({ deferOwnerRestore: true });
+
+assert.equal(
+  refreshStartedBeforeList,
+  true,
+  'deferred owner bootstrap should start refreshing the current session before the session list finishes loading',
+);
+assert.equal(typeof resolveList, 'function', 'deferred owner bootstrap should still start the session list request');
+
+resolveList();
+await bootstrapPromise;
+
+assert.equal(
+  restoreCalls,
+  0,
+  'deferred owner bootstrap should leave final session selection to the later restore pass',
 );
 
 console.log('test-session-http-ref-hydration: ok');

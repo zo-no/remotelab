@@ -156,6 +156,9 @@ try {
       [older.id, newest.id, newer.id],
       'pinned sessions should stay ahead of newer unpinned sessions after runtime preference updates',
     );
+    const pinnedListEntry = listAfterPin.json.sessions.find((session) => session.id === older.id);
+    assert.equal(pinnedListEntry?.workflowState, 'waiting_user', 'session list payload should keep workflow state for board consumers');
+    assert.equal(pinnedListEntry?.workflowPriority, 'high', 'session list payload should keep workflow priority for board consumers');
 
     const detail = await request(port, 'GET', `/api/sessions/${older.id}`);
     assert.equal(detail.status, 200, 'session detail should remain readable after the patch');

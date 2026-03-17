@@ -16,7 +16,7 @@ It does not care much whether the control surface is a phone, tablet, or desktop
 
 ## Quick install
 
-If the demo makes sense, do not keep reading. Paste this into Codex, Claude Code, or another coding agent on the host machine and let it set RemoteLab up for you:
+If the demo makes sense, do not keep reading. Open a fresh terminal on the host machine, start Codex, Claude Code, or another coding agent, and paste this:
 
 ```text
 I want to set up RemoteLab on this machine so I can control AI workers from any device and keep long-running AI work organized.
@@ -30,7 +30,8 @@ Subdomain I want to use: [SUBDOMAIN]
 # For Tailscale mode:
 (No extra config needed — the host machine and the client devices I want to use are on the same tailnet.)
 
-Please follow the full setup guide at docs/setup.md in this repository.
+Use the setup contract at `https://raw.githubusercontent.com/Ninglo/remotelab/main/docs/setup.md` as the source of truth.
+Do not assume the repo is already cloned. If `~/code/remotelab` does not exist yet, fetch that contract, clone `https://github.com/Ninglo/remotelab.git` yourself, and continue.
 Keep the workflow inside this chat.
 Before you start work, collect every missing piece of context in one message so I can answer once.
 Do every step you can automatically.
@@ -140,7 +141,7 @@ The best pattern is one early handoff: the agent asks for everything it needs in
   - **Cloudflare Tunnel**: a domain pointed at Cloudflare ([free account](https://cloudflare.com), domain ~$1–12/yr from Namecheap or Porkbun)
   - **Tailscale**: [free for personal use](https://tailscale.com) — install on the host machine and any client device you want to use, join the same tailnet, no domain needed
 
-**Copy this prompt into Codex or another coding agent:**
+**Open a fresh terminal on the host machine, start Codex or another coding agent, and paste this:**
 
 ```text
 I want to set up RemoteLab on this machine so I can control AI workers from any device and keep long-running AI work organized.
@@ -154,7 +155,8 @@ Subdomain I want to use: [SUBDOMAIN]
 # For Tailscale mode:
 (No extra config needed — the host machine and the client devices I want to use are on the same tailnet.)
 
-Please follow the full setup guide at docs/setup.md in this repository.
+Use the setup contract at `https://raw.githubusercontent.com/Ninglo/remotelab/main/docs/setup.md` as the source of truth.
+Do not assume the repo is already cloned. If `~/code/remotelab` does not exist yet, fetch that contract, clone `https://github.com/Ninglo/remotelab.git` yourself, and continue.
 Keep the workflow inside this chat.
 Before you start work, collect every missing piece of context in one message so I can answer once.
 Do every step you can automatically.

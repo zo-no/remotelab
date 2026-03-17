@@ -289,6 +289,7 @@ function resetRenderedEventState(sessionId = null) {
   renderedEventState.sessionId = sessionId;
   renderedEventState.latestSeq = 0;
   renderedEventState.eventCount = 0;
+  renderedEventState.eventBaseKeys = [];
   renderedEventState.eventKeys = [];
   renderedEventState.runState = "idle";
   renderedEventState.runningBlockExpanded = false;
@@ -301,17 +302,22 @@ function getEventBoundarySeq(event) {
   return Number.isInteger(event?.seq) ? event.seq : 0;
 }
 
-function getEventRenderKey(event) {
+function getEventRenderBaseKey(event) {
   const seq = Number.isInteger(event?.seq) ? event.seq : 0;
   const type = typeof event?.type === "string" ? event.type : "unknown";
   if (type === "collapsed_block" || type === "thinking_block") {
     const state = typeof event?.state === "string" ? event.state : "";
-    const dynamicBoundary = type === "thinking_block" && renderedEventState.runningBlockExpanded === true
-      ? `:${Number.isInteger(event?.blockEndSeq) ? event.blockEndSeq : 0}`
-      : "";
-    return `${seq}:${type}:${state}${dynamicBoundary}`;
+    return `${seq}:${type}:${state}`;
   }
   return `${seq}:${type}`;
+}
+
+function getEventRenderKey(event) {
+  const baseKey = getEventRenderBaseKey(event);
+  const dynamicBoundary = event?.type === "thinking_block" && renderedEventState.runningBlockExpanded === true
+    ? `:${Number.isInteger(event?.blockEndSeq) ? event.blockEndSeq : 0}`
+    : "";
+  return `${baseKey}${dynamicBoundary}`;
 }
 
 function eventKeyArraysEqual(left, right) {
@@ -345,6 +351,9 @@ function updateRenderedEventState(sessionId, events, { runState = "idle" } = {})
   renderedEventState.sessionId = sessionId;
   renderedEventState.latestSeq = getLatestEventSeq(events);
   renderedEventState.eventCount = Array.isArray(events) ? events.length : 0;
+  renderedEventState.eventBaseKeys = Array.isArray(events)
+    ? events.map((event) => getEventRenderBaseKey(event))
+    : [];
   renderedEventState.eventKeys = Array.isArray(events)
     ? events.map((event) => getEventRenderKey(event))
     : [];
@@ -377,6 +386,7 @@ function shouldFetchSessionEventsForRefresh(sessionId, session) {
 function getEventRenderPlan(sessionId, events) {
   const normalizedEvents = Array.isArray(events) ? events : [];
   const latestSeq = getLatestEventSeq(normalizedEvents);
+  const nextBaseKeys = normalizedEvents.map((event) => getEventRenderBaseKey(event));
   const nextKeys = normalizedEvents.map((event) => getEventRenderKey(event));
   const sameSession = renderedEventState.sessionId === sessionId;
   const hasRenderedSnapshot = sameSession && (
@@ -397,6 +407,23 @@ function getEventRenderPlan(sessionId, events) {
 
   if (latestSeq === renderedEventState.latestSeq && eventKeyArraysEqual(nextKeys, renderedEventState.eventKeys || [])) {
     return { mode: "noop", events: [] };
+  }
+
+  if (
+    renderedEventState.runningBlockExpanded === true
+    && normalizedEvents.length > 0
+    && normalizedEvents.length === renderedEventState.eventCount
+    && eventKeyArraysEqual(nextBaseKeys, renderedEventState.eventBaseKeys || [])
+  ) {
+    const lastEvent = normalizedEvents[normalizedEvents.length - 1];
+    if (
+      lastEvent?.type === "thinking_block"
+      && lastEvent?.state === "running"
+      && Number.isInteger(lastEvent?.blockEndSeq)
+      && lastEvent.blockEndSeq > renderedEventState.latestSeq
+    ) {
+      return { mode: "refresh_running_block", events: [lastEvent] };
+    }
   }
 
   if (eventKeyPrefixMatches(renderedEventState.eventKeys || [], nextKeys)) {
@@ -481,12 +508,8 @@ function mergeUniqueSessions(entries = []) {
 }
 
 function applySessionListState(nextSessions, {
-  board = null,
-  taskBoard = null,
   archivedCount: nextArchivedCount = archivedSessionCount,
 } = {}) {
-  sessionBoardLayout = board;
-  taskBoardState = taskBoard;
   const previousMap = new Map(sessions.map((session) => [session.id, session]));
   const activeSessions = (Array.isArray(nextSessions) ? nextSessions : [])
     .map((session) => normalizeSessionRecord(session, previousMap.get(session?.id) || null))
@@ -688,8 +711,6 @@ async function fetchSessionsList() {
   if (visitorMode) return [];
   const data = await fetchJsonOrRedirect(SESSION_LIST_URL);
   applySessionListState(data.sessions || [], {
-    board: data.board || null,
-    taskBoard: data.taskBoard || null,
     archivedCount: Number.isInteger(data.archivedCount) ? data.archivedCount : 0,
   });
   return sessions;
@@ -713,10 +734,15 @@ function applyAttachedSessionState(id, session) {
     renderQueuedMessagePanel(session);
   }
 
-  if (session?.tool && toolsList.some((tool) => tool.id === session.tool)) {
-    inlineToolSelect.value = session.tool;
-    selectedTool = session.tool;
-    Promise.resolve(loadModelsForCurrentTool()).catch(() => {});
+  if (session?.tool) {
+    const toolAvailable = toolsList.some((tool) => tool.id === session.tool);
+    if (toolAvailable || toolsList.length === 0) {
+      inlineToolSelect.value = session.tool;
+      selectedTool = session.tool;
+    }
+    if (toolAvailable) {
+      Promise.resolve(loadModelsForCurrentTool()).catch(() => {});
+    }
   }
 
   restoreDraft();
@@ -748,8 +774,23 @@ async function fetchSessionEvents(sessionId, { runState = "idle" } = {}) {
   if (currentSessionId !== sessionId) return events;
   const renderPlan = getEventRenderPlan(sessionId, events);
 
+  if (renderPlan.mode === "refresh_running_block") {
+    const [runningEvent] = renderPlan.events;
+    if (
+      runningEvent
+      && typeof refreshExpandedRunningThinkingBlock === "function"
+      && refreshExpandedRunningThinkingBlock(sessionId, runningEvent)
+    ) {
+      updateRenderedEventState(sessionId, events, { runState });
+      return renderPlan.events;
+    }
+  }
+
   if (renderPlan.mode === "reset") {
-    clearMessages();
+    const preserveRunningBlockExpanded =
+      renderedEventState.sessionId === sessionId
+      && renderedEventState.runningBlockExpanded === true;
+    clearMessages({ preserveRunningBlockExpanded });
     if (events.length === 0) {
       showEmpty();
     }
@@ -882,12 +923,26 @@ async function refreshRealtimeViews() {
   }
 }
 
+function startParallelCurrentSessionBootstrap() {
+  if (visitorMode || !currentSessionId) return;
+  refreshCurrentSession().catch((error) => {
+    if (error?.message === "Session not found") return;
+    console.warn(
+      "[sessions] Failed to bootstrap the current session in parallel:",
+      error?.message || error,
+    );
+  });
+}
+
 async function bootstrapViaHttp({ deferOwnerRestore = false } = {}) {
   if (visitorMode && visitorSessionId) {
     currentSessionId = visitorSessionId;
     attachSession(visitorSessionId, { id: visitorSessionId, name: "Session", status: "idle" });
     await refreshCurrentSession();
     return;
+  }
+  if (deferOwnerRestore) {
+    startParallelCurrentSessionBootstrap();
   }
   await fetchSessionsList();
   if (!deferOwnerRestore) {

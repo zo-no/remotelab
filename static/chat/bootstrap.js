@@ -190,6 +190,7 @@ const userFilterSelect = document.getElementById("userFilterSelect");
 const boardPanel = document.getElementById("boardPanel");
 const settingsPanel = document.getElementById("settingsPanel");
 const inputArea = document.getElementById("inputArea");
+const composerPendingState = document.getElementById("composerPendingState");
 const inputResizeHandle = document.getElementById("inputResizeHandle");
 const addToolModal = document.getElementById("addToolModal");
 const closeAddToolModalBtn = document.getElementById("closeAddToolModal");
@@ -267,8 +268,6 @@ let hasAttachedSession = false;
 let sessionStatus = "idle";
 let reconnectTimer = null;
 let sessions = [];
-let sessionBoardLayout = null;
-let taskBoardState = null;
 let sessionAppCatalog = [];
 let availableApps = [];
 let availableUsers = [];
@@ -299,6 +298,7 @@ const renderedEventState = {
   sessionId: null,
   latestSeq: 0,
   eventCount: 0,
+  eventBaseKeys: [],
   eventKeys: [],
   runState: "idle",
   runningBlockExpanded: false,
@@ -348,7 +348,6 @@ let currentToolReasoningLabel = "Thinking";
 let currentToolReasoningDefault = null;
 let toolsList = [];
 let isDesktop = window.matchMedia("(min-width: 768px)").matches;
-let selectedBoardTaskId = null;
 const ADD_MORE_TOOL_VALUE = "__add_more__";
 const COLLAPSED_GROUPS_STORAGE_KEY = "collapsedSessionGroups";
 let isSavingToolConfig = false;
@@ -399,20 +398,20 @@ function getSessionVisualStatus(session, options = {}) {
   return getSessionStatusSummary(session, options).primary;
 }
 
-function getSessionBoardColumns() {
+function getSessionBoardColumns(sessionList = getActiveSessions()) {
   return typeof sessionStateModel.getBoardColumns === "function"
-    ? sessionStateModel.getBoardColumns(sessionBoardLayout, getActiveSessions())
+    ? sessionStateModel.getBoardColumns(null, sessionList)
     : [];
 }
 
-function getSessionBoardColumn(session) {
+function getSessionBoardColumn(session, sessionList = getActiveSessions()) {
   return typeof sessionStateModel.getSessionBoardColumn === "function"
-    ? sessionStateModel.getSessionBoardColumn(session, sessionBoardLayout, getActiveSessions())
+    ? sessionStateModel.getSessionBoardColumn(session, null, sessionList)
     : {
-      key: "unassigned",
-      label: "Unassigned",
-      title: "Sessions that are not yet arranged by the board model.",
-      emptyText: "Nothing here yet",
+      key: "open",
+      label: "Open",
+      title: "Sessions that are ready for more work.",
+      emptyText: "No open sessions",
     };
 }
 
