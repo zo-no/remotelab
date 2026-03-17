@@ -16,6 +16,13 @@ let sessionsMetaCache = null;
 let sessionsMetaCacheMtimeMs = null;
 const runSessionsMetaMutation = createSerialTaskQueue();
 
+function normalizeStoredTimestamp(value) {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return '';
+  const time = Date.parse(trimmed);
+  return Number.isFinite(time) ? new Date(time).toISOString() : '';
+}
+
 function normalizeStoredSessionMeta(meta) {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
     return { meta: null, changed: true };
@@ -53,6 +60,19 @@ function normalizeStoredSessionMeta(meta) {
       }
     } else {
       delete normalized.workflowPriority;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'lastReviewedAt')) {
+    const nextLastReviewedAt = normalizeStoredTimestamp(normalized.lastReviewedAt);
+    if (nextLastReviewedAt) {
+      if (normalized.lastReviewedAt !== nextLastReviewedAt) {
+        normalized.lastReviewedAt = nextLastReviewedAt;
+        changed = true;
+      }
+    } else {
+      delete normalized.lastReviewedAt;
       changed = true;
     }
   }

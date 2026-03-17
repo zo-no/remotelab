@@ -29,6 +29,7 @@ function makeActivity(overrides = {}) {
     run: {
       state: 'idle',
       phase: null,
+      startedAt: null,
       runId: null,
       cancelRequested: false,
       ...overrides.run,
@@ -150,6 +151,35 @@ const workflowPriorityFallback = model.getSessionBoardPriority(
 );
 assert.equal(workflowPriorityFallback.key, 'medium', 'unknown priority strings should fall back to medium attention');
 
+const unreadDoneSession = makeSession({
+  workflowState: 'done',
+  lastEventAt: '2026-03-14T13:00:00.000Z',
+  lastReviewedAt: '2026-03-14T12:00:00.000Z',
+});
+assert.equal(model.hasSessionUnreadUpdate(unreadDoneSession), true, 'idle sessions updated after review should be marked unread');
+assert.equal(model.getSessionReviewStatusInfo(unreadDoneSession)?.key, 'unread', 'unread sessions should expose a dedicated review badge');
+
+const completeAndReviewed = makeSession({
+  workflowState: 'done',
+  lastEventAt: '2026-03-14T13:00:00.000Z',
+  lastReviewedAt: '2026-03-14T13:00:00.000Z',
+});
+assert.equal(model.isSessionCompleteAndReviewed(completeAndReviewed), true, 'completed sessions with no unseen updates should be de-emphasized');
+
+const runningUnreadCandidate = makeSession({
+  lastEventAt: '2026-03-14T13:00:00.000Z',
+  lastReviewedAt: '2026-03-14T12:00:00.000Z',
+  activity: makeActivity({
+    run: {
+      state: 'running',
+      phase: 'running',
+      startedAt: '2026-03-14T11:30:00.000Z',
+      runId: 'run-review-1',
+    },
+  }),
+});
+assert.equal(model.hasSessionUnreadUpdate(runningUnreadCandidate), false, 'running sessions should not constantly become unread while streaming');
+
 assert.ok(
   model.compareBoardSessions(
     makeSession({ workflowPriority: 'high', updatedAt: '2026-03-14T12:00:00.000Z' }),
@@ -172,6 +202,56 @@ assert.ok(
     makeSession({ workflowPriority: 'medium', updatedAt: '2026-03-14T13:00:00.000Z' }),
   ) > 0,
   'more recent sessions should sort first when priority and pin state tie',
+);
+
+assert.ok(
+  model.compareSessionListSessions(
+    makeSession({
+      workflowState: 'done',
+      lastEventAt: '2026-03-14T13:00:00.000Z',
+      lastReviewedAt: '2026-03-14T12:00:00.000Z',
+    }),
+    makeSession({
+      lastEventAt: '2026-03-14T13:30:00.000Z',
+      activity: makeActivity({
+        run: {
+          state: 'running',
+          phase: 'running',
+          startedAt: '2026-03-14T11:00:00.000Z',
+          runId: 'run-2',
+        },
+      }),
+    }),
+  ) < 0,
+  'unread completed work should sort ahead of currently running sessions',
+);
+
+assert.ok(
+  model.compareSessionListSessions(
+    makeSession({
+      lastEventAt: '2026-03-14T13:30:00.000Z',
+      activity: makeActivity({
+        run: {
+          state: 'running',
+          phase: 'running',
+          startedAt: '2026-03-14T09:00:00.000Z',
+          runId: 'run-older',
+        },
+      }),
+    }),
+    makeSession({
+      lastEventAt: '2026-03-14T11:15:00.000Z',
+      activity: makeActivity({
+        run: {
+          state: 'running',
+          phase: 'running',
+          startedAt: '2026-03-14T10:00:00.000Z',
+          runId: 'run-newer',
+        },
+      }),
+    }),
+  ) > 0,
+  'running-session ordering should stay anchored to run start time instead of the latest streamed token time',
 );
 
 const toolFallbackStatus = model.getSessionStatusSummary(

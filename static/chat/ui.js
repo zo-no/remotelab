@@ -815,21 +815,41 @@ function getSessionMetaStatusInfo(session) {
   return workflowStatus || liveStatus;
 }
 
+function getSessionReviewStatusInfo(session) {
+  return typeof window !== "undefined"
+    && window.RemoteLabSessionStateModel
+    && typeof window.RemoteLabSessionStateModel.getSessionReviewStatusInfo === "function"
+    ? window.RemoteLabSessionStateModel.getSessionReviewStatusInfo(session)
+    : null;
+}
+
+function isSessionCompleteAndReviewed(session) {
+  return typeof window !== "undefined"
+    && window.RemoteLabSessionStateModel
+    && typeof window.RemoteLabSessionStateModel.isSessionCompleteAndReviewed === "function"
+    ? window.RemoteLabSessionStateModel.isSessionCompleteAndReviewed(session)
+    : false;
+}
+
 function buildSessionMetaParts(session) {
   const parts = [];
-  const countHtml = renderSessionMessageCount(session);
-  if (countHtml) parts.push(countHtml);
+  const reviewHtml = renderSessionStatusHtml(getSessionReviewStatusInfo(session));
+  if (reviewHtml) parts.push(reviewHtml);
   const liveStatus = getSessionStatusSummary(session).primary;
   const statusHtml = liveStatus?.key && liveStatus.key !== "idle"
     ? renderSessionStatusHtml(liveStatus)
     : "";
   if (statusHtml) parts.push(statusHtml);
+  const countHtml = renderSessionMessageCount(session);
+  if (countHtml) parts.push(countHtml);
   return parts;
 }
 
 function buildBoardCardMetaParts(session) {
   const parts = [];
   parts.push(...renderSessionScopeContext(session));
+  const reviewHtml = renderSessionStatusHtml(getSessionReviewStatusInfo(session));
+  if (reviewHtml) parts.push(reviewHtml);
   const statusHtml = renderSessionStatusHtml(getSessionMetaStatusInfo(session));
   if (statusHtml) parts.push(statusHtml);
   return parts;
@@ -1017,11 +1037,13 @@ function renderSessionBoard() {
 
 function createActiveSessionItem(session) {
   const statusInfo = getSessionMetaStatusInfo(session);
+  const completeRead = isSessionCompleteAndReviewed(session);
   const div = document.createElement("div");
   div.className =
     "session-item"
     + (session.pinned ? " pinned" : "")
     + (session.id === currentSessionId ? " active" : "")
+    + (completeRead ? " is-complete-read" : "")
     + (statusInfo.itemClass ? ` ${statusInfo.itemClass}` : "");
 
   const displayName = getSessionDisplayName(session);
@@ -1263,6 +1285,9 @@ function attachSession(id, session) {
     dispatchAction({ action: "attach", sessionId: id });
   }
   applyAttachedSessionState(id, session);
+  if (typeof markSessionReviewed === "function") {
+    Promise.resolve(markSessionReviewed(session, { sync: shouldReattach, render: true })).catch(() => {});
+  }
   if (typeof focusComposer === "function") {
     focusComposer({ preventScroll: true });
   } else {

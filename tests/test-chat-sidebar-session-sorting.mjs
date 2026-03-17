@@ -45,19 +45,32 @@ function extractFunctionSource(source, functionName) {
 
 const getSessionSortTimeSource = extractFunctionSource(bootstrapSource, 'getSessionSortTime');
 const getSessionPinSortRankSource = extractFunctionSource(bootstrapSource, 'getSessionPinSortRank');
+const compareSessionListSessionsSource = extractFunctionSource(bootstrapSource, 'compareSessionListSessions');
 const sortSessionsInPlaceSource = extractFunctionSource(bootstrapSource, 'sortSessionsInPlace');
 
 const context = {
   console,
   Date,
+  sessionStateModel: {
+    getSessionSortTime(session) {
+      return Date.parse(session.lastEventAt || session.updatedAt || session.created || '') || 0;
+    },
+    compareSessionListSessions(a, b) {
+      return (b.rank || 0) - (a.rank || 0)
+        || (Date.parse(b.lastEventAt || b.updatedAt || b.created || '') || 0)
+          - (Date.parse(a.lastEventAt || a.updatedAt || a.created || '') || 0);
+    },
+  },
   sessions: [
     {
       id: 'metadata-only-newer',
+      rank: 1,
       updatedAt: '2026-03-12T12:00:00.000Z',
       lastEventAt: '2026-03-12T08:00:00.000Z',
     },
     {
       id: 'actual-activity-newer',
+      rank: 5,
       updatedAt: '2026-03-12T09:00:00.000Z',
       lastEventAt: '2026-03-12T11:00:00.000Z',
     },
@@ -72,7 +85,7 @@ const context = {
 context.globalThis = context;
 
 vm.runInNewContext(
-  `${getSessionSortTimeSource}\n${getSessionPinSortRankSource}\n${sortSessionsInPlaceSource}`,
+  `${getSessionSortTimeSource}\n${getSessionPinSortRankSource}\n${compareSessionListSessionsSource}\n${sortSessionsInPlaceSource}`,
   context,
   { filename: 'static/chat/bootstrap.js' },
 );
@@ -82,7 +95,7 @@ context.sortSessionsInPlace();
 assert.deepEqual(
   context.sessions.map((session) => session.id),
   ['pinned-session', 'actual-activity-newer', 'metadata-only-newer'],
-  'sidebar sorting should follow pinning first and actual session activity before metadata-only updates',
+  'sidebar sorting should follow pinning first and then the delegated attention comparator',
 );
 
 console.log('test-chat-sidebar-session-sorting: ok');

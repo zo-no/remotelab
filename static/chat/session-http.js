@@ -442,6 +442,93 @@ function reconcilePendingMessageState(event) {
   }
 }
 
+const pendingSessionReviewSyncs = new Map();
+
+function normalizeSessionReviewStamp(value) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) return "";
+  const time = new Date(trimmed).getTime();
+  return Number.isFinite(time) ? new Date(time).toISOString() : "";
+}
+
+function getSessionReviewStampTime(value) {
+  const time = new Date(value || "").getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function getSessionReviewStamp(session) {
+  return normalizeSessionReviewStamp(session?.lastEventAt || session?.updatedAt || session?.created || "");
+}
+
+function getEffectiveSessionReviewedAt(session) {
+  const candidates = [
+    normalizeSessionReviewStamp(session?.lastReviewedAt),
+    normalizeSessionReviewStamp(session?.localReviewedAt),
+    normalizeSessionReviewStamp(session?.reviewBaselineAt),
+  ].filter(Boolean);
+  let best = "";
+  let bestTime = 0;
+  for (const candidate of candidates) {
+    const time = getSessionReviewStampTime(candidate);
+    if (time > bestTime) {
+      best = candidate;
+      bestTime = time;
+    }
+  }
+  return best;
+}
+
+function rememberSessionReviewedLocally(session, { render = false } = {}) {
+  if (!session?.id) return "";
+  const stamp = getSessionReviewStamp(session);
+  if (!stamp) return "";
+  if (getSessionReviewStampTime(stamp) <= getSessionReviewStampTime(getEffectiveSessionReviewedAt(session))) {
+    return getEffectiveSessionReviewedAt(session);
+  }
+  const stored = typeof setLocalSessionReviewedAt === "function"
+    ? setLocalSessionReviewedAt(session.id, stamp)
+    : stamp;
+  session.localReviewedAt = stored || stamp;
+  if (render) {
+    renderSessionList();
+  }
+  return session.localReviewedAt;
+}
+
+async function syncSessionReviewedToServer(session) {
+  if (!session?.id || visitorMode) return session;
+  const stamp = getSessionReviewStamp(session);
+  if (!stamp) return session;
+  if (getSessionReviewStampTime(stamp) <= getSessionReviewStampTime(normalizeSessionReviewStamp(session?.lastReviewedAt))) {
+    return session;
+  }
+  const currentPending = pendingSessionReviewSyncs.get(session.id);
+  if (getSessionReviewStampTime(currentPending) >= getSessionReviewStampTime(stamp)) {
+    return session;
+  }
+  pendingSessionReviewSyncs.set(session.id, stamp);
+  try {
+    const data = await fetchJsonOrRedirect(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lastReviewedAt: stamp }),
+    });
+    return upsertSession(data.session) || data.session || session;
+  } finally {
+    if (pendingSessionReviewSyncs.get(session.id) === stamp) {
+      pendingSessionReviewSyncs.delete(session.id);
+    }
+  }
+}
+
+function markSessionReviewed(session, { sync = false, render = true } = {}) {
+  const stamp = rememberSessionReviewedLocally(session, { render });
+  if (!stamp || !sync) {
+    return Promise.resolve(session);
+  }
+  return syncSessionReviewedToServer(session);
+}
+
 function normalizeSessionRecord(session, previous = null) {
   const queueCount = Number.isInteger(session?.activity?.queue?.count)
     ? session.activity.queue.count
@@ -477,6 +564,26 @@ function normalizeSessionRecord(session, previous = null) {
     } else {
       delete normalized.thinking;
     }
+  }
+  const localReviewedAt = normalizeSessionReviewStamp(
+    normalized.localReviewedAt
+    || previous?.localReviewedAt
+    || (typeof getLocalSessionReviewedAt === "function" ? getLocalSessionReviewedAt(normalized.id) : ""),
+  );
+  if (localReviewedAt) {
+    normalized.localReviewedAt = localReviewedAt;
+  } else {
+    delete normalized.localReviewedAt;
+  }
+  const reviewBaselineAt = normalizeSessionReviewStamp(
+    normalized.reviewBaselineAt
+    || previous?.reviewBaselineAt
+    || (typeof getSessionReviewBaselineAt === "function" ? getSessionReviewBaselineAt() : ""),
+  );
+  if (reviewBaselineAt) {
+    normalized.reviewBaselineAt = reviewBaselineAt;
+  } else {
+    delete normalized.reviewBaselineAt;
   }
   return normalized;
 }
@@ -526,6 +633,7 @@ function applySessionListState(nextSessions, {
     ...preservedArchived,
     ...(preservedCurrent?.archived === true ? [preservedCurrent] : []),
   ]);
+  sortSessionsInPlace();
   hasLoadedSessions = true;
   if (Number.isInteger(nextArchivedCount) && nextArchivedCount >= 0) {
     archivedSessionCount = nextArchivedCount;
@@ -554,6 +662,7 @@ function applyArchivedSessionListState(nextSessions, {
     .map((session) => normalizeSessionRecord(session, previousMap.get(session?.id) || null))
     .filter(Boolean);
   sessions = mergeUniqueSessions([...preservedActive, ...archivedSessions]);
+  sortSessionsInPlace();
   archivedSessionsLoaded = true;
   archivedSessionsLoading = false;
   archivedSessionCount = Number.isInteger(nextArchivedCount) && nextArchivedCount >= 0
@@ -756,6 +865,7 @@ async function fetchSessionState(sessionId) {
   const data = await fetchJsonOrRedirect(`/api/sessions/${encodeURIComponent(sessionId)}`);
   const normalized = upsertSession(data.session);
   if (normalized && currentSessionId === sessionId) {
+    rememberSessionReviewedLocally(normalized);
     applyAttachedSessionState(sessionId, normalized);
   }
   return normalized;

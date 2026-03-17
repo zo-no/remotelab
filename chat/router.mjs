@@ -35,6 +35,7 @@ import {
   setSessionArchived,
   setSessionPinned,
   submitHttpMessage,
+  updateSessionLastReviewedAt,
   updateSessionWorkflowClassification,
   updateSessionRuntimePreferences,
 } from './session-manager.mjs';
@@ -1286,6 +1287,7 @@ export async function handleRequest(req, res) {
     const hasThinkingPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'thinking');
     const hasWorkflowStatePatch = Object.prototype.hasOwnProperty.call(patch || {}, 'workflowState');
     const hasWorkflowPriorityPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'workflowPriority');
+    const hasLastReviewedAtPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'lastReviewedAt');
     if (hasArchivedPatch && typeof patch.archived !== 'boolean') {
       writeJson(res, 400, { error: 'archived must be a boolean' });
       return;
@@ -1318,6 +1320,10 @@ export async function handleRequest(req, res) {
       writeJson(res, 400, { error: 'workflowPriority must be a string or null' });
       return;
     }
+    if (hasLastReviewedAtPatch && patch.lastReviewedAt !== null && typeof patch.lastReviewedAt !== 'string') {
+      writeJson(res, 400, { error: 'lastReviewedAt must be a string or null' });
+      return;
+    }
     if (
       hasWorkflowStatePatch
       && patch.workflowState !== null
@@ -1334,6 +1340,15 @@ export async function handleRequest(req, res) {
       && !normalizeSessionWorkflowPriority(String(patch.workflowPriority))
     ) {
       writeJson(res, 400, { error: 'workflowPriority must be high, medium, or low' });
+      return;
+    }
+    if (
+      hasLastReviewedAtPatch
+      && patch.lastReviewedAt !== null
+      && String(patch.lastReviewedAt).trim()
+      && !Number.isFinite(Date.parse(String(patch.lastReviewedAt).trim()))
+    ) {
+      writeJson(res, 400, { error: 'lastReviewedAt must be a valid timestamp or null' });
       return;
     }
     let session = null;
@@ -1359,6 +1374,9 @@ export async function handleRequest(req, res) {
         ...(hasEffortPatch ? { effort: patch.effort } : {}),
         ...(hasThinkingPatch ? { thinking: patch.thinking } : {}),
       }) || session;
+    }
+    if (hasLastReviewedAtPatch) {
+      session = await updateSessionLastReviewedAt(sessionId, patch.lastReviewedAt || '') || session;
     }
     if (!session) {
       session = await getSessionForClient(sessionId);

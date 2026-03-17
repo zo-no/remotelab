@@ -39,6 +39,7 @@ Durable session metadata may include fields such as:
 - `description`
 - `workflowState`
 - `workflowPriority`
+- `lastReviewedAt`
 - `pinned`
 - app/source association fields when relevant
 

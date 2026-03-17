@@ -246,6 +246,8 @@ const ACTIVE_SOURCE_FILTER_STORAGE_KEY = "activeSourceFilter";
 const ACTIVE_SESSION_APP_FILTER_STORAGE_KEY = "activeSessionAppFilter";
 const ACTIVE_USER_FILTER_STORAGE_KEY = "activeUserFilter";
 const LEGACY_SESSION_SEND_FAILURES_STORAGE_KEY = "sessionSendFailures";
+const SESSION_REVIEW_MARKERS_STORAGE_KEY = "sessionReviewedAtById";
+const SESSION_REVIEW_BASELINE_AT_STORAGE_KEY = "sessionReviewBaselineAt";
 const FILTER_ALL_VALUE = "__all__";
 const SOURCE_FILTER_CHAT_VALUE = "chat_ui";
 const SOURCE_FILTER_BOT_VALUE = "bot";
@@ -361,6 +363,13 @@ try {
   localStorage.removeItem(LEGACY_SESSION_SEND_FAILURES_STORAGE_KEY);
 } catch {}
 
+let sessionReviewMarkers = readStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, {});
+let sessionReviewBaselineAt = readStoredTimestampValue(SESSION_REVIEW_BASELINE_AT_STORAGE_KEY);
+if (!sessionReviewBaselineAt) {
+  sessionReviewBaselineAt = new Date().toISOString();
+  writeStoredTimestampValue(SESSION_REVIEW_BASELINE_AT_STORAGE_KEY, sessionReviewBaselineAt);
+}
+
 function readStoredJsonValue(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -376,6 +385,86 @@ function writeStoredJsonValue(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {}
+}
+
+function normalizeStoredTimestamp(value) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) return "";
+  const time = new Date(trimmed).getTime();
+  return Number.isFinite(time) ? new Date(time).toISOString() : "";
+}
+
+function readStoredTimestampValue(key) {
+  try {
+    return normalizeStoredTimestamp(localStorage.getItem(key));
+  } catch {
+    return "";
+  }
+}
+
+function writeStoredTimestampValue(key, value) {
+  try {
+    const normalized = normalizeStoredTimestamp(value);
+    if (normalized) {
+      localStorage.setItem(key, normalized);
+    } else {
+      localStorage.removeItem(key);
+    }
+  } catch {}
+}
+
+function getSessionReviewedAtTime(value) {
+  const time = new Date(value || "").getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function getSessionReviewBaselineAt() {
+  return sessionReviewBaselineAt || "";
+}
+
+function getLocalSessionReviewedAt(sessionId) {
+  if (!sessionId || !sessionReviewMarkers || typeof sessionReviewMarkers !== "object") return "";
+  const normalized = normalizeStoredTimestamp(sessionReviewMarkers[sessionId]);
+  if (normalized) return normalized;
+  if (Object.prototype.hasOwnProperty.call(sessionReviewMarkers, sessionId)) {
+    const next = { ...sessionReviewMarkers };
+    delete next[sessionId];
+    sessionReviewMarkers = next;
+    writeStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, sessionReviewMarkers);
+  }
+  return "";
+}
+
+function setLocalSessionReviewedAt(sessionId, stamp) {
+  if (!sessionId) return "";
+  const normalized = normalizeStoredTimestamp(stamp);
+  const current = getLocalSessionReviewedAt(sessionId);
+  if (normalized) {
+    if (getSessionReviewedAtTime(normalized) <= getSessionReviewedAtTime(current)) {
+      return current;
+    }
+    sessionReviewMarkers = {
+      ...sessionReviewMarkers,
+      [sessionId]: normalized,
+    };
+    writeStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, sessionReviewMarkers);
+  } else if (Object.prototype.hasOwnProperty.call(sessionReviewMarkers, sessionId)) {
+    const next = { ...sessionReviewMarkers };
+    delete next[sessionId];
+    sessionReviewMarkers = next;
+    writeStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, sessionReviewMarkers);
+  }
+
+  const existing = sessions.find((session) => session.id === sessionId);
+  if (existing) {
+    if (normalized) {
+      existing.localReviewedAt = normalized;
+    } else {
+      delete existing.localReviewedAt;
+    }
+  }
+
+  return normalized || "";
 }
 
 function createEmptySessionStatus() {
@@ -1035,6 +1124,9 @@ if (userFilterSelect) {
 refreshAppCatalog();
 
 function getSessionSortTime(session) {
+  if (typeof sessionStateModel.getSessionSortTime === "function") {
+    return sessionStateModel.getSessionSortTime(session);
+  }
   const stamp = session?.lastEventAt || session?.updatedAt || session?.created || "";
   const time = new Date(stamp).getTime();
   return Number.isFinite(time) ? time : 0;
@@ -1044,10 +1136,17 @@ function getSessionPinSortRank(session) {
   return session?.pinned === true ? 1 : 0;
 }
 
+function compareSessionListSessions(a, b) {
+  if (typeof sessionStateModel.compareSessionListSessions === "function") {
+    return sessionStateModel.compareSessionListSessions(a, b);
+  }
+  return getSessionSortTime(b) - getSessionSortTime(a);
+}
+
 function sortSessionsInPlace() {
   sessions.sort((a, b) => (
     getSessionPinSortRank(b) - getSessionPinSortRank(a)
-    || getSessionSortTime(b) - getSessionSortTime(a)
+    || compareSessionListSessions(a, b)
   ));
 }
 

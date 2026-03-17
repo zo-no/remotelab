@@ -160,10 +160,31 @@
     return { ...workflowStatusSpecs[normalized] };
   }
 
-  function getSessionSortTime(session) {
-    const stamp = session?.lastEventAt || session?.updatedAt || session?.created || "";
-    const time = new Date(stamp).getTime();
+  function parseSessionTime(value) {
+    const time = new Date(value || "").getTime();
     return Number.isFinite(time) ? time : 0;
+  }
+
+  function getSessionLatestChangeTime(session) {
+    const stamp = session?.lastEventAt || session?.updatedAt || session?.created || "";
+    return parseSessionTime(stamp);
+  }
+
+  function getSessionReviewTime(session) {
+    return Math.max(
+      parseSessionTime(session?.lastReviewedAt),
+      parseSessionTime(session?.localReviewedAt),
+      parseSessionTime(session?.reviewBaselineAt),
+    );
+  }
+
+  function getSessionSortTime(session) {
+    const activity = normalizeSessionActivity(session);
+    if (activity.run.state === "running" && activity.run.startedAt) {
+      const startedAt = parseSessionTime(activity.run.startedAt);
+      if (startedAt > 0) return startedAt;
+    }
+    return getSessionLatestChangeTime(session);
   }
 
   function cloneBoardColumn(column) {
@@ -198,6 +219,7 @@
       run: {
         state: runState,
         phase: typeof raw?.run?.phase === "string" ? raw.run.phase : null,
+        startedAt: typeof raw?.run?.startedAt === "string" ? raw.run.startedAt : null,
         runId: typeof raw?.run?.runId === "string" ? raw.run.runId : null,
         cancelRequested: raw?.run?.cancelRequested === true,
       },
@@ -337,6 +359,59 @@
     return getWorkflowPriorityInfo("medium");
   }
 
+  function hasSessionUnreadUpdate(session) {
+    if (!session) return false;
+    if (isSessionBusy(session)) return false;
+    return getSessionLatestChangeTime(session) > getSessionReviewTime(session);
+  }
+
+  function getSessionReviewStatusInfo(session) {
+    if (!hasSessionUnreadUpdate(session)) return null;
+    return createStatus(
+      "unread",
+      "new",
+      "status-unread",
+      "",
+      "",
+      "Updated since you last reviewed this session",
+    );
+  }
+
+  function isSessionCompleteAndReviewed(session) {
+    const workflowState = normalizeSessionWorkflowState(session?.workflowState || "");
+    return workflowState === "done"
+      && !isSessionBusy(session)
+      && !hasSessionUnreadUpdate(session);
+  }
+
+  function getSessionAttentionBand(session) {
+    const workflowState = normalizeSessionWorkflowState(session?.workflowState || "");
+    const busy = isSessionBusy(session);
+    const unread = hasSessionUnreadUpdate(session);
+
+    if (unread && workflowState === "waiting_user") return 0;
+    if (unread) return 1;
+    if (workflowState === "waiting_user") return 2;
+    if (!busy && workflowState !== "done" && workflowState !== "parked") return 3;
+    if (busy) return 4;
+    if (workflowState === "parked") return 5;
+    if (workflowState === "done") return 6;
+    return 3;
+  }
+
+  function compareSessionListSessions(a, b) {
+    const attentionBandDiff = getSessionAttentionBand(a) - getSessionAttentionBand(b);
+    if (attentionBandDiff) return attentionBandDiff;
+
+    const priorityDiff = (getSessionBoardPriority(b)?.rank || 0) - (getSessionBoardPriority(a)?.rank || 0);
+    if (priorityDiff) return priorityDiff;
+
+    const pinDiff = (b?.pinned === true ? 1 : 0) - (a?.pinned === true ? 1 : 0);
+    if (pinDiff) return pinDiff;
+
+    return getSessionSortTime(b) - getSessionSortTime(a);
+  }
+
   function getSessionBoardOrder(_session) {
     return 0;
   }
@@ -360,14 +435,19 @@
     normalizeSessionWorkflowState,
     normalizeSessionActivity,
     isSessionBusy,
+    getSessionSortTime,
     getWorkflowStatusInfo,
     getSessionPrimaryStatus,
     getSessionStatusSummary,
     getSessionVisualStatus,
+    hasSessionUnreadUpdate,
+    getSessionReviewStatusInfo,
+    isSessionCompleteAndReviewed,
     getBoardColumns,
     getSessionBoardColumn,
     getSessionBoardPriority,
     getSessionBoardOrder,
+    compareSessionListSessions,
     compareBoardSessions,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);

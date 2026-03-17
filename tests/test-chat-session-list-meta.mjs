@@ -53,10 +53,14 @@ const context = {
     state.scopeCalls += 1;
     return ['<span>scope</span>'];
   },
+  getSessionReviewStatusInfo() {
+    return null;
+  },
   getSessionStatusSummary() {
     return { primary: { key: 'running', label: 'running' } };
   },
   renderSessionStatusHtml(statusInfo) {
+    if (!statusInfo?.label) return '';
     state.statusCalls += 1;
     return `<span>${statusInfo.label}</span>`;
   },
@@ -78,10 +82,10 @@ const parts = context.buildSessionMetaParts({ messageCount: 5 });
 assert.equal(
   JSON.stringify(parts),
   JSON.stringify([
-    '<span class="session-item-count" title="Messages in this session">5 msgs</span>',
     '<span>running</span>',
+    '<span class="session-item-count" title="Messages in this session">5 msgs</span>',
   ]),
-  'session list metadata should be limited to count plus live run status',
+  'session list metadata should keep the compact live status first and the count secondary',
 );
 assert.equal(state.scopeCalls, 0, 'session list metadata should not render source/app/user scope labels anymore');
 assert.equal(state.statusCalls, 1, 'session list metadata should still render the live run status');

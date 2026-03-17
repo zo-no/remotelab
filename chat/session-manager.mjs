@@ -1097,6 +1097,13 @@ function getSessionPinSortRank(meta) {
   return meta?.pinned === true ? 1 : 0;
 }
 
+function normalizeSessionReviewedAt(value) {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return '';
+  const time = Date.parse(trimmed);
+  return Number.isFinite(time) ? new Date(time).toISOString() : '';
+}
+
 async function enrichSessionMeta(meta, _options = {}) {
   const live = liveSessions.get(meta.id);
   const snapshot = await getHistorySnapshot(meta.id);
@@ -2647,6 +2654,33 @@ export async function updateSessionWorkflowPriority(id, workflowPriority) {
   return updateSessionWorkflowClassification(id, { workflowPriority });
 }
 
+export async function updateSessionLastReviewedAt(id, lastReviewedAt) {
+  const nextLastReviewedAt = normalizeSessionReviewedAt(lastReviewedAt || '');
+  const result = await mutateSessionMeta(id, (session) => {
+    const currentLastReviewedAt = normalizeSessionReviewedAt(session.lastReviewedAt || '');
+    if (nextLastReviewedAt) {
+      if (currentLastReviewedAt !== nextLastReviewedAt) {
+        session.lastReviewedAt = nextLastReviewedAt;
+        return true;
+      }
+      return false;
+    }
+
+    if (currentLastReviewedAt) {
+      delete session.lastReviewedAt;
+      return true;
+    }
+
+    return false;
+  });
+
+  if (!result.meta) return null;
+  if (result.changed) {
+    broadcastSessionInvalidation(id);
+  }
+  return enrichSessionMeta(result.meta);
+}
+
 export async function updateSessionWorkflowClassification(id, payload = {}) {
   const {
     workflowState,
@@ -2976,12 +3010,15 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
     throw error;
   }
 
-  if (findQueuedFollowUpByRequest(sessionMeta, requestId) || hasRecentFollowUpRequestId(sessionMeta, requestId)) {
+  const existingQueuedFollowUp = findQueuedFollowUpByRequest(sessionMeta, requestId);
+  if (existingQueuedFollowUp || hasRecentFollowUpRequestId(sessionMeta, requestId)) {
     return {
       duplicate: true,
-      queued: !!findQueuedFollowUpByRequest(sessionMeta, requestId),
+      queued: !!existingQueuedFollowUp,
       run: null,
-      session: await getSession(sessionId),
+      session: await getSession(sessionId, {
+        includeQueuedMessages: !!existingQueuedFollowUp,
+      }),
     };
   }
 
@@ -3033,7 +3070,11 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
       duplicate: wasDuplicateQueueInsert,
       queued: true,
       run: null,
-      session: await getSession(sessionId) || (queuedMeta.meta ? await enrichSessionMetaForClient(queuedMeta.meta) : session),
+      session: await getSession(sessionId, {
+        includeQueuedMessages: true,
+      }) || (queuedMeta.meta ? await enrichSessionMetaForClient(queuedMeta.meta, {
+        includeQueuedMessages: true,
+      }) : session),
     };
   }
 

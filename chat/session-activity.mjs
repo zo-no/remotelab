@@ -47,6 +47,7 @@ export function buildSessionActivity(meta, live, { runState, run, queuedCount })
     run: {
       state: runState,
       phase: typeof run?.state === 'string' ? run.state : null,
+      startedAt: typeof run?.startedAt === 'string' ? run.startedAt : null,
       runId: runState === 'running' && typeof run?.id === 'string'
         ? run.id
         : (runState === 'running' && typeof meta?.activeRunId === 'string' ? meta.activeRunId : null),
