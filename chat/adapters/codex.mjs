@@ -181,13 +181,13 @@ function parseItem(item) {
 }
 
 /**
- * System instruction prepended to every Codex prompt to ensure
- * the model completes all work within a single turn.
+ * Optional system instruction prepended to Codex prompts.
+ *
+ * RemoteLab now leaves this empty by default so local project memory and
+ * session prompts remain the primary steering layer. Operators can still set
+ * `REMOTELAB_CODEX_SYSTEM_PREFIX` if they want to force an extra prefix.
  */
-const CODEX_SYSTEM_PREFIX =
-  'IMPORTANT: Complete ALL requested work in this single response. ' +
-  'Do NOT stop after planning — execute every step (file creation, edits, commands) before finishing. ' +
-  'Never say "I will do X next" and then end your turn without actually doing X.\n\n';
+const CODEX_SYSTEM_PREFIX = process.env.REMOTELAB_CODEX_SYSTEM_PREFIX || '';
 
 /**
  * Build args for spawning Codex exec.
