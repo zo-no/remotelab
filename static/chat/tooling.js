@@ -405,6 +405,20 @@ function syncForkButton() {
   forkSessionBtn.disabled = !session || activity.run.state === "running" || activity.compact.state === "pending";
 }
 
+function getShareSnapshotTitle(session) {
+  const name = typeof session?.name === "string" ? session.name.trim() : "";
+  if (name) return name;
+  const tool = typeof session?.tool === "string" ? session.tool.trim() : "";
+  if (tool) return tool;
+  return "RemoteLab snapshot";
+}
+
+function buildShareSnapshotShareText(session, shareUrl) {
+  const title = getShareSnapshotTitle(session);
+  const link = typeof shareUrl === "string" ? shareUrl.trim() : "";
+  return link ? `${title}\n${link}` : title;
+}
+
 async function shareCurrentSessionSnapshot() {
   if (!currentSessionId || visitorMode || !shareSnapshotBtn) return;
 
@@ -424,6 +438,7 @@ async function shareCurrentSessionSnapshot() {
     const shareUrl = payload?.share?.url
       ? new URL(payload.share.url, location.origin).toString()
       : null;
+    const shareText = buildShareSnapshotShareText(currentSession, shareUrl);
 
     if (!res.ok || !shareUrl) {
       throw new Error(payload?.error || "Failed to create share link");
@@ -431,11 +446,7 @@ async function shareCurrentSessionSnapshot() {
 
     if (navigator.share) {
       try {
-        await navigator.share({
-          title: currentSession?.name || currentSession?.tool || "RemoteLab snapshot",
-          text: "Read-only RemoteLab session snapshot",
-          url: shareUrl,
-        });
+        await navigator.share({ text: shareText });
         updateCopyButtonLabel(shareSnapshotBtn, "Shared");
         return;
       } catch (err) {
@@ -444,10 +455,10 @@ async function shareCurrentSessionSnapshot() {
     }
 
     try {
-      await copyText(shareUrl);
+      await copyText(shareText);
       updateCopyButtonLabel(shareSnapshotBtn, "Copied");
     } catch {
-      window.prompt("Copy share link", shareUrl);
+      window.prompt("Copy share text", shareText);
       updateCopyButtonLabel(shareSnapshotBtn, "Ready");
     }
   } catch (err) {

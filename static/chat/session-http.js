@@ -230,6 +230,15 @@ function isShareSnapshotReadOnlyMode() {
   return typeof shareSnapshotMode !== "undefined" && shareSnapshotMode === true;
 }
 
+function shouldOpenCurrentSessionFromTop() {
+  return isShareSnapshotReadOnlyMode();
+}
+
+function scrollCurrentSessionViewportToTop() {
+  if (!messagesEl) return;
+  messagesEl.scrollTop = 0;
+}
+
 function hasShareSnapshotPayload() {
   const payload = getActiveShareSnapshotPayload();
   return !!(payload && typeof payload === "object");
@@ -1028,7 +1037,9 @@ async function fetchSessionEvents(sessionId, { runState = "idle" } = {}) {
     }
     updateRenderedEventState(sessionId, events, { runState });
     const latestTurnStart = applyFinishedTurnCollapseState();
-    if (shouldFocusLatestTurnStart(latestTurnStart)) {
+    if (shouldOpenCurrentSessionFromTop()) {
+      scrollCurrentSessionViewportToTop();
+    } else if (shouldFocusLatestTurnStart(latestTurnStart)) {
       scrollNodeToTop(latestTurnStart);
     } else if (events.length > 0 && shouldStickToBottom) {
       scrollToBottom();
@@ -1043,7 +1054,9 @@ async function fetchSessionEvents(sessionId, { runState = "idle" } = {}) {
     }
     updateRenderedEventState(sessionId, events, { runState });
     const latestTurnStart = applyFinishedTurnCollapseState();
-    if (shouldFocusLatestTurnStart(latestTurnStart)) {
+    if (shouldOpenCurrentSessionFromTop()) {
+      scrollCurrentSessionViewportToTop();
+    } else if (shouldFocusLatestTurnStart(latestTurnStart)) {
       scrollNodeToTop(latestTurnStart);
     } else if (renderPlan.events.length > 0 && shouldStickToBottom) {
       scrollToBottom();
@@ -1053,7 +1066,9 @@ async function fetchSessionEvents(sessionId, { runState = "idle" } = {}) {
 
   updateRenderedEventState(sessionId, events, { runState });
   const latestTurnStart = applyFinishedTurnCollapseState();
-  if (shouldFocusLatestTurnStart(latestTurnStart)) {
+  if (shouldOpenCurrentSessionFromTop()) {
+    scrollCurrentSessionViewportToTop();
+  } else if (shouldFocusLatestTurnStart(latestTurnStart)) {
     scrollNodeToTop(latestTurnStart);
   }
   return events;
