@@ -26,6 +26,14 @@ That means the current system does **not** have separate canonical objects for:
 
 Those are product surfaces, not independent storage authorities.
 
+## Current Product-Shape Rule
+
+For the current discovery phase:
+
+- Do not let the shipped `Board` implementation define the main product shape while the owner interaction is still being discovered.
+- It is acceptable to hide or remove the current board temporarily if that helps the team think more clearly about the ideal session-first flow.
+- If `Board` returns later, it should return as a derived projection over sessions, not as the object that justifies the workflow model.
+
 ---
 
 ## What Belongs On The Session Today

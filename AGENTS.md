@@ -228,12 +228,13 @@ Current operating rule: prefer capability-first shipping slices that validate th
 - [x] Web push notifications
 
 ### P1 — Next Up
-- [ ] Make the `Board` the primary owner work surface — productize the existing session-derived board instead of reviving a separate Progress/task model; define columns, grouping, child-session visibility, and the default owner view clearly
-- [ ] Multi-session fan-out from one owner turn — let a manager/control session intentionally spawn several focused parallel sessions, keep hierarchy light, and rely on the session list/board plus concise aggregation rather than heavy parent-side handoff UI
-- [ ] Context carry/cache confirmation — validate and tune compaction, prepared fork context, and summary/cache reuse so board + multi-session flows stay fast and bounded
-- [ ] Expose AI-controlled session presentation (`title`, `group`, `description`) via session APIs, then validate the AI-owned board/inbox UX and consolidate current project-session TODOs into one dedicated prioritization session
-- [ ] Universal control inbox / dispatcher session — a default high-trust intake surface layered on top of the board + multi-session contract, not one giant always-growing work thread
-- [ ] Reintroduce task-progress management through board/grouping semantics rather than a separate Progress summary object; keep the owner-facing surface single-layer and session-first unless lived use proves otherwise
+- [ ] Clarify the session-first owner main flow without making `Board` the planning anchor — hide or remove the current board temporarily if it constrains better interaction ideas
+- [ ] Multi-session fan-out from one owner turn — let a manager/control session intentionally spawn several focused parallel sessions, keep hierarchy light, and rely on concise aggregation plus session-level navigation rather than heavy parent-side handoff UI
+- [ ] Cross-session context freshness — let a new or sibling session pick up recent relevant context from adjacent work without requiring the user to restate everything, while keeping imports bounded and inspectable
+- [ ] Context carry/cache confirmation — validate and tune compaction, prepared fork context, summary/refs reuse, and any cross-session handoff packet so session-first multi-session flows stay fast and bounded
+- [ ] Expose AI-controlled session presentation (`title`, `group`, `description`) via session APIs, then validate the AI-owned session-list / inbox UX before deciding whether a richer board should return
+- [ ] Universal control inbox / dispatcher session — a default high-trust intake surface layered on top of the session-first + multi-session contract, not one giant always-growing work thread
+- [ ] Revisit board/grouping/task-like workflow surfaces only after the main flow and cross-session context contract feel real; keep the owner-facing surface single-layer and session-first unless lived use proves otherwise
 - [ ] Skills framework (file storage + loading mechanism)
 - [ ] Provider registry abstraction — open model selection, local JS/JSON provider config, no more Claude/Codex-only model wiring
 - [ ] Provider management UX — setup/settings should support preset enablement, simple GUI JSON providers, and advanced code mode
@@ -258,8 +259,8 @@ Current operating rule: prefer capability-first shipping slices that validate th
 | Documentation Map | `docs/README.md` | Repo doc taxonomy: what lives in `docs/` vs `notes/` |
 | Notes Map | `notes/README.md` | Note taxonomy: `current` vs `directional` vs `archive` vs `local` |
 | Project Architecture | `docs/project-architecture.md` | Top-down map of the shipped system, code locations, runtime flows, and current-vs-direction split |
-| Capability-First Shipping Plan | `notes/current/capability-first-shipping-plan.md` | Current near-term product-shape note for board, multi-session fan-out, and context-carry validation |
-| Board + Fan-Out Next Push | `notes/current/board-fanout-next-push.md` | Concrete execution pack for the next shipped product slice |
+| Capability-First Shipping Plan | `notes/current/capability-first-shipping-plan.md` | Current near-term product-shape note for session-first main flow, multi-session fan-out, and bounded context freshness |
+| Session Main Flow + Context Freshness Next Push | `notes/current/session-main-flow-next-push.md` | Concrete execution pack for the current post-board product slice |
 | Core Domain Contract | `notes/current/core-domain-contract.md` | Current domain/refactor baseline when deciding which product objects are canonical |
 | Product Surface Lifecycle | `notes/current/product-surface-lifecycle.md` | Current rule for keep/iterate/retire decisions on shipped feature surfaces |
 | External Message Protocol | `docs/external-message-protocol.md` | Canonical connector contract for email/GitHub/bot integrations using sessions, messages, runs, and events |

@@ -1,8 +1,8 @@
 # Board + Fan-Out Next Push
 
-Status: active execution pack as of 2026-03-17
+Status: archived board-first execution hypothesis from 2026-03-17
 
-Companion note: `notes/current/capability-first-shipping-plan.md`
+Superseded by `notes/current/session-main-flow-next-push.md` and `notes/current/capability-first-shipping-plan.md` as of 2026-03-18.
 
 ## One-line goal
 
