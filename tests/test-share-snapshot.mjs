@@ -16,6 +16,10 @@ const base = `http://127.0.0.1:${port}`;
 
 let server = null;
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function request(method, path, { body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, base);
@@ -104,6 +108,15 @@ async function main() {
   assert.strictEqual(createRes.status, 201, 'session creation should succeed');
   const session = JSON.parse(createRes.body).session;
   assert.ok(session?.id, 'session id should exist');
+
+  const renameRes = await request('PATCH', `/api/sessions/${session.id}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ name: 'Share preview title' }),
+  });
+  assert.strictEqual(renameRes.status, 200, 'session rename should succeed');
 
   const historyDir = join(configDir, 'chat-history', session.id);
   mkdirSync(join(historyDir, 'events'), { recursive: true });
@@ -239,6 +252,13 @@ async function main() {
   assert.match(publicShareRes.body, /<meta name="color-scheme" content="light dark">/);
   assert.match(publicShareRes.body, /<meta name="theme-color" content="#ffffff" media="\(prefers-color-scheme: light\)">/);
   assert.match(publicShareRes.body, /<meta name="theme-color" content="#1e1e1e" media="\(prefers-color-scheme: dark\)">/);
+  assert.match(publicShareRes.body, /<title>Share preview title · Shared Snapshot<\/title>/, 'share page title should expose the shared session name');
+  assert.match(publicShareRes.body, /<meta name="description" content="A read-only RemoteLab conversation snapshot\.">/, 'share page should expose a generic preview description');
+  assert.match(publicShareRes.body, /<meta property="og:title" content="Share preview title">/, 'share page should expose an OG title for previews');
+  assert.match(publicShareRes.body, /<meta property="og:description" content="A read-only RemoteLab conversation snapshot\.">/, 'share page should expose an OG description for previews');
+  assert.match(publicShareRes.body, new RegExp(`<meta property="og:url" content="${escapeRegex(`${base}${sharePayload.share.url}`)}">`), 'share page should expose an absolute OG URL for previews');
+  assert.match(publicShareRes.body, /<meta name="twitter:card" content="summary">/, 'share page should expose a compact twitter preview card');
+  assert.match(publicShareRes.body, /<meta name="twitter:title" content="Share preview title">/, 'share page should mirror the preview title for twitter cards');
   assert.match(publicShareRes.body, /@media \(prefers-color-scheme: dark\)/);
   assert.match(publicShareRes.body, /\/favicon\.ico\?v=/, 'share page should fingerprint icon URLs for immutable caching');
   assert.match(publicShareRes.body, /\/icon\.svg\?v=/, 'share page should fingerprint svg icon URLs for immutable caching');

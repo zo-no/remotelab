@@ -75,7 +75,7 @@ import { createShareSnapshot, getShareAsset, getShareSnapshot } from './shares.m
 import { createSessionDetail, createSessionListItem } from './session-api-shapes.mjs';
 import { buildEventBlockEvents, buildSessionDisplayEvents } from './session-display-events.mjs';
 import { parseSessionGetRoute } from './session-route-utils.mjs';
-import { readBody } from '../lib/utils.mjs';
+import { escapeHtml, readBody } from '../lib/utils.mjs';
 import {
   getClientIp, isRateLimited, recordFailedAttempt, clearFailedAttempts,
   setSecurityHeaders, generateNonce, requireAuth,
@@ -339,6 +339,8 @@ function renderPageTemplate(template, nonce, replacements = {}) {
     BUILD_LABEL: BUILD_INFO.label,
     BUILD_TITLE: BUILD_INFO.title,
     BUILD_JSON: serializeJsonForScript(BUILD_INFO),
+    PAGE_TITLE: 'RemoteLab Chat',
+    PAGE_HEAD_TAGS: '',
     BODY_CLASS: '',
     BOOTSTRAP_JSON: serializeJsonForScript({ auth: null }),
     EXTRA_BOOTSTRAP_SCRIPTS: '',
@@ -351,7 +353,7 @@ function renderPageTemplate(template, nonce, replacements = {}) {
     ].join('\n');
   }
   return Object.entries(merged).reduce(
-    (output, [key, value]) => output.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value ?? '')),
+    (output, [key, value]) => output.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), () => String(value ?? '')),
     template,
   );
 }
@@ -861,7 +863,61 @@ function buildShareSnapshotClientPayload(snapshot) {
   };
 }
 
+function normalizePageText(value, fallback = '') {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized || fallback;
+}
+
+function getRequestOrigin(req) {
+  const forwardedProto = typeof req?.headers?.['x-forwarded-proto'] === 'string'
+    ? req.headers['x-forwarded-proto'].split(',')[0].trim().toLowerCase()
+    : '';
+  const protocol = forwardedProto === 'http' || forwardedProto === 'https'
+    ? forwardedProto
+    : (req.socket?.encrypted ? 'https' : 'http');
+  const forwardedHost = typeof req?.headers?.['x-forwarded-host'] === 'string'
+    ? req.headers['x-forwarded-host'].split(',')[0].trim()
+    : '';
+  const host = forwardedHost || (typeof req?.headers?.host === 'string' ? req.headers.host.trim() : '');
+  return host ? `${protocol}://${host}` : '';
+}
+
+function getShareSnapshotPageDisplayName(snapshot) {
+  const sessionName = normalizePageText(snapshot?.session?.name);
+  if (sessionName) return sessionName;
+  const toolName = normalizePageText(snapshot?.session?.tool);
+  if (toolName) return toolName;
+  return 'Shared Snapshot';
+}
+
+function buildShareSnapshotPageReplacements(req, shareId, snapshot) {
+  const displayName = getShareSnapshotPageDisplayName(snapshot);
+  const pageTitle = `${displayName} · Shared Snapshot`;
+  const description = 'A read-only RemoteLab conversation snapshot.';
+  const origin = getRequestOrigin(req);
+  const shareUrl = origin ? `${origin}/share/${encodeURIComponent(shareId)}` : '';
+  const escapedDisplayName = escapeHtml(displayName);
+  const escapedDescription = escapeHtml(description);
+  const escapedShareUrl = shareUrl ? escapeHtml(shareUrl) : '';
+  return {
+    PAGE_TITLE: escapeHtml(pageTitle),
+    PAGE_HEAD_TAGS: [
+      `<meta name="description" content="${escapedDescription}">`,
+      `<meta property="og:type" content="website">`,
+      `<meta property="og:site_name" content="RemoteLab">`,
+      `<meta property="og:title" content="${escapedDisplayName}">`,
+      `<meta property="og:description" content="${escapedDescription}">`,
+      escapedShareUrl ? `<meta property="og:url" content="${escapedShareUrl}">` : '',
+      `<meta name="twitter:card" content="summary">`,
+      `<meta name="twitter:title" content="${escapedDisplayName}">`,
+      `<meta name="twitter:description" content="${escapedDescription}">`,
+    ].filter(Boolean).join('\n'),
+  };
+}
+
 async function writeSnapshotPage(req, res, shareId, {
+  snapshot = null,
   cacheControl,
   headers = {},
   failureText = 'Failed to load snapshot page',
@@ -873,6 +929,7 @@ async function writeSnapshotPage(req, res, shareId, {
     const sharePage = await readFile(chatTemplatePath, 'utf8');
     const body = renderPageTemplate(sharePage, pageNonce, {
       ...buildTemplateReplacements(pageBuildInfo),
+      ...(snapshot ? buildShareSnapshotPageReplacements(req, shareId, snapshot) : {}),
       BODY_CLASS: 'visitor-mode share-snapshot-mode',
       BOOTSTRAP_SCRIPT_TAGS: `<script src="/share-payload/${shareId}.js"></script>`,
     });
@@ -1181,6 +1238,7 @@ export async function handleRequest(req, res) {
       return;
     }
     await writeSnapshotPage(req, res, shareId, {
+      snapshot,
       cacheControl: SHARE_RESOURCE_CACHE_CONTROL,
       failureText: 'Failed to load share page',
     });
