@@ -31,8 +31,21 @@ Those are product surfaces, not independent storage authorities.
 For the current discovery phase:
 
 - Do not let the shipped `Board` implementation define the main product shape while the owner interaction is still being discovered.
-- It is acceptable to hide or remove the current board temporarily if that helps the team think more clearly about the ideal session-first flow.
+- The current `Board` surface should be removed from the active owner flow instead of being kept around as a half-live planning constraint.
 - If `Board` returns later, it should return as a derived projection over sessions, not as the object that justifies the workflow model.
+
+This means the current board implementation is not something to refine in place during this phase. It is something to delete so the next interaction model can be designed more honestly from the session-first core.
+
+---
+
+## Board Removal Consequence
+
+For the next product iteration:
+
+- do not preserve `Board` just to avoid losing a familiar UI surface
+- do not let card/column vocabulary steer the main interaction model
+- do not treat board regressions as the central product risk during this rewrite
+- do use the session-first foundation to design the owner flow again from first principles
 
 ---
 

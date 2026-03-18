@@ -8,19 +8,19 @@ Historical board-first hypothesis: `notes/archive/board-fanout-next-push.md`
 
 ## One-line goal
 
-- Make the next push feel like an AI collaborator that can keep work coherent across multiple sessions, not like a board-shaped shell around chats.
+- Delete the shipped `Board` surface and make the next push feel like an AI collaborator that keeps work coherent across multiple sessions, not like a board-shaped shell around chats.
 
 ## Product shape for the next push
 
-- The owner can operate RemoteLab cleanly from session-first surfaces even if `Board` is hidden or removed for now.
+- The owner can operate RemoteLab cleanly from session-first surfaces after the shipped `Board` surface is removed.
 - One manager/control session can take a single user request and fan it out into several focused parallel sessions when useful.
 - A new or sibling session can pick up recent relevant context learned elsewhere so the user does not need to restate everything in every chat.
 - Imported context stays bounded and inspectable; prefer summaries, refs, and explicit continuation packets over replaying entire transcripts.
-- Sessions remain the canonical durable object; richer workflow surfaces stay derived and optional.
+- Sessions remain the canonical durable object; any richer workflow surface must be re-earned later as a derived optional layer.
 
 ## Demo we should be able to show
 
-1. Open RemoteLab without depending on `Board` as the landing surface.
+1. Open RemoteLab after `Board` has been removed from the active owner flow.
 2. Start or continue from a main session, session list, or lightweight dispatcher-style surface.
 3. Ask something that assumes recent context from another session, such as “continue the approach we just settled elsewhere and split it into three parallel tasks”.
 4. The system can either pull the right recent context automatically or make the linkage explicit in a lightweight way.
@@ -47,17 +47,17 @@ Historical board-first hypothesis: `notes/archive/board-fanout-next-push.md`
 
 ## Concrete slices
 
-### Slice 1 — session-first main flow without board lock-in
+### Slice 1 — remove board and reset the session-first main flow
 
 **Outcome**
 
-- The product can be evaluated without assuming `Board` is the primary orchestration surface.
+- The product can be evaluated after deleting the current `Board` surface instead of iterating inside it.
 
 **Product rules**
 
-- Session list, active session, or lightweight dispatcher surfaces are acceptable defaults; board is optional.
-- Do not let board-only affordances become required for everyday operation.
-- If a UI element only exists to serve board-centric thinking, it can be removed or de-emphasized for this slice.
+- Session list, active session, or lightweight dispatcher surfaces are acceptable defaults; the shipped board is gone.
+- Do not let board-only affordances survive as hidden dependencies for everyday operation.
+- If a UI element only exists to serve board-centric thinking, remove it rather than preserving it as a latent constraint.
 
 **Main files**
 
@@ -68,8 +68,8 @@ Historical board-first hypothesis: `notes/archive/board-fanout-next-push.md`
 
 **Acceptance**
 
-- The owner can navigate and operate the main flow without `Board`.
-- Removing or hiding the current board does not break core orchestration.
+- The owner can navigate and operate the main flow after `Board` is removed.
+- Deleting the current board does not break core orchestration.
 - The interaction model feels clearer, not more constrained.
 
 ### Slice 2 — cross-session context freshness contract
@@ -180,13 +180,13 @@ Historical board-first hypothesis: `notes/archive/board-fanout-next-push.md`
 
 - No separate `Task` object this push.
 - No heavyweight persistent parent/child graph this push.
-- No assumption that `Board` must be the landing surface.
+- `Board` is removed from the active owner flow for this push.
 - Prefer conservative, inspectable context imports over magical always-on sharing.
 - `Control Inbox` stays a follow-on layer built on top of the session-first + multi-session contract, not a prerequisite.
 
 ## Push gate
 
-- The owner flow is coherent without depending on `Board` as the default surface.
+- The owner flow is coherent after deleting `Board` from the active surface.
 - Cross-session context freshness is demoable in a bounded, inspectable way.
 - One-turn multi-session fan-out is demoable end to end.
 - Final aggregation is reliable without requiring heavy parent-side handoff UI.

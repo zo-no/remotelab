@@ -228,13 +228,13 @@ Current operating rule: prefer capability-first shipping slices that validate th
 - [x] Web push notifications
 
 ### P1 — Next Up
-- [ ] Clarify the session-first owner main flow without making `Board` the planning anchor — hide or remove the current board temporarily if it constrains better interaction ideas
+- [ ] Remove the current `Board` product surface from the active owner flow and rewrite the session-first main flow from scratch instead of iterating inside board constraints
 - [ ] Multi-session fan-out from one owner turn — let a manager/control session intentionally spawn several focused parallel sessions, keep hierarchy light, and rely on concise aggregation plus session-level navigation rather than heavy parent-side handoff UI
 - [ ] Cross-session context freshness — let a new or sibling session pick up recent relevant context from adjacent work without requiring the user to restate everything, while keeping imports bounded and inspectable
 - [ ] Context carry/cache confirmation — validate and tune compaction, prepared fork context, summary/refs reuse, and any cross-session handoff packet so session-first multi-session flows stay fast and bounded
-- [ ] Expose AI-controlled session presentation (`title`, `group`, `description`) via session APIs, then validate the AI-owned session-list / inbox UX before deciding whether a richer board should return
+- [ ] Expose AI-controlled session presentation (`title`, `group`, `description`) via session APIs, then validate the AI-owned session-list / inbox UX as the primary owner surface after board removal
 - [ ] Universal control inbox / dispatcher session — a default high-trust intake surface layered on top of the session-first + multi-session contract, not one giant always-growing work thread
-- [ ] Revisit board/grouping/task-like workflow surfaces only after the main flow and cross-session context contract feel real; keep the owner-facing surface single-layer and session-first unless lived use proves otherwise
+- [ ] Revisit board/grouping/task-like workflow surfaces only if the rewritten main flow later proves a board-like view is truly needed; keep the owner-facing surface single-layer and session-first unless lived use disproves that default
 - [ ] Skills framework (file storage + loading mechanism)
 - [ ] Provider registry abstraction — open model selection, local JS/JSON provider config, no more Claude/Codex-only model wiring
 - [ ] Provider management UX — setup/settings should support preset enablement, simple GUI JSON providers, and advanced code mode
@@ -259,6 +259,7 @@ Current operating rule: prefer capability-first shipping slices that validate th
 | Documentation Map | `docs/README.md` | Repo doc taxonomy: what lives in `docs/` vs `notes/` |
 | Notes Map | `notes/README.md` | Note taxonomy: `current` vs `directional` vs `archive` vs `local` |
 | Project Architecture | `docs/project-architecture.md` | Top-down map of the shipped system, code locations, runtime flows, and current-vs-direction split |
+| Remove Board + Rewrite Main Flow | `notes/current/remove-board-and-rewrite-main-flow.md` | Current decision record for deleting the shipped board surface and restarting main-flow design from a session-first baseline |
 | Capability-First Shipping Plan | `notes/current/capability-first-shipping-plan.md` | Current near-term product-shape note for session-first main flow, multi-session fan-out, and bounded context freshness |
 | Session Main Flow + Context Freshness Next Push | `notes/current/session-main-flow-next-push.md` | Concrete execution pack for the current post-board product slice |
 | Core Domain Contract | `notes/current/core-domain-contract.md` | Current domain/refactor baseline when deciding which product objects are canonical |
