@@ -139,44 +139,6 @@ function initializePushNotifications() {
 
 registerHiddenMarkdownExtensions();
 
-function normalizeSidebarTab(tab) {
-  if (tab === "board" || tab === "progress") return "board";
-  if (tab === "settings") return "settings";
-  return "sessions";
-}
-
-function normalizeNavigationState(raw) {
-  let sessionId = null;
-  let tab = null;
-
-  if (raw && typeof raw === "object") {
-    if (typeof raw.sessionId === "string") sessionId = raw.sessionId;
-    if (typeof raw.tab === "string") tab = raw.tab;
-    if (raw.url) {
-      try {
-        const url = new URL(raw.url, window.location.origin);
-        if (!sessionId) sessionId = url.searchParams.get("session") || null;
-        if (!tab) tab = url.searchParams.get("tab") || null;
-      } catch {}
-    }
-  }
-
-  return {
-    sessionId:
-      typeof sessionId === "string" && sessionId.trim()
-        ? sessionId.trim()
-        : null,
-    tab: tab ? normalizeSidebarTab(tab) : null,
-  };
-}
-
-function readNavigationStateFromLocation() {
-  return normalizeNavigationState({
-    sessionId: new URLSearchParams(window.location.search).get("session"),
-    tab: new URLSearchParams(window.location.search).get("tab"),
-  });
-}
-
 function persistActiveSessionId(sessionId) {
   if (visitorMode) return;
   if (sessionId) {

@@ -14,12 +14,6 @@ function openSessionsSidebar() {
   return true;
 }
 
-const CREATE_APP_TEMPLATE_APP_ID = "app_create_app";
-const BASIC_CHAT_TEMPLATE_APP_ID = "app_basic_chat";
-
-  }
-}
-
 function createNewSessionShortcut({ closeSidebar = true } = {}) {
   const principal = resolveSelectedSessionPrincipal();
   const appId = resolveAppIdForPrincipal(principal, activeSessionAppFilter);

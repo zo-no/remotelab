@@ -842,3 +842,5 @@ function renderSettingsUsersPanel() {
 
     card.appendChild(actions);
     settingsUsersList.appendChild(card);
+  }
+}

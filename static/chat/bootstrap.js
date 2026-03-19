@@ -286,11 +286,52 @@ const ADMIN_USER_FILTER_VALUE = "user_admin";
 const USER_FILTER_ALL_VALUE = "__all_users__";
 const DEFAULT_APP_ID = "chat";
 const BASIC_CHAT_APP_ID = "app_basic_chat";
+const BASIC_CHAT_TEMPLATE_APP_ID = BASIC_CHAT_APP_ID;
+const CREATE_APP_TEMPLATE_APP_ID = "app_create_app";
 const DEFAULT_APP_NAME = "Chat";
 const sessionStateModel = window.RemoteLabSessionStateModel;
 if (!sessionStateModel) {
   throw new Error("RemoteLabSessionStateModel must load before bootstrap.js");
 }
+
+function normalizeSidebarTab(tab) {
+  if (tab === "board" || tab === "progress") return "board";
+  if (tab === "settings") return "settings";
+  return "sessions";
+}
+
+function normalizeNavigationState(raw) {
+  let sessionId = null;
+  let tab = null;
+
+  if (raw && typeof raw === "object") {
+    if (typeof raw.sessionId === "string") sessionId = raw.sessionId;
+    if (typeof raw.tab === "string") tab = raw.tab;
+    if (raw.url) {
+      try {
+        const url = new URL(raw.url, window.location.origin);
+        if (!sessionId) sessionId = url.searchParams.get("session") || null;
+        if (!tab) tab = url.searchParams.get("tab") || null;
+      } catch {}
+    }
+  }
+
+  return {
+    sessionId:
+      typeof sessionId === "string" && sessionId.trim()
+        ? sessionId.trim()
+        : null,
+    tab: tab ? normalizeSidebarTab(tab) : null,
+  };
+}
+
+function readNavigationStateFromLocation() {
+  return normalizeNavigationState({
+    sessionId: new URLSearchParams(window.location.search).get("session"),
+    tab: new URLSearchParams(window.location.search).get("tab"),
+  });
+}
+
 let pendingNavigationState = readNavigationStateFromLocation();
 let currentSessionId =
   pendingNavigationState.sessionId ||
@@ -516,4 +557,3 @@ function setLocalSessionReviewedAt(sessionId, stamp) {
 
   return normalized || "";
 }
-
