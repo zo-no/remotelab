@@ -82,7 +82,6 @@ writeFileSync(
 
 process.env.HOME = tempHome;
 process.env.PATH = `${tempBin}:${process.env.PATH}`;
-process.env.REMOTELAB_REPLY_SELF_CHECK = 'all';
 
 const sessionManager = await import(
   pathToFileURL(join(repoRoot, 'chat', 'session-manager.mjs')).href

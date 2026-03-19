@@ -1529,7 +1529,7 @@ function parseJsonObjectText(modelText) {
 
 function normalizeReplySelfCheckSetting(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  if (!normalized) return 'micro-agent';
+  if (!normalized) return 'all';
   if (['0', 'false', 'off', 'disabled', 'disable', 'none'].includes(normalized)) {
     return 'off';
   }
