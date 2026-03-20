@@ -6,8 +6,11 @@ const voiceInputStatus = document.getElementById("voiceInputStatus");
 const voiceSettingsMount = document.getElementById("voiceSettingsMount");
 
 const VOICE_INPUT_PREFS_KEY = "voiceInputPrefs";
-const VOICE_INPUT_PREFS_VERSION = 2;
+const VOICE_INPUT_PREFS_VERSION = 3;
+const VOICE_CAPTURE_MODE_BROWSER_DIRECT = "browser-direct";
+const VOICE_CAPTURE_MODE_SERVER_RELAY = "server-relay";
 const DEFAULT_VOICE_INPUT_PREFS = Object.freeze({
+  captureMode: VOICE_CAPTURE_MODE_BROWSER_DIRECT,
   attachOriginalAudio: false,
   autoSend: true,
   rewriteWithContext: true,
@@ -26,6 +29,7 @@ const voiceState = {
   timerId: 0,
   statusTimerId: 0,
   live: null,
+  browserRecognition: null,
   composerPreview: null,
 };
 
@@ -41,9 +45,19 @@ const scheduleInterval =
 const cancelInterval =
   (typeof window !== "undefined" && typeof window.clearInterval === "function" && window.clearInterval.bind(window))
   || (typeof globalThis.clearInterval === "function" && globalThis.clearInterval.bind(globalThis));
+const SpeechRecognitionCtor =
+  (typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition))
+  || null;
+
+function normalizeVoiceCaptureMode(value) {
+  return value === VOICE_CAPTURE_MODE_SERVER_RELAY
+    ? VOICE_CAPTURE_MODE_SERVER_RELAY
+    : VOICE_CAPTURE_MODE_BROWSER_DIRECT;
+}
 
 function normalizeVoiceInputPrefs(raw = {}) {
   return {
+    captureMode: normalizeVoiceCaptureMode(raw?.captureMode),
     attachOriginalAudio: raw?.attachOriginalAudio === true,
     autoSend: raw?.autoSend !== false,
     rewriteWithContext: raw?.rewriteWithContext !== false,
@@ -215,14 +229,39 @@ function isOwnerView() {
   return pageBootstrap?.auth?.role !== "visitor";
 }
 
+function supportsBrowserDirectVoiceInput() {
+  return typeof SpeechRecognitionCtor === "function";
+}
+
+function canUseServerRelayVoiceInput() {
+  return !!voiceState.config?.enabled && !!voiceState.config?.configured;
+}
+
+function resolveVoiceCaptureMode(prefs = readVoiceInputPrefs()) {
+  const requestedMode = normalizeVoiceCaptureMode(prefs?.captureMode);
+  if (requestedMode === VOICE_CAPTURE_MODE_BROWSER_DIRECT && supportsBrowserDirectVoiceInput()) {
+    return VOICE_CAPTURE_MODE_BROWSER_DIRECT;
+  }
+  if (canUseServerRelayVoiceInput()) {
+    return VOICE_CAPTURE_MODE_SERVER_RELAY;
+  }
+  if (supportsBrowserDirectVoiceInput()) {
+    return VOICE_CAPTURE_MODE_BROWSER_DIRECT;
+  }
+  return VOICE_CAPTURE_MODE_SERVER_RELAY;
+}
+
 function canUseVoiceInput() {
-  return !!voiceState.config?.enabled
-    && !!voiceState.config?.configured
-    && !(typeof shareSnapshotMode !== "undefined" && shareSnapshotMode);
+  return voiceState.config?.enabled !== false
+    && !(typeof shareSnapshotMode !== "undefined" && shareSnapshotMode)
+    && (supportsBrowserDirectVoiceInput() || canUseServerRelayVoiceInput());
 }
 
 function syncVoiceInputButton() {
   if (!voiceInputBtn) return;
+  const browserAvailable = supportsBrowserDirectVoiceInput();
+  const relayAvailable = canUseServerRelayVoiceInput();
+  const captureMode = resolveVoiceCaptureMode();
   const disabled = voiceState.busy
     || (!voiceState.recording && !canUseVoiceInput());
   voiceInputBtn.disabled = !!disabled;
@@ -239,13 +278,22 @@ function syncVoiceInputButton() {
     voiceInputBtn.setAttribute("aria-label", "Transcribing voice");
     return;
   }
-  if (!voiceState.config?.configured) {
-    voiceInputBtn.title = isOwnerView() ? "Configure voice input in Settings" : "Voice input is unavailable";
+  if (voiceState.config?.enabled === false) {
+    voiceInputBtn.title = "Voice input is turned off in Settings";
     voiceInputBtn.setAttribute("aria-label", voiceInputBtn.title);
     return;
   }
-  if (!voiceState.config?.enabled) {
-    voiceInputBtn.title = "Voice input is turned off in Settings";
+  if (browserAvailable || relayAvailable) {
+    voiceInputBtn.title = captureMode === VOICE_CAPTURE_MODE_BROWSER_DIRECT
+      ? "Record voice in the browser"
+      : "Record voice";
+    voiceInputBtn.setAttribute("aria-label", voiceInputBtn.title);
+    return;
+  }
+  if (!voiceState.config?.configured) {
+    voiceInputBtn.title = isOwnerView()
+      ? "Configure relay voice input or use a browser with built-in speech recognition"
+      : "Voice input is unavailable";
     voiceInputBtn.setAttribute("aria-label", voiceInputBtn.title);
     return;
   }
@@ -354,6 +402,201 @@ function queueVoiceAttachment(attachment) {
     renderImagePreviews();
   }
   return true;
+}
+
+function normalizeBrowserDirectTranscript(parts = []) {
+  return parts
+    .map((part) => (typeof part === "string" ? part : ""))
+    .join("")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n\s+/g, "\n")
+    .trim();
+}
+
+function buildBrowserDirectPreviewText(state, { includeInterim = true } = {}) {
+  if (!state || typeof state !== "object") return "";
+  return normalizeBrowserDirectTranscript([
+    state.committedTranscript,
+    state.sessionFinalTranscript,
+    includeInterim ? state.sessionInterimTranscript : "",
+  ]);
+}
+
+function mapBrowserDirectRecognitionError(code = "") {
+  switch (String(code || "")) {
+    case "not-allowed":
+      return "浏览器没有拿到麦克风权限。";
+    case "service-not-allowed":
+      return "当前浏览器不允许直接语音识别服务。";
+    case "audio-capture":
+      return "当前浏览器拿不到可用的麦克风。";
+    case "network":
+      return "浏览器直连语音识别网络失败。";
+    case "language-not-supported":
+      return "当前浏览器不支持这个语音识别语言。";
+    default:
+      return "";
+  }
+}
+
+function finalizeBrowserDirectRecognition(state, options = {}) {
+  if (!state || state.finalized) return;
+  state.finalized = true;
+  cancelTimeout?.(state.restartTimerId);
+  state.resolveFinal?.({
+    transcript: buildBrowserDirectPreviewText(state, {
+      includeInterim: options.includeInterim !== false,
+    }),
+    streamFailed: options.streamFailed === true,
+    error: typeof options.error === "string" ? options.error : "",
+    mode: VOICE_CAPTURE_MODE_BROWSER_DIRECT,
+  });
+}
+
+async function cleanupBrowserDirectRecognition() {
+  const state = voiceState.browserRecognition;
+  voiceState.browserRecognition = null;
+  if (!state) return;
+  cancelTimeout?.(state.restartTimerId);
+  const recognition = state.recognition;
+  if (!recognition) return;
+  try {
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+  } catch {}
+}
+
+async function startBrowserDirectRecognition() {
+  if (!supportsBrowserDirectVoiceInput()) {
+    throw new Error("当前浏览器不支持前端直跑语音识别。",
+    );
+  }
+  const recognition = new SpeechRecognitionCtor();
+  const state = {
+    recognition,
+    committedTranscript: "",
+    sessionFinalTranscript: "",
+    sessionInterimTranscript: "",
+    stopRequested: false,
+    finalized: false,
+    restartTimerId: 0,
+    lastError: "",
+    finalPromise: null,
+    resolveFinal: null,
+  };
+  state.finalPromise = new Promise((resolve) => {
+    state.resolveFinal = resolve;
+  });
+  voiceState.browserRecognition = state;
+
+  recognition.lang = voiceState.config?.language || "zh-CN";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onresult = (event) => {
+    const sessionFinal = [];
+    const sessionInterim = [];
+    for (const result of Array.from(event?.results || [])) {
+      const text = typeof result?.[0]?.transcript === "string" ? result[0].transcript : "";
+      if (!text) continue;
+      if (result.isFinal) {
+        sessionFinal.push(text);
+      } else {
+        sessionInterim.push(text);
+      }
+    }
+    state.sessionFinalTranscript = normalizeBrowserDirectTranscript(sessionFinal);
+    state.sessionInterimTranscript = normalizeBrowserDirectTranscript(sessionInterim);
+    updateVoiceComposerPreview(buildBrowserDirectPreviewText(state));
+  };
+
+  recognition.onerror = (event) => {
+    const message = mapBrowserDirectRecognitionError(event?.error);
+    if (message) {
+      state.lastError = message;
+    }
+    if (["not-allowed", "service-not-allowed", "audio-capture"].includes(String(event?.error || ""))) {
+      state.stopRequested = true;
+    }
+  };
+
+  recognition.onend = () => {
+    state.committedTranscript = normalizeBrowserDirectTranscript([
+      state.committedTranscript,
+      state.sessionFinalTranscript,
+    ]);
+    state.sessionFinalTranscript = "";
+
+    if (state.stopRequested || !voiceState.recording) {
+      finalizeBrowserDirectRecognition(state, {
+        streamFailed: !buildBrowserDirectPreviewText(state) && !!state.lastError,
+        error: state.lastError,
+        includeInterim: true,
+      });
+      return;
+    }
+
+    state.sessionInterimTranscript = "";
+    state.restartTimerId = scheduleTimeout?.(() => {
+      try {
+        recognition.start();
+      } catch (error) {
+        state.lastError = error?.message || "浏览器语音识别重启失败。";
+        state.stopRequested = true;
+        finalizeBrowserDirectRecognition(state, {
+          streamFailed: !buildBrowserDirectPreviewText(state),
+          error: state.lastError,
+          includeInterim: true,
+        });
+      }
+    }, 140);
+  };
+
+  recognition.start();
+  return state;
+}
+
+function requestBrowserDirectRecognitionStop() {
+  const state = voiceState.browserRecognition;
+  if (!state) return;
+  state.stopRequested = true;
+  cancelTimeout?.(state.restartTimerId);
+  try {
+    state.recognition.stop();
+  } catch {
+    finalizeBrowserDirectRecognition(state, {
+      streamFailed: false,
+      includeInterim: true,
+    });
+  }
+}
+
+async function waitForBrowserDirectRecognitionResult(timeoutMs = 2200) {
+  const state = voiceState.browserRecognition;
+  if (!state?.finalPromise) {
+    return { transcript: "", streamFailed: true, skipped: "not_started" };
+  }
+  try {
+    return await Promise.race([
+      state.finalPromise,
+      new Promise((resolve) => {
+        scheduleTimeout?.(() => {
+          resolve({
+            transcript: buildBrowserDirectPreviewText(state, { includeInterim: true }),
+            streamFailed: true,
+            timedOut: true,
+            error: state.lastError || "",
+            mode: VOICE_CAPTURE_MODE_BROWSER_DIRECT,
+          });
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    await cleanupBrowserDirectRecognition();
+  }
 }
 
 function disconnectLiveVoiceAudio(live) {
@@ -634,27 +877,7 @@ async function submitVoiceAudio(file, options = {}) {
   }
 }
 
-async function stopVoiceRecording() {
-  if (!voiceState.recorder || voiceState.recorder.state === "inactive") return;
-  requestLiveVoicePreviewStop();
-  setVoiceInputStatus("正在结束录音…", { persist: true });
-  voiceState.recorder.stop();
-}
-
-async function startVoiceRecording() {
-  if (!canUseVoiceInput()) {
-    if (isOwnerView() && typeof switchTab === "function") {
-      switchTab("settings");
-      setVoiceInputStatus("先在 Settings 里配好语音输入。", { error: true });
-      return;
-    }
-    setVoiceInputStatus("语音输入当前不可用。", { error: true });
-    return;
-  }
-  if (!currentSessionId) {
-    setVoiceInputStatus("先打开一个会话，再开始录音。", { error: true });
-    return;
-  }
+async function startServerRelayVoiceRecording() {
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
     voiceFileInput?.click();
     return;
@@ -708,6 +931,77 @@ async function startVoiceRecording() {
   }
 }
 
+async function startBrowserDirectVoiceRecording() {
+  startVoiceComposerPreview();
+  voiceState.recording = true;
+  syncVoiceInputButton();
+  startVoiceInputClock();
+  try {
+    await startBrowserDirectRecognition();
+  } catch (error) {
+    await cleanupBrowserDirectRecognition();
+    clearVoiceComposerPreview();
+    resetVoiceRecorderState();
+    throw error;
+  }
+}
+
+async function stopVoiceRecording() {
+  if (voiceState.browserRecognition) {
+    requestBrowserDirectRecognitionStop();
+    setVoiceInputStatus("正在结束录音…", { persist: true });
+    const liveResult = await waitForBrowserDirectRecognitionResult();
+    resetVoiceRecorderState();
+    const providedTranscript = typeof liveResult?.transcript === "string" ? liveResult.transcript.trim() : "";
+    if (!providedTranscript) {
+      clearVoiceComposerPreview();
+      setVoiceInputStatus(liveResult?.error || "这次没有识别出文本。", { error: true });
+      return;
+    }
+    await submitVoiceAudio(null, { providedTranscript });
+    return;
+  }
+
+  if (!voiceState.recorder || voiceState.recorder.state === "inactive") return;
+  requestLiveVoicePreviewStop();
+  setVoiceInputStatus("正在结束录音…", { persist: true });
+  voiceState.recorder.stop();
+}
+
+async function startVoiceRecording() {
+  if (!canUseVoiceInput()) {
+    if (isOwnerView() && typeof switchTab === "function") {
+      switchTab("settings");
+      setVoiceInputStatus("先在 Settings 里开语音，或者换成支持浏览器直跑语音识别的浏览器。", { error: true });
+      return;
+    }
+    setVoiceInputStatus("语音输入当前不可用。", { error: true });
+    return;
+  }
+  if (!currentSessionId) {
+    setVoiceInputStatus("先打开一个会话，再开始录音。", { error: true });
+    return;
+  }
+
+  const captureMode = resolveVoiceCaptureMode();
+  if (captureMode === VOICE_CAPTURE_MODE_BROWSER_DIRECT && supportsBrowserDirectVoiceInput()) {
+    try {
+      await startBrowserDirectVoiceRecording();
+      return;
+    } catch (error) {
+      if (canUseServerRelayVoiceInput()) {
+        setVoiceInputStatus(error?.message || "浏览器直跑失败，回退到服务器 relay。", { error: true });
+        await startServerRelayVoiceRecording();
+        return;
+      }
+      setVoiceInputStatus(error?.message || "浏览器直跑语音识别启动失败。", { error: true });
+      return;
+    }
+  }
+
+  await startServerRelayVoiceRecording();
+}
+
 async function handleVoiceInputClick() {
   if (voiceState.busy) return;
   if (voiceState.recording) {
@@ -757,6 +1051,8 @@ function renderVoiceInputSettings() {
 
   const prefs = readVoiceInputPrefs();
   const config = voiceState.config || {};
+  const captureMode = resolveVoiceCaptureMode(prefs);
+  const browserDirectSupported = supportsBrowserDirectVoiceInput();
 
   const title = document.createElement("div");
   title.className = "settings-section-title";
@@ -764,7 +1060,7 @@ function renderVoiceInputSettings() {
 
   const note = document.createElement("div");
   note.className = "settings-section-note";
-  note.textContent = "Record on phone or desktop, stream interim text straight into the composer, clean it with persistent collaboration memory, and only keep raw audio when you explicitly want it.";
+  note.textContent = "Browser direct mode streams live text straight into the composer and only sends the final transcript back for cleanup after you stop. Server relay remains available as a fallback path.";
 
   const form = document.createElement("div");
   form.className = "settings-inline-form";
@@ -772,13 +1068,31 @@ function renderVoiceInputSettings() {
   const enableRow = document.createElement("div");
   enableRow.className = "settings-app-picker-grid";
   const enabledControl = createVoiceSettingsCheckbox("Enable voice input", config.enabled !== false);
-  const attachControl = createVoiceSettingsCheckbox("Attach original audio by default", prefs.attachOriginalAudio !== false);
+  const attachControl = createVoiceSettingsCheckbox("Attach original audio by default (server relay only)", prefs.attachOriginalAudio !== false);
   const autoSendControl = createVoiceSettingsCheckbox("Auto-send when transcript lands in an empty composer", prefs.autoSend === true);
   const rewriteControl = createVoiceSettingsCheckbox("Use persistent collaboration memory to clean up the transcript", prefs.rewriteWithContext !== false);
+  if (captureMode === VOICE_CAPTURE_MODE_BROWSER_DIRECT) {
+    attachControl.input.disabled = true;
+    attachControl.chip.title = "Browser direct mode currently sends text only. Switch to Server relay if you want to keep the raw audio attachment.";
+  }
   enableRow.appendChild(enabledControl.chip);
   enableRow.appendChild(attachControl.chip);
   enableRow.appendChild(autoSendControl.chip);
   enableRow.appendChild(rewriteControl.chip);
+
+  const modeInput = document.createElement("select");
+  modeInput.className = "settings-inline-input";
+  const browserModeOption = document.createElement("option");
+  browserModeOption.value = VOICE_CAPTURE_MODE_BROWSER_DIRECT;
+  browserModeOption.textContent = browserDirectSupported
+    ? "Browser direct (fastest)"
+    : "Browser direct (not supported in this browser)";
+  const relayModeOption = document.createElement("option");
+  relayModeOption.value = VOICE_CAPTURE_MODE_SERVER_RELAY;
+  relayModeOption.textContent = "Server relay (fallback)";
+  modeInput.appendChild(browserModeOption);
+  modeInput.appendChild(relayModeOption);
+  modeInput.value = normalizeVoiceCaptureMode(prefs.captureMode);
 
   const appIdInput = document.createElement("input");
   appIdInput.className = "settings-inline-input";
@@ -831,12 +1145,17 @@ function renderVoiceInputSettings() {
 
   const status = document.createElement("div");
   status.className = "settings-app-empty inline-status";
-  status.textContent = config.configured
-    ? `${config.providerLabel || "Provider"} is ready. Current model: ${config.modelLabel || "voice"}.`
-    : "Not configured yet. Save your provider details once, then the mic button becomes available in the composer.";
+  status.textContent = captureMode === VOICE_CAPTURE_MODE_BROWSER_DIRECT
+    ? (browserDirectSupported
+      ? "Browser direct mode is active. Live words stay in this browser while you speak, and only the final transcript goes back to RemoteLab after stop."
+      : "This browser does not expose a direct speech-recognition API, so the mic falls back to the server relay when available.")
+    : (config.configured
+      ? `${config.providerLabel || "Provider"} relay is ready. Current model: ${config.modelLabel || "voice"}.`
+      : "Server relay is not configured yet. Save provider details below if you want the fallback path or audio uploads.");
 
   saveBtn.addEventListener("click", async () => {
     const nextPrefs = writeVoiceInputPrefs({
+      captureMode: modeInput.value,
       attachOriginalAudio: attachControl.input.checked,
       autoSend: autoSendControl.input.checked,
       rewriteWithContext: rewriteControl.input.checked,
@@ -863,13 +1182,11 @@ function renderVoiceInputSettings() {
       });
       voiceState.config = data?.config || voiceState.config;
       accessKeyInput.value = "";
-      status.textContent = nextPrefs.rewriteWithContext
-        ? (nextPrefs.attachOriginalAudio
-          ? "Saved. New recordings use persistent collaboration memory to clean up the transcript and keep the original audio attached by default."
-          : "Saved. New recordings use persistent collaboration memory to clean up the transcript before inserting text.")
-        : (nextPrefs.attachOriginalAudio
-          ? "Saved. New recordings keep the original audio attached by default."
-          : "Saved. New recordings only insert transcript text by default.");
+      status.textContent = normalizeVoiceCaptureMode(nextPrefs.captureMode) === VOICE_CAPTURE_MODE_BROWSER_DIRECT
+        ? (browserDirectSupported
+          ? "Saved. New recordings now run live recognition in this browser first, then send only the final transcript back for cleanup."
+          : "Saved. Browser direct mode is selected, but this browser will still fall back to the server relay until it exposes native speech recognition.")
+        : "Saved. New recordings now use the server relay path for live captions and optional audio attachments.";
       syncVoiceInputButton();
       renderVoiceInputSettings();
     } catch (error) {
@@ -881,6 +1198,7 @@ function renderVoiceInputSettings() {
 
   actionRow.appendChild(saveBtn);
   form.appendChild(enableRow);
+  form.appendChild(modeInput);
   form.appendChild(appIdInput);
   form.appendChild(accessKeyInput);
   form.appendChild(resourceIdInput);
@@ -910,6 +1228,7 @@ voiceFileInput?.addEventListener("change", () => {
 window.addEventListener("beforeunload", () => {
   stopVoiceInputClock();
   stopVoiceTracks();
+  void cleanupBrowserDirectRecognition();
   void cleanupLiveVoicePreview();
 });
 
