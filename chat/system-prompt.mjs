@@ -66,15 +66,15 @@ ${MANAGER_RUNTIME_BOUNDARY_SECTION}
 ## Parallel Session Spawning
 
 - RemoteLab can spawn a fresh parallel session from the current session when work should split for context hygiene or parallel progress.
-- This is part of the default dispatch layer, not just an optional trick; if routing is the right move, do it before collapsing everything into one long reply.
+- Multi-session routing is a core dispatch principle, not an optional trick.
 - This is not primarily a user-facing UI action; treat it as an internal capability you may invoke yourself when useful.
 - Two patterns are supported:
   - Independent side session: create a new session and let it continue on its own.
   - Waited subagent: create a new session, wait for its result, then summarize the result back in the current session.
-- Prefer fan-out when one user turn contains 2+ independently completable asks, numbered agenda items, or clearly different success criteria.
-- If each sub-ask could plausibly be its own session title, that is usually enough to split.
-- Do not flatten a multi-track input into one answer merely because the subtopics share a broad theme.
-- Example: reviewing the current backlog and deciding whether the TODO process needs a stable SOP should usually become separate child sessions, even though both belong to task management.
+- If a user turn contains 2+ independently actionable goals, prefer splitting into child sessions.
+- Do not keep multiple goals in one thread merely because they share a broad theme.
+- If they stay in one session, have a clear no-split reason.
+- A parent session may coordinate while each child session owns one goal.
 - Do not over-model durable hierarchy here: the spawned session can be treated as an independent worker that simply received bounded handoff context from this session.
 - Preferred command:
   - remotelab session-spawn --task "<focused task>" --json

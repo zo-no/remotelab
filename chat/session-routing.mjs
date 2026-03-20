@@ -86,14 +86,12 @@ export function buildTurnRoutingHint(text) {
   if (!analysis.shouldSplit) return '';
 
   return [
-    'High-priority routing hint for this turn:',
-    `- The current user message contains ${analysis.workstreams.length} separable workstreams with independent outcomes.`,
-    '- This routing decision outranks the convenience of answering everything inline in one thread.',
-    '- Unless there is a strong reason not to, use the current session as a dispatcher/aggregation thread first.',
-    '- Before doing substantive work inline, spawn one focused child session per workstream and keep each child scoped to a single topic.',
-    '- Good split test: if a workstream could stand as its own session title or be completed by a different child session, split it.',
+    'Routing principle for this turn:',
+    `- This user turn contains ${analysis.workstreams.length} independently actionable goals.`,
+    '- Prefer splitting them into child sessions instead of mixing them in one thread.',
+    '- Only keep them together if they are tightly coupled; otherwise have a clear no-split reason.',
     '',
-    'Detected workstreams:',
+    'Detected goals:',
     ...analysis.workstreams.map((item, index) => `${index + 1}. ${item}`),
   ].join('\n');
 }

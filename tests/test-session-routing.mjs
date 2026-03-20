@@ -18,8 +18,9 @@ const routedHint = buildTurnRoutingHint(`I think we should focus on two things:
 1. audit the backlog and decide the next actions
 2. decide whether the TODO process needs a stable SOP`);
 
-assert.match(routedHint, /High-priority routing hint for this turn/);
-assert.match(routedHint, /dispatcher\/aggregation thread/);
+assert.match(routedHint, /Routing principle for this turn/);
+assert.match(routedHint, /independently actionable goals/);
+assert.match(routedHint, /clear no-split reason/);
 assert.match(routedHint, /1\. audit the backlog and decide the next actions/);
 assert.match(routedHint, /2\. decide whether the TODO process needs a stable SOP/);
 
