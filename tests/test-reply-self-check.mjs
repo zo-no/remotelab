@@ -21,6 +21,9 @@ const prompt = process.argv[process.argv.length - 1] || '';
 const isWorkflowPrompt = prompt.includes('You are updating RemoteLab workflow state for a developer session');
 const isReplyReviewPrompt = prompt.includes("You are RemoteLab's hidden end-of-turn completion reviewer.");
 const isRepairPrompt = prompt.includes('You are continuing the same user-facing reply after a hidden self-check found an avoidable early stop.');
+const prefersContinuationWithoutExplicitBlocker = prompt.includes('no explicit user-side blocker');
+const flagsAnalysisWithoutExecution = prompt.includes('stopping after analysis when execution was still possible');
+const prefersDoingWork = prompt.includes('Prefer doing the work over describing what you would do.');
 
 let threadId = 'main-thread';
 let items = [{ type: 'agent_message', text: '我已经分析了机制问题。下一条我可以直接给你那份极短执行守则。' }];
@@ -34,6 +37,7 @@ if (isWorkflowPrompt) {
 } else if (isReplyReviewPrompt) {
   threadId = 'review-thread';
   const isChecklistScenario = prompt.includes('todo checklist');
+  const isExplicitBlockerScenario = prompt.includes('危险删除场景');
   const hasVisibleAnswer = prompt.includes('真正有效答复：把缺的结论直接补齐。');
   const hasDisplayedChecklist = prompt.includes('[ ] todo checklist');
   items = [{
@@ -48,10 +52,20 @@ if (isWorkflowPrompt) {
           ? '直接补上最后缺的结论，不要重复前面的真正有效答复，也不要重复 checklist。'
           : '',
       }
+      : isExplicitBlockerScenario
+      ? {
+        action: 'accept',
+        reason: '这是明确依赖用户确认的破坏性动作。',
+        continuationPrompt: '',
+      }
       : {
-        action: 'continue',
-        reason: '上一条回复把本轮该直接交付的内容留到了后面。',
-        continuationPrompt: '直接给出那份极短执行守则，不要再征求许可，也不要重复前面的机制分析。',
+        action: prefersContinuationWithoutExplicitBlocker && flagsAnalysisWithoutExecution ? 'continue' : 'accept',
+        reason: prefersContinuationWithoutExplicitBlocker && flagsAnalysisWithoutExecution
+          ? '上一条回复把本轮该直接交付的内容留到了后面。'
+          : 'reviewer prompt did not default to continuing when no explicit blocker existed.',
+        continuationPrompt: prefersContinuationWithoutExplicitBlocker && flagsAnalysisWithoutExecution
+          ? '直接给出那份极短执行守则，不要再征求许可，也不要重复前面的机制分析。'
+          : '',
       }) + '</hide>',
   }];
 } else if (isRepairPrompt) {
@@ -65,13 +79,20 @@ if (isWorkflowPrompt) {
       ? (hasVisibleAnswer && hasDisplayedChecklist
         ? '补上的最终结论。'
         : 'repair prompt missed part of the visible turn')
-      : '极短执行守则：默认先做完再汇报；除非高风险、真歧义、缺关键信息，否则不要停；不要用“如果你愿意我下一条再做”作为结尾。',
+      : (prefersDoingWork
+        ? '极短执行守则：默认先做完再汇报；除非高风险、真歧义、缺关键信息，否则不要停；不要用“如果你愿意我下一条再做”作为结尾。'
+        : '我会继续把极短执行守则补出来。'),
   }];
 } else if (prompt.includes('先给真正答复，再在最后发一份 todo checklist，然后停住。')) {
   items = [
     { type: 'agent_message', text: '真正有效答复：把缺的结论直接补齐。' },
     { type: 'todo_list', items: [{ completed: false, text: 'todo checklist' }] },
   ];
+} else if (prompt.includes('危险删除场景')) {
+  items = [{
+    type: 'agent_message',
+    text: '这一步会永久删除生产数据，需要你先明确确认，我才能继续执行。',
+  }];
 }
 
 console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));
@@ -188,6 +209,57 @@ try {
   assert.ok(
     assistantTexts.some((text) => text.includes('极短执行守则：默认先做完再汇报')),
     'history should include the automatically continued reply',
+  );
+
+  const blockerSession = await createSession(tempHome, 'fake-codex', 'Reply Self Check Explicit Blocker', {
+    group: 'RemoteLab',
+    description: 'Verify self-check accepts a reply that stops for an explicit user-side destructive blocker.',
+  });
+
+  await sendMessage(blockerSession.id, '危险删除场景：如果继续就会永久删除生产数据，这时先停下来等我确认。', [], {
+    tool: 'fake-codex',
+    model: 'fake-model',
+    effort: 'low',
+  });
+
+  await waitFor(
+    async () => {
+      const blockerHistory = await getHistory(blockerSession.id);
+      return blockerHistory.some((event) => event.type === 'status' && (event.content || '') === 'Assistant self-check: kept the latest reply as-is.');
+    },
+    'self-check should accept an explicitly blocked destructive reply',
+  );
+
+  await waitFor(
+    async () => (await getSession(blockerSession.id))?.activity?.run?.state === 'idle',
+    'blocker session should become idle after the self-check accept path',
+  );
+
+  const blockerHistory = await getHistory(blockerSession.id);
+  const blockerStatusTexts = blockerHistory
+    .filter((event) => event.type === 'status')
+    .map((event) => event.content || '');
+  const blockerAssistantTexts = blockerHistory
+    .filter((event) => event.type === 'message' && event.role === 'assistant')
+    .map((event) => event.content || '');
+
+  assert.ok(
+    blockerStatusTexts.includes('Assistant self-check: reviewing the latest reply for early stop…'),
+    'blocker scenario should still run the self-check reviewer',
+  );
+  assert.ok(
+    blockerStatusTexts.includes('Assistant self-check: kept the latest reply as-is.'),
+    'blocker scenario should keep the original reply when a real blocker exists',
+  );
+  assert.equal(
+    blockerStatusTexts.some((text) => text.startsWith('Assistant self-check: continuing automatically — ')),
+    false,
+    'blocker scenario should not auto-continue past a real user-side blocker',
+  );
+  assert.deepEqual(
+    blockerAssistantTexts,
+    ['这一步会永久删除生产数据，需要你先明确确认，我才能继续执行。'],
+    'blocker scenario should preserve the single user-visible reply without adding an automatic continuation',
   );
 
   const checklistSession = await createSession(tempHome, 'fake-codex', 'Reply Self Check Visible Turn', {
