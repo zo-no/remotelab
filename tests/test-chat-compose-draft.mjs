@@ -64,6 +64,9 @@ function makeEventTarget() {
     addEventListener() {},
     focus() {},
     click() {},
+    setAttribute(name, value) {
+      this[name] = value;
+    },
     classList: makeClassList(),
   };
 }
@@ -100,13 +103,15 @@ function createContext({
       };
     },
   };
+  const voiceCleanupToggle = makeEventTarget();
   const document = {
     body: {
       classList: makeClassList(),
     },
     addEventListener() {},
     removeEventListener() {},
-    getElementById() {
+    getElementById(id) {
+      if (id === 'voiceCleanupToggle') return voiceCleanupToggle;
       return null;
     },
     createElement() {
@@ -137,6 +142,7 @@ function createContext({
     },
   };
   const focusComposerCalls = [];
+  const consoleMock = { ...console, warn() {} };
   const remoteLabLayout = {
     getViewportHeight() {
       const managedHeight = windowTarget.visualViewport?.height;
@@ -152,7 +158,7 @@ function createContext({
   };
   windowTarget.RemoteLabLayout = remoteLabLayout;
   const context = {
-    console,
+    console: consoleMock,
     msgInput,
     inputArea,
     inputResizeHandle: makeEventTarget(),
@@ -174,6 +180,7 @@ function createContext({
     dropToolsBtn: makeEventTarget(),
     sendBtn: makeEventTarget(),
     composerPendingState: makeEventTarget(),
+    voiceCleanupToggle,
     sessionTemplateSelect: makeEventTarget(),
     saveTemplateBtn: makeEventTarget(),
     tabSessions: makeEventTarget(),
@@ -220,6 +227,9 @@ function createContext({
     selectedEffort: null,
     thinkingEnabled: true,
     renderImagePreviews() {},
+    fetchJsonOrRedirect() {
+      throw new Error('Unexpected fetchJsonOrRedirect call');
+    },
     dispatchAction() {},
     emptyState: { parentNode: null, remove() {} },
     messagesInner: { appendChild() {}, innerHTML: '', children: [] },
@@ -349,6 +359,66 @@ assert.equal(canonicalSendContext.msgInput.value, '', 'confirmed sends should cl
 assert.equal(canonicalSendContext.msgInput.readOnly, false, 'confirmed sends should restore the composer input state');
 assert.equal(canonicalSendContext.inputArea.classList.contains('is-pending-send'), false, 'confirmed sends should remove the pending composer styling');
 assert.equal(canonicalSendContext.localStorage.getItem('draft_session-a'), null, 'confirmed sends should clear the stored draft');
+
+const cleanupSendContext = createContext({
+  storageSeed: {
+    composerVoiceCleanupBeforeSend: '1',
+  },
+});
+const cleanupRequests = [];
+const cleanupDispatchCalls = [];
+let resolveCleanupRequest = null;
+cleanupSendContext.fetchJsonOrRedirect = (url, options) => {
+  cleanupRequests.push({ url, options });
+  return new Promise((resolve) => {
+    resolveCleanupRequest = () => resolve({ transcript: 'cleaned transcript', rewriteApplied: true });
+  });
+};
+cleanupSendContext.dispatchAction = async (payload) => {
+  cleanupDispatchCalls.push(payload);
+  return true;
+};
+vm.runInNewContext(composeSource, cleanupSendContext, { filename: 'static/chat/compose.js' });
+cleanupSendContext.msgInput.value = 'rough transcript';
+cleanupSendContext.sendMessage();
+assert.equal(cleanupSendContext.composerPendingState.textContent, 'Cleaning transcript…', 'voice-cleanup sends should surface a cleanup stage before dispatching the message');
+assert.equal(cleanupRequests.length, 1, 'voice-cleanup sends should call the hidden cleanup endpoint first');
+assert.equal(cleanupDispatchCalls.length, 0, 'voice-cleanup sends should wait for cleanup before dispatching the message');
+resolveCleanupRequest();
+await Promise.resolve();
+await Promise.resolve();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(cleanupDispatchCalls.length, 1, 'voice-cleanup sends should dispatch once cleanup resolves');
+assert.equal(cleanupDispatchCalls[0].text, 'cleaned transcript', 'voice-cleanup sends should forward the cleaned transcript to the normal send path');
+assert.equal(cleanupRequests[0].url, '/api/sessions/session-a/voice-transcriptions', 'voice-cleanup sends should reuse the hidden transcript cleanup endpoint');
+assert.deepEqual(JSON.parse(cleanupRequests[0].options.body), {
+  persistAudio: false,
+  rewriteWithContext: true,
+  providedTranscript: 'rough transcript',
+}, 'voice-cleanup sends should request a transcript-only cleanup pass');
+
+const cleanupFallbackContext = createContext({
+  storageSeed: {
+    composerVoiceCleanupBeforeSend: '1',
+  },
+});
+const cleanupFallbackDispatchCalls = [];
+cleanupFallbackContext.fetchJsonOrRedirect = async () => {
+  throw new Error('cleanup unavailable');
+};
+cleanupFallbackContext.dispatchAction = async (payload) => {
+  cleanupFallbackDispatchCalls.push(payload);
+  return true;
+};
+vm.runInNewContext(composeSource, cleanupFallbackContext, { filename: 'static/chat/compose.js' });
+cleanupFallbackContext.msgInput.value = 'keep original text';
+cleanupFallbackContext.sendMessage();
+await Promise.resolve();
+await Promise.resolve();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(cleanupFallbackDispatchCalls.length, 1, 'failed voice cleanup should still fall back to a normal send');
+assert.equal(cleanupFallbackDispatchCalls[0].text, 'keep original text', 'failed voice cleanup should send the original text unchanged');
+assert.equal(cleanupFallbackContext.composerPendingState.textContent, 'Sending…', 'cleanup fallback should advance the composer back into the normal sending state');
 
 const queuedSendContext = createContext();
 queuedSendContext.dispatchAction = async () => true;

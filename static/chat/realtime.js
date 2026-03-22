@@ -430,6 +430,9 @@ function updateStatus(connState, session = getCurrentSession()) {
     if (typeof syncSessionTemplateControls === "function") {
       syncSessionTemplateControls();
     }
+    if (typeof syncComposerVoiceCleanupToggle === "function") {
+      syncComposerVoiceCleanupToggle();
+    }
     syncForkButton();
     syncShareButton();
     return;
@@ -443,6 +446,9 @@ function updateStatus(connState, session = getCurrentSession()) {
     sendBtn.style.display = "";
     sendBtn.disabled = !currentSessionId || archived;
     sendBtn.title = "Send";
+    if (typeof syncComposerVoiceCleanupToggle === "function") {
+      syncComposerVoiceCleanupToggle();
+    }
     return;
   }
   const visualStatus = getSessionVisualStatus(session);
@@ -483,6 +489,9 @@ function updateStatus(connState, session = getCurrentSession()) {
   effortSelect.disabled = !hasSession || archived;
   if (typeof syncSessionTemplateControls === "function") {
     syncSessionTemplateControls();
+  }
+  if (typeof syncComposerVoiceCleanupToggle === "function") {
+    syncComposerVoiceCleanupToggle();
   }
   syncForkButton();
   syncShareButton();

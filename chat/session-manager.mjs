@@ -136,9 +136,14 @@ const REPLY_SELF_CHECK_ACCEPT_STATUS = 'Assistant self-check: kept the latest re
 const REPLY_SELF_CHECK_DEFAULT_REASON = 'the latest reply left avoidable unfinished work';
 const VOICE_TRANSCRIPT_REWRITE_BOOTSTRAP_FILE = join(MEMORY_DIR, 'bootstrap.md');
 const VOICE_TRANSCRIPT_REWRITE_PROJECTS_FILE = join(MEMORY_DIR, 'projects.md');
+const VOICE_TRANSCRIPT_REWRITE_RECENT_HISTORY_WINDOW = 24;
+const VOICE_TRANSCRIPT_REWRITE_RECENT_MESSAGE_LIMIT = 8;
+const VOICE_TRANSCRIPT_REWRITE_SESSION_SUMMARY_MAX_CHARS = 1600;
+const VOICE_TRANSCRIPT_REWRITE_RECENT_DISCUSSION_MAX_CHARS = 2400;
 const VOICE_TRANSCRIPT_REWRITE_DEVELOPER_INSTRUCTIONS = [
   'You are a hidden transcript cleanup worker inside RemoteLab.',
   'Do not use tools, do not ask follow-up questions, and do not mention internal process.',
+  'Only fix likely transcription mistakes; never answer the user or continue the conversation.',
   'Return only the final cleaned transcript text.',
 ].join(' ');
 
@@ -1720,6 +1725,33 @@ function clipVoiceTranscriptRewriteText(value, maxChars = 1200) {
   return `${text.slice(0, headChars).trimEnd()}\n[… clipped …]\n${text.slice(-tailChars).trimStart()}`;
 }
 
+function formatVoiceTranscriptRewriteImages(images = []) {
+  const refs = images
+    .map((image) => {
+      if (typeof image?.originalName === 'string' && image.originalName.trim()) {
+        return image.originalName.trim();
+      }
+      return typeof image?.filename === 'string' && image.filename.trim()
+        ? image.filename.trim()
+        : '';
+    })
+    .filter(Boolean);
+  if (refs.length === 0) return '';
+  return `[Attached files: ${refs.join(', ')}]`;
+}
+
+function formatVoiceTranscriptRewriteDiscussionEvent(event) {
+  if (!(event && event.type === 'message')) return '';
+  const label = event.role === 'assistant' ? 'Assistant' : 'User';
+  const parts = [];
+  const content = clipVoiceTranscriptRewriteText(event.content, 700);
+  const imageLine = formatVoiceTranscriptRewriteImages(event.images);
+  if (content) parts.push(content);
+  if (imageLine) parts.push(imageLine);
+  if (parts.length === 0) return '';
+  return `[${label}]\n${parts.join('\n')}`;
+}
+
 async function loadVoiceTranscriptRewriteMemoryContext() {
   const entries = [
     { label: 'Collaboration bootstrap', path: VOICE_TRANSCRIPT_REWRITE_BOOTSTRAP_FILE, maxChars: 2600 },
@@ -1739,26 +1771,65 @@ async function loadVoiceTranscriptRewriteMemoryContext() {
   return parts.join('\n\n');
 }
 
-function buildVoiceTranscriptRewritePrompt(sessionMeta, transcript, memoryContext, options = {}) {
+async function loadVoiceTranscriptRewriteSessionContext(sessionId, sessionMeta = null) {
+  const latestSeq = Number.isInteger(sessionMeta?.latestSeq) ? sessionMeta.latestSeq : 0;
+  const fromSeq = latestSeq > 0
+    ? Math.max(1, latestSeq - VOICE_TRANSCRIPT_REWRITE_RECENT_HISTORY_WINDOW + 1)
+    : 1;
+  const [contextHead, recentEvents] = await Promise.all([
+    getContextHead(sessionId).catch(() => null),
+    loadHistory(sessionId, {
+      fromSeq,
+      includeBodies: true,
+    }).catch(() => []),
+  ]);
+
+  const parts = [];
+  const summary = clipVoiceTranscriptRewriteText(
+    typeof contextHead?.summary === 'string' ? contextHead.summary : '',
+    VOICE_TRANSCRIPT_REWRITE_SESSION_SUMMARY_MAX_CHARS,
+  );
+  if (summary) {
+    parts.push(`Current session summary:\n${summary}`);
+  }
+
+  const recentDiscussion = recentEvents
+    .filter((event) => event?.type === 'message' && (event.role === 'user' || event.role === 'assistant'))
+    .slice(-VOICE_TRANSCRIPT_REWRITE_RECENT_MESSAGE_LIMIT)
+    .map(formatVoiceTranscriptRewriteDiscussionEvent)
+    .filter(Boolean)
+    .join('\n\n');
+  if (recentDiscussion) {
+    parts.push(`Recent discussion:\n${clipVoiceTranscriptRewriteText(recentDiscussion, VOICE_TRANSCRIPT_REWRITE_RECENT_DISCUSSION_MAX_CHARS)}`);
+  }
+
+  return parts.join('\n\n');
+}
+
+function buildVoiceTranscriptRewritePrompt(sessionMeta, transcript, memoryContext, sessionContext, options = {}) {
   return [
     'You are cleaning up automatic speech recognition text for a RemoteLab chat composer.',
-    'Rewrite the raw transcript into the message the speaker most likely intended, using only the persistent collaboration memory and stable project context to disambiguate names, terms, and obvious ASR mistakes.',
+    'Rewrite the raw transcript into the message the speaker most likely intended.',
+    'Use stable collaboration memory plus the current session summary and recent discussion to disambiguate names, terms, references, and obvious ASR mistakes.',
+    'Prefer the current session context when it clearly resolves a reference.',
+    'Only correct likely transcription errors and minimal punctuation needed for readability.',
     'Keep the same meaning, tone, and request.',
-    'Do not add any new facts, steps, or conclusions that are not already supported by the raw transcript or the memory context.',
+    'Do not answer the request, summarize the conversation, or add any new facts, steps, or conclusions that are not already supported by the raw transcript or the context provided here.',
     'If something is uncertain, stay close to the raw transcript instead of guessing.',
     'Keep the result concise and chat-ready.',
-    'Return only the final rewritten transcript.',
+    'Return only the final cleaned transcript.',
     '',
     options.language ? `Language hint: ${options.language}` : '',
     sessionMeta?.appName ? `Session app: ${sessionMeta.appName}` : '',
     sessionMeta?.sourceName ? `Session source: ${sessionMeta.sourceName}` : '',
     sessionMeta?.folder ? `Working folder: ${sessionMeta.folder}` : '',
     memoryContext ? `Persistent collaboration memory:\n${memoryContext}` : 'Persistent collaboration memory: [none]',
+    sessionContext ? `Current session context:\n${sessionContext}` : 'Current session context: [none]',
     '',
     'Raw ASR transcript:',
     transcript,
     '',
-    'Final rewritten transcript:',
+    'Final cleaned transcript:',
   ].filter(Boolean).join('\n');
 }
 
@@ -1796,12 +1867,15 @@ export async function rewriteVoiceTranscriptForSession(sessionId, transcript, op
     };
   }
 
-  const memoryContext = await loadVoiceTranscriptRewriteMemoryContext();
+  const [memoryContext, sessionContext] = await Promise.all([
+    loadVoiceTranscriptRewriteMemoryContext(),
+    loadVoiceTranscriptRewriteSessionContext(sessionId, sessionMeta),
+  ]);
   const rewritten = normalizeVoiceTranscriptRewriteOutput(await runDetachedAssistantPrompt({
     ...sessionMeta,
     effort: 'low',
     thinking: false,
-  }, buildVoiceTranscriptRewritePrompt(sessionMeta, rawTranscript, memoryContext, options), {
+  }, buildVoiceTranscriptRewritePrompt(sessionMeta, rawTranscript, memoryContext, sessionContext, options), {
     developerInstructions: VOICE_TRANSCRIPT_REWRITE_DEVELOPER_INSTRUCTIONS,
     systemPrefix: '',
   }));

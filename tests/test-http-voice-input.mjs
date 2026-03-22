@@ -116,9 +116,12 @@ function setupTempHome(voiceWsPort) {
     join(localBin, 'fake-codex'),
     `#!/usr/bin/env node
 const prompt = process.argv.slice(2).join(' ');
-const transcript = prompt.includes('Raw ASR transcript:') && prompt.includes('请帮我把那个服务重起一下')
-  ? '请帮我把 RemoteLab 服务重启一下'
-  : 'voice received';
+let transcript = 'voice received';
+if (prompt.includes('Raw ASR transcript:') && prompt.includes('请先把轻云版那个通道再发一次') && prompt.includes('内部发布通道名字')) {
+  transcript = '请先把青云版那个通道再发一次';
+} else if (prompt.includes('Raw ASR transcript:') && prompt.includes('请帮我把那个服务重起一下')) {
+  transcript = '请帮我把 RemoteLab 服务重启一下';
+}
 setTimeout(() => {
   console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-voice-test' }));
   console.log(JSON.stringify({ type: 'turn.started' }));
@@ -354,6 +357,24 @@ try {
   assert.equal(providedTranscriptRes.json.transcript, '请帮我把 RemoteLab 服务重启一下');
   assert.equal(providedTranscriptRes.json.rawTranscript, '请帮我把那个服务重起一下');
   assert.equal(providedTranscriptRes.json.attachment, null, 'transcript-only request should not create an attachment');
+
+  const contextualSession = await createSession(chatPort);
+  const contextSeedRes = await request(chatPort, 'POST', `/api/sessions/${contextualSession.id}/messages`, {
+    text: '这轮里提到的“青云版”就是内部发布通道名字。',
+  });
+  assert.ok(contextSeedRes.status === 202 || contextSeedRes.status === 200, 'context seed message should be accepted');
+  assert.ok(contextSeedRes.json?.run?.id, 'context seed message should create a run');
+  await waitForRunTerminal(chatPort, contextSeedRes.json.run.id);
+
+  const contextRewriteRes = await request(chatPort, 'POST', `/api/sessions/${contextualSession.id}/voice-transcriptions`, {
+    persistAudio: false,
+    rewriteWithContext: true,
+    providedTranscript: '请先把轻云版那个通道再发一次',
+  });
+  assert.equal(contextRewriteRes.status, 200, 'session-context transcript cleanup should succeed');
+  assert.equal(contextRewriteRes.json.transcript, '请先把青云版那个通道再发一次');
+  assert.equal(contextRewriteRes.json.rawTranscript, '请先把轻云版那个通道再发一次');
+  assert.equal(contextRewriteRes.json.rewriteApplied, true, 'session-context transcript cleanup should use recent discussion when stable memory is not enough');
 
   const liveStreamRes = await runLiveVoiceStream(chatPort, session.id);
   assert.match(liveStreamRes.partial, /请帮我把那个服务重起一下/);

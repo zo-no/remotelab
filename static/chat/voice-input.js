@@ -111,6 +111,11 @@ function writeVoiceInputPrefs(nextPrefs = {}) {
   return prefs;
 }
 
+function isComposerVoiceCleanupActive() {
+  return typeof isComposerVoiceCleanupEnabled === "function"
+    && isComposerVoiceCleanupEnabled();
+}
+
 function readVoiceInputDiagnostics() {
   try {
     const raw = JSON.parse(localStorage.getItem(VOICE_INPUT_DIAGNOSTICS_KEY) || "[]");
@@ -1033,6 +1038,8 @@ async function submitVoiceAudio(file, options = {}) {
     return;
   }
   const prefs = readVoiceInputPrefs();
+  const sendCleanupEnabled = isComposerVoiceCleanupActive();
+  const shouldRewriteNow = prefs.rewriteWithContext === true && !sendCleanupEnabled;
   const providedTranscript = typeof options?.providedTranscript === "string"
     ? options.providedTranscript.trim()
     : "";
@@ -1053,12 +1060,18 @@ async function submitVoiceAudio(file, options = {}) {
     fileSize: typeof file?.size === "number" ? file.size : 0,
     providedTranscriptLength: providedTranscript.length,
     attachOriginalAudio: prefs.attachOriginalAudio === true,
-    rewriteWithContext: prefs.rewriteWithContext === true,
+    rewriteWithContext: shouldRewriteNow,
+    cleanupBeforeSend: sendCleanupEnabled,
     autoSend: prefs.autoSend === true,
   });
   voiceState.busy = true;
   syncVoiceInputButton();
-  setVoiceInputStatus(providedTranscript ? "正在整理语音…" : "正在转写语音…", { persist: true });
+  setVoiceInputStatus(
+    !providedTranscript
+      ? "正在转写语音…"
+      : (shouldRewriteNow ? "正在整理语音…" : "正在处理语音…"),
+    { persist: true },
+  );
   try {
     const requestPath = `/api/sessions/${encodeURIComponent(currentSessionId)}/voice-transcriptions`;
     const data = shouldUploadAudio
@@ -1067,7 +1080,7 @@ async function submitVoiceAudio(file, options = {}) {
           formData.set("audio", file, file?.name || "voice-input");
           if (voiceState.config?.language) formData.set("language", voiceState.config.language);
           formData.set("persistAudio", prefs.attachOriginalAudio ? "true" : "false");
-          formData.set("rewriteWithContext", prefs.rewriteWithContext ? "true" : "false");
+          formData.set("rewriteWithContext", shouldRewriteNow ? "true" : "false");
           if (providedTranscript) {
             formData.set("providedTranscript", providedTranscript);
           }
@@ -1082,7 +1095,7 @@ async function submitVoiceAudio(file, options = {}) {
           body: JSON.stringify({
             language: voiceState.config?.language || "",
             persistAudio: false,
-            rewriteWithContext: prefs.rewriteWithContext === true,
+            rewriteWithContext: shouldRewriteNow,
             providedTranscript,
           }),
         });
@@ -1097,6 +1110,7 @@ async function submitVoiceAudio(file, options = {}) {
     appendVoiceDiagnostic("Voice submit completed", {
       finalTranscriptLength: finalTranscript.length,
       rewriteApplied: data?.rewriteApplied === true,
+      cleanupBeforeSend: sendCleanupEnabled,
       attachedAudio: !!data?.attachment,
       insertedIntoEmptyComposer,
       committedTranscriptLength: committedTranscript.length,
@@ -1105,16 +1119,29 @@ async function submitVoiceAudio(file, options = {}) {
       appendVoiceDiagnostic("Voice submit triggered auto-send", {
         committedTranscriptLength: committedTranscript.length,
       });
-      setVoiceInputStatus(data?.rewriteApplied ? "已结合基础记忆清洗，正在发送…" : "已转写，正在发送…", { persist: true });
+      setVoiceInputStatus(
+        sendCleanupEnabled
+          ? "已转写，正在结合当前会话整理后发送…"
+          : (data?.rewriteApplied ? "已整理转写，正在发送…" : "已转写，正在发送…"),
+        { persist: true },
+      );
       sendMessage();
       return;
     }
     if (committedTranscript) {
+      if (sendCleanupEnabled) {
+        setVoiceInputStatus(
+          prefs.attachOriginalAudio && data?.attachment
+            ? "已转写并附上原音频；发送时会先结合当前会话整理。"
+            : "已转写到输入框；发送时会先结合当前会话整理。",
+        );
+        return;
+      }
       setVoiceInputStatus(
         data?.rewriteApplied
           ? (prefs.attachOriginalAudio && data?.attachment
-            ? "已结合基础记忆清洗并附上原音频，可直接发送或先改字。"
-            : "已结合基础记忆清洗后放进输入框，可直接发送或先改字。")
+            ? "已先整理并附上原音频，可直接发送或先改字。"
+            : "已先整理后放进输入框，可直接发送或先改字。")
           : (prefs.attachOriginalAudio && data?.attachment
             ? "已转写并附上原音频，可直接发送或先改字。"
             : "已转写到输入框，可直接发送或先改字。"),
@@ -1439,7 +1466,7 @@ function renderVoiceInputSettings() {
   const enabledControl = createVoiceSettingsCheckbox("Enable voice input", config.enabled !== false);
   const attachControl = createVoiceSettingsCheckbox("Attach original audio by default (server relay only)", prefs.attachOriginalAudio !== false);
   const autoSendControl = createVoiceSettingsCheckbox("Auto-send when transcript lands in an empty composer", prefs.autoSend === true);
-  const rewriteControl = createVoiceSettingsCheckbox("Use persistent collaboration memory to clean up the transcript", prefs.rewriteWithContext !== false);
+  const rewriteControl = createVoiceSettingsCheckbox("Clean the transcript before it lands in the composer", prefs.rewriteWithContext !== false);
   if (captureMode === VOICE_CAPTURE_MODE_BROWSER_DIRECT) {
     attachControl.input.disabled = true;
     attachControl.chip.title = "Browser direct mode currently sends text only. Switch to Server relay if you want to keep the raw audio attachment.";
