@@ -1,6 +1,7 @@
 import webpush from 'web-push';
 import { dirname } from 'path';
 import { VAPID_KEYS_FILE, PUSH_SUBSCRIPTIONS_FILE } from '../lib/config.mjs';
+import { buildToolProcessEnv } from '../lib/user-shell-env.mjs';
 import { createSerialTaskQueue, ensureDir, readJson, writeJsonAtomic } from './fs-utils.mjs';
 
 let ready = false;
@@ -10,6 +11,29 @@ const PUSH_TIMEOUT_MS = Number.parseInt(process.env.PUSH_TIMEOUT_MS || '5000', 1
 const PUSH_NETWORK_FAILURE_THRESHOLD = Number.parseInt(process.env.PUSH_NETWORK_FAILURE_THRESHOLD || '3', 10);
 const PUSH_NETWORK_BACKOFF_MS = Number.parseInt(process.env.PUSH_NETWORK_BACKOFF_MS || `${30 * 60 * 1000}`, 10);
 const runSubscriptionMutation = createSerialTaskQueue();
+const pushTransportEnv = buildToolProcessEnv();
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+export function resolvePushSendOptions(env = pushTransportEnv) {
+  const options = { timeout: PUSH_TIMEOUT_MS };
+  const proxy = firstNonEmpty(
+    env?.REMOTELAB_PUSH_PROXY,
+    env?.HTTPS_PROXY,
+    env?.https_proxy,
+    env?.HTTP_PROXY,
+    env?.http_proxy,
+  );
+  if (proxy) options.proxy = proxy;
+  return options;
+}
 
 async function loadOrGenerateKeys() {
   if (cachedKeys) return cachedKeys;
@@ -155,7 +179,7 @@ export async function sendCompletionPush(session) {
   await Promise.allSettled(subs.map(async (sub, i) => {
     if (isInBackoff(sub)) return;
     try {
-      await webpush.sendNotification(sub, payload, { timeout: PUSH_TIMEOUT_MS });
+      await webpush.sendNotification(sub, payload, resolvePushSendOptions());
       if ((sub?.__meta?.failureCount || 0) > 0 || (sub?.__meta?.disabledUntil || 0) > 0 || sub?.__meta?.lastError) {
         nextSubs[i] = clearNetworkFailure(sub);
         changed = true;

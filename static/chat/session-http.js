@@ -744,6 +744,15 @@ async function setupPushNotifications() {
   if (visitorMode) return;
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
   try {
+    const persistSubscription = async (subscription) => {
+      const payload = subscription?.toJSON ? subscription.toJSON() : subscription;
+      if (!payload?.endpoint) return;
+      await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    };
     const reg = await navigator.serviceWorker.register(
       `/sw.js?v=${encodeURIComponent(buildAssetVersion)}`,
       { updateViaCache: "none" },
@@ -754,7 +763,10 @@ async function setupPushNotifications() {
     reg.active?.postMessage({ type: "remotelab:clear-caches" });
     await navigator.serviceWorker.ready;
     const existing = await reg.pushManager.getSubscription();
-    if (existing) return; // already subscribed
+    if (existing) {
+      await persistSubscription(existing);
+      return;
+    }
     const res = await fetch("/api/push/vapid-public-key");
     if (!res.ok) return;
     const { publicKey } = await res.json();
@@ -762,11 +774,7 @@ async function setupPushNotifications() {
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey),
     });
-    await fetch("/api/push/subscribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(sub.toJSON()),
-    });
+    await persistSubscription(sub);
     console.log("[push] Subscribed to web push");
   } catch (err) {
     console.warn("[push] Setup failed:", err.message);
