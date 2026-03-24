@@ -102,6 +102,14 @@ import {
   transcribeVoiceInputAudio,
   updateVoiceInputConfig,
 } from './voice-input.mjs';
+import {
+  buildFileAssetDirectUrl,
+  createFileAssetUploadIntent,
+  finalizeFileAssetUpload,
+  getFileAsset,
+  getFileAssetBootstrapConfig,
+  getFileAssetForClient,
+} from './file-assets.mjs';
 
 // Paths are resolved from the active runtime root on each request.
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -263,6 +271,18 @@ async function readSessionMessagePayload(req, pathname) {
         filename: image.filename.trim(),
         originalName: parseFormString(image.originalName),
         mimeType: parseFormString(image.mimeType),
+      });
+    }
+  }
+  const externalAssets = parseFormJson(parseFormString(formData.get('externalAssets')), []);
+  if (Array.isArray(externalAssets)) {
+    for (const asset of externalAssets) {
+      if (!asset || typeof asset !== 'object') continue;
+      if (typeof asset.assetId !== 'string' || !asset.assetId.trim()) continue;
+      images.push({
+        assetId: asset.assetId.trim(),
+        originalName: parseFormString(asset.originalName),
+        mimeType: parseFormString(asset.mimeType),
       });
     }
   }
@@ -508,6 +528,7 @@ function buildAuthInfo(authSession) {
 function buildChatPageBootstrap(authSession) {
   return {
     auth: buildAuthInfo(authSession),
+    assetUploads: getFileAssetBootstrapConfig(),
   };
 }
 
@@ -1113,6 +1134,15 @@ function parseTriggerRoute(pathname) {
   return match ? match[1] : null;
 }
 
+function parseFileAssetRoute(pathname) {
+  const match = /^\/api\/assets\/(fasset_[a-f0-9]{24})(?:\/(download|finalize))?$/.exec(pathname || '');
+  if (!match) return null;
+  return {
+    assetId: match[1],
+    action: match[2] || null,
+  };
+}
+
 function parseShareAssetRoute(pathname) {
   const match = /^\/share-asset\/(snap_[a-f0-9]{48})\/(asset_[a-f0-9]{24})$/.exec(pathname || '');
   if (!match) return null;
@@ -1182,6 +1212,7 @@ export async function handleRequest(req, res) {
 
   const sessionGetRoute = req.method === 'GET' ? parseSessionGetRoute(pathname) : null;
   const triggerId = parseTriggerRoute(pathname);
+  const fileAssetRoute = parseFileAssetRoute(pathname);
 
   if (pathname === '/api/triggers' && req.method === 'GET') {
     const sessionId = typeof parsedUrl?.query?.sessionId === 'string'
@@ -1265,6 +1296,102 @@ export async function handleRequest(req, res) {
       return;
     }
     writeJson(res, 200, { ok: true, trigger });
+    return;
+  }
+
+  if (pathname === '/api/assets/upload-intents' && req.method === 'POST') {
+    let payload = {};
+    try {
+      const body = await readBody(req, 32768);
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      writeJson(res, 400, { error: 'Invalid request body' });
+      return;
+    }
+
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId.trim() : '';
+    if (!sessionId) {
+      writeJson(res, 400, { error: 'sessionId is required' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, sessionId)) return;
+
+    try {
+      const intent = await createFileAssetUploadIntent({
+        sessionId,
+        originalName: typeof payload?.originalName === 'string' ? payload.originalName : '',
+        mimeType: typeof payload?.mimeType === 'string' ? payload.mimeType : '',
+        sizeBytes: payload?.sizeBytes,
+        createdBy: authSession?.role === 'visitor' ? 'visitor' : 'owner',
+      });
+      writeJson(res, 200, intent);
+    } catch (error) {
+      writeJson(res, error?.statusCode || 400, { error: error.message || 'Failed to create upload intent' });
+    }
+    return;
+  }
+
+  if (fileAssetRoute && req.method === 'GET' && !fileAssetRoute.action) {
+    const asset = await getFileAsset(fileAssetRoute.assetId);
+    if (!asset) {
+      writeJson(res, 404, { error: 'Asset not found' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+    const clientAsset = await getFileAssetForClient(asset.id, {
+      includeDirectUrl: asset.status === 'ready',
+    });
+    writeJson(res, 200, { asset: clientAsset });
+    return;
+  }
+
+  if (fileAssetRoute?.action === 'finalize' && req.method === 'POST') {
+    const asset = await getFileAsset(fileAssetRoute.assetId);
+    if (!asset) {
+      writeJson(res, 404, { error: 'Asset not found' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+
+    let payload = {};
+    try {
+      const body = await readBody(req, 32768);
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      writeJson(res, 400, { error: 'Invalid request body' });
+      return;
+    }
+
+    try {
+      const next = await finalizeFileAssetUpload(asset.id, {
+        sizeBytes: payload?.sizeBytes,
+        etag: typeof payload?.etag === 'string' ? payload.etag : '',
+      });
+      writeJson(res, 200, { asset: next });
+    } catch (error) {
+      writeJson(res, error?.statusCode || 400, { error: error.message || 'Failed to finalize asset upload' });
+    }
+    return;
+  }
+
+  if (fileAssetRoute?.action === 'download' && req.method === 'GET') {
+    const asset = await getFileAsset(fileAssetRoute.assetId);
+    if (!asset) {
+      writeJson(res, 404, { error: 'Asset not found' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+
+    try {
+      const direct = await buildFileAssetDirectUrl(asset);
+      res.writeHead(302, buildHeaders({
+        Location: direct.url,
+        'Cache-Control': 'private, no-store, max-age=0, must-revalidate',
+      }));
+      res.end();
+    } catch (error) {
+      writeJson(res, error?.statusCode || 400, { error: error.message || 'Failed to build asset download link' });
+    }
     return;
   }
 
@@ -1629,10 +1756,44 @@ export async function handleRequest(req, res) {
         const requestId = typeof payload?.requestId === 'string' ? payload.requestId.trim() : '';
         const requestedImages = Array.isArray(payload?.images) ? payload.images.filter(Boolean) : [];
         const uploadedImages = requestedImages.filter((image) => Buffer.isBuffer(image?.buffer) || typeof image?.data === 'string');
-        const existingImages = requestedImages.filter((image) => typeof image?.filename === 'string' && image.filename.trim());
+        const existingImages = requestedImages.filter((image) => typeof image?.filename === 'string' && image.filename.trim() && !image?.assetId);
+        const externalAssetImages = [];
+        for (const image of requestedImages) {
+          const assetId = typeof image?.assetId === 'string' ? image.assetId.trim() : '';
+          if (!assetId) continue;
+          const asset = await getFileAsset(assetId);
+          if (!asset) {
+            writeJson(res, 400, { error: `Unknown asset: ${assetId}` });
+            return;
+          }
+          if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+          if (asset.status !== 'ready') {
+            writeJson(res, 409, { error: `Asset is not ready: ${assetId}` });
+            return;
+          }
+          const localizedPath = typeof asset.localizedPath === 'string' && asset.localizedPath && await pathExists(asset.localizedPath)
+            ? asset.localizedPath
+            : '';
+          externalAssetImages.push({
+            assetId: asset.id,
+            ...(localizedPath ? {
+              savedPath: localizedPath,
+              filename: typeof image?.filename === 'string' && image.filename.trim()
+                ? image.filename.trim()
+                : basename(localizedPath),
+            } : {}),
+            originalName: typeof image?.originalName === 'string' && image.originalName.trim()
+              ? image.originalName.trim()
+              : asset.originalName,
+            mimeType: typeof image?.mimeType === 'string' && image.mimeType.trim()
+              ? image.mimeType.trim()
+              : asset.mimeType,
+          });
+        }
         const preSavedAttachments = [
           ...(await resolveSavedAttachments(existingImages)),
           ...(uploadedImages.length > 0 ? await saveAttachments(uploadedImages) : []),
+          ...externalAssetImages,
         ];
         const messageOptions = {
           tool: authSession?.role === 'visitor' ? undefined : payload.tool || undefined,

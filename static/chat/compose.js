@@ -31,6 +31,92 @@ function shouldRunComposerVoiceCleanup(sessionId = currentSessionId, text = "") 
     && typeof fetchJsonOrRedirect === "function";
 }
 
+function getComposerAssetUploadConfig() {
+  return typeof getBootstrapAssetUploads === "function"
+    ? getBootstrapAssetUploads()
+    : { enabled: false, directUpload: false, provider: "" };
+}
+
+function shouldUseDirectComposerAssetUploads() {
+  const config = getComposerAssetUploadConfig();
+  return config.enabled === true
+    && config.directUpload === true
+    && typeof fetchJsonOrRedirect === "function";
+}
+
+async function uploadComposerAttachmentToAsset(sessionId, attachment) {
+  const file = attachment?.file;
+  if (!file || typeof file.arrayBuffer !== "function") {
+    return attachment;
+  }
+
+  const intent = await fetchJsonOrRedirect("/api/assets/upload-intents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId,
+      originalName: attachment?.originalName || file.name || "attachment",
+      mimeType: attachment?.mimeType || file.type || "application/octet-stream",
+      sizeBytes: Number.isFinite(file.size) ? file.size : undefined,
+    }),
+  });
+
+  const asset = intent?.asset && typeof intent.asset === "object"
+    ? intent.asset
+    : null;
+  const upload = intent?.upload && typeof intent.upload === "object"
+    ? intent.upload
+    : null;
+  if (!asset?.id || !upload?.url) {
+    throw new Error("Upload intent is incomplete");
+  }
+
+  const uploadResponse = await fetch(upload.url, {
+    method: upload.method || "PUT",
+    headers: upload.headers || {},
+    body: file,
+  });
+  if (!uploadResponse.ok) {
+    throw new Error(`Attachment upload failed (${uploadResponse.status})`);
+  }
+
+  const finalized = await fetchJsonOrRedirect(`/api/assets/${encodeURIComponent(asset.id)}/finalize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sizeBytes: Number.isFinite(file.size) ? file.size : undefined,
+      etag: uploadResponse.headers.get("etag") || "",
+    }),
+  });
+
+  const finalizedAsset = finalized?.asset && typeof finalized.asset === "object"
+    ? finalized.asset
+    : asset;
+  return {
+    assetId: finalizedAsset.id,
+    originalName: finalizedAsset.originalName || attachment?.originalName || file.name || "attachment",
+    mimeType: finalizedAsset.mimeType || attachment?.mimeType || file.type || "application/octet-stream",
+    ...(attachment?.objectUrl ? { objectUrl: attachment.objectUrl } : {}),
+  };
+}
+
+async function prepareComposerAttachmentsForSend(sessionId, attachments) {
+  if (!shouldUseDirectComposerAssetUploads()) {
+    return attachments;
+  }
+
+  const prepared = [];
+  for (const attachment of attachments || []) {
+    if (!(attachment && typeof attachment === "object")) continue;
+    if (!attachment.file || typeof attachment.assetId === "string") {
+      prepared.push(attachment);
+      continue;
+    }
+    prepared.push(await uploadComposerAttachmentToAsset(sessionId, attachment));
+  }
+  return prepared;
+}
+
 function syncComposerVoiceCleanupToggle() {
   if (!voiceCleanupToggle) return;
   const enabled = isComposerVoiceCleanupEnabled();
@@ -118,9 +204,11 @@ function syncComposerPendingUi() {
   const hasAttachments = Array.isArray(pendingComposerSend?.images) && pendingComposerSend.images.length > 0;
   composerPendingState.textContent = pendingComposerSend?.stage === "cleaning" && pendingComposerSend?.text
     ? "Cleaning transcript…"
-    : (hasAttachments && !pendingComposerSend?.text
-      ? "Sending attachment…"
-      : "Sending…");
+    : pendingComposerSend?.stage === "uploading"
+      ? "Uploading attachment…"
+      : (hasAttachments && !pendingComposerSend?.text
+        ? "Sending attachment…"
+        : "Sending…");
   composerPendingState.classList.add("visible");
   syncComposerVoiceCleanupToggle();
 }
@@ -272,44 +360,60 @@ function sendMessage(existingRequestId) {
 
   void (async () => {
     let outboundText = text;
-    if (shouldCleanTranscript) {
-      const cleanupResult = await maybeRewriteComposerTextBeforeSend(sessionId, text);
-      if (!(pendingComposerSend && pendingComposerSend.requestId === requestId)) return;
-      outboundText = cleanupResult.text || text;
-      pendingComposerSend.text = outboundText;
-      pendingComposerSend.stage = "sending";
-      pendingComposerSend.cleanupApplied = cleanupResult.rewriteApplied === true;
-      pendingComposerSend.cleanupFallback = cleanupResult.fallback === true;
-      syncComposerPendingUi();
+    let outboundImages = queuedImages;
+    try {
+      if (shouldCleanTranscript) {
+        const cleanupResult = await maybeRewriteComposerTextBeforeSend(sessionId, text);
+        if (!(pendingComposerSend && pendingComposerSend.requestId === requestId)) return;
+        outboundText = cleanupResult.text || text;
+        pendingComposerSend.text = outboundText;
+        pendingComposerSend.stage = "sending";
+        pendingComposerSend.cleanupApplied = cleanupResult.rewriteApplied === true;
+        pendingComposerSend.cleanupFallback = cleanupResult.fallback === true;
+        syncComposerPendingUi();
+      }
+
+      if (queuedImages.length > 0) {
+        pendingComposerSend.stage = "uploading";
+        syncComposerPendingUi();
+        outboundImages = await prepareComposerAttachmentsForSend(sessionId, queuedImages);
+        if (!(pendingComposerSend && pendingComposerSend.requestId === requestId)) return;
+        pendingComposerSend.images = outboundImages.slice();
+        pendingComposerSend.stage = "sending";
+        syncComposerPendingUi();
+      }
+
+      const msg = { action: "send", text: outboundText || "(attachment)" };
+      msg.requestId = requestId;
+      if (!visitorMode) {
+        if (selectedTool) msg.tool = selectedTool;
+        if (selectedModel) msg.model = selectedModel;
+        if (currentToolReasoningKind === "enum") {
+          if (selectedEffort) msg.effort = selectedEffort;
+        } else if (currentToolReasoningKind === "toggle") {
+          msg.thinking = thinkingEnabled;
+        }
+      }
+      if (outboundImages.length > 0) {
+        msg.images = outboundImages.map((img) => ({
+          ...(img.file ? { file: img.file } : {}),
+          ...(img.filename ? { filename: img.filename } : {}),
+          ...(img.assetId ? { assetId: img.assetId } : {}),
+          ...(img.originalName ? { originalName: img.originalName } : {}),
+          ...(img.mimeType ? { mimeType: img.mimeType } : {}),
+          ...(img.objectUrl ? { objectUrl: img.objectUrl } : {}),
+        }));
+      }
+      const ok = await dispatchAction(msg);
+      if (ok) return;
+    } catch (error) {
+      console.error("Composer send failed:", error?.message || error);
     }
 
-    const msg = { action: "send", text: outboundText || "(attachment)" };
-    msg.requestId = requestId;
-    if (!visitorMode) {
-      if (selectedTool) msg.tool = selectedTool;
-      if (selectedModel) msg.model = selectedModel;
-      if (currentToolReasoningKind === "enum") {
-        if (selectedEffort) msg.effort = selectedEffort;
-      } else if (currentToolReasoningKind === "toggle") {
-        msg.thinking = thinkingEnabled;
-      }
-    }
-    if (queuedImages.length > 0) {
-      msg.images = queuedImages.map((img) => ({
-        ...(img.file ? { file: img.file } : {}),
-        ...(img.filename ? { filename: img.filename } : {}),
-        ...(img.originalName ? { originalName: img.originalName } : {}),
-        ...(img.mimeType ? { mimeType: img.mimeType } : {}),
-        ...(img.objectUrl ? { objectUrl: img.objectUrl } : {}),
-      }));
-    }
-    void dispatchAction(msg).then((ok) => {
-      if (ok) return;
-      const failedText = pendingComposerSend?.requestId === requestId
-        ? (pendingComposerSend.text || outboundText || text)
-        : (outboundText || text);
-      restoreFailedSendState(sessionId, failedText, queuedImages, requestId);
-    });
+    const failedText = pendingComposerSend?.requestId === requestId
+      ? (pendingComposerSend.text || outboundText || text)
+      : (outboundText || text);
+    restoreFailedSendState(sessionId, failedText, outboundImages, requestId);
   })();
 }
 

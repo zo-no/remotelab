@@ -36,6 +36,23 @@ function normalizeBootstrapAuthInfo(raw) {
 
 const bootstrapAuthInfo = normalizeBootstrapAuthInfo(pageBootstrap.auth);
 
+function normalizeBootstrapAssetUploads(raw) {
+  if (!raw || typeof raw !== "object") {
+    return {
+      enabled: false,
+      directUpload: false,
+      provider: "",
+    };
+  }
+  return {
+    enabled: raw.enabled === true,
+    directUpload: raw.directUpload === true,
+    provider: normalizeBootstrapText(raw.provider),
+  };
+}
+
+const bootstrapAssetUploads = normalizeBootstrapAssetUploads(pageBootstrap.assetUploads);
+
 function normalizeBootstrapShareSnapshot(rawPayload, rawMeta = null) {
   const payload = rawPayload && typeof rawPayload === "object"
     ? rawPayload
@@ -103,6 +120,10 @@ function getBootstrapAuthInfo() {
 
 function getBootstrapShareSnapshot() {
   return bootstrapShareSnapshot;
+}
+
+function getBootstrapAssetUploads() {
+  return { ...bootstrapAssetUploads };
 }
 
 console.info(

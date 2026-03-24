@@ -58,6 +58,9 @@ function getAttachmentSource(attachment) {
   if (typeof attachment?.objectUrl === "string" && attachment.objectUrl) {
     return attachment.objectUrl;
   }
+  if (typeof attachment?.assetId === "string" && attachment.assetId) {
+    return `/api/assets/${encodeURIComponent(attachment.assetId)}/download`;
+  }
   if (typeof attachment?.filename === "string" && attachment.filename) {
     return `/api/media/${encodeURIComponent(attachment.filename)}`;
   }
@@ -213,26 +216,56 @@ function renderMessageInto(container, evt, { finalizeActiveThinkingBlock = false
   } else {
     const div = document.createElement("div");
     div.className = "msg-assistant md-content";
-    const content = document.createElement("div");
-    content.className = "msg-assistant-body";
-    if (evt.content) {
-      const didRender = renderMarkdownIntoNode(content, evt.content);
-      if (!didRender) return null;
-    } else if (evt.bodyAvailable) {
-      if (evt.bodyPreview) {
-        renderMarkdownIntoNode(content, evt.bodyPreview);
-      }
-    } else {
+    const hasAttachments = Array.isArray(evt.images) && evt.images.length > 0;
+    if (!evt.content && !evt.bodyAvailable && !hasAttachments) {
       return null;
     }
-    div.appendChild(content);
-    if (markLazyEventBodyNode(content, evt, {
-      preview: evt.bodyPreview || "",
-      renderMode: "markdown",
-    })) {
-      if (typeof queueHydrateLazyNodes === "function") {
-        queueHydrateLazyNodes(div);
+
+    if (evt.content || evt.bodyAvailable) {
+      const content = document.createElement("div");
+      content.className = "msg-assistant-body";
+      let shouldAppendContent = false;
+      if (evt.content) {
+        const didRender = renderMarkdownIntoNode(content, evt.content);
+        if (didRender) {
+          shouldAppendContent = true;
+        } else if (!hasAttachments) {
+          return null;
+        }
+      } else if (evt.bodyAvailable) {
+        if (evt.bodyPreview) {
+          renderMarkdownIntoNode(content, evt.bodyPreview);
+        }
+        shouldAppendContent = true;
       }
+      if (shouldAppendContent) {
+        div.appendChild(content);
+      }
+      if (markLazyEventBodyNode(content, evt, {
+        preview: evt.bodyPreview || "",
+        renderMode: "markdown",
+      })) {
+        if (typeof queueHydrateLazyNodes === "function") {
+          queueHydrateLazyNodes(div);
+        }
+      }
+    }
+
+    if (hasAttachments) {
+      const imgWrap = document.createElement("div");
+      imgWrap.className = "msg-images";
+      for (const img of evt.images) {
+        const attachmentNode = createMessageAttachmentNode(img);
+        if (!attachmentNode) continue;
+        imgWrap.appendChild(attachmentNode);
+      }
+      if (imgWrap.children.length > 0) {
+        div.appendChild(imgWrap);
+      }
+    }
+
+    if (div.children.length === 0) {
+      return null;
     }
     appendMessageTimestamp(div, evt.timestamp, "msg-assistant-time");
     container.appendChild(div);

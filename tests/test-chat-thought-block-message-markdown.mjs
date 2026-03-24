@@ -61,6 +61,7 @@ function makeElement(tagName = 'div') {
 const renderMessageIntoSource = extractFunctionSource(uiSource, 'renderMessageInto');
 const markdownCalls = [];
 const timestampCalls = [];
+const attachmentCalls = [];
 
 const context = {
   console,
@@ -84,8 +85,9 @@ const context = {
   formatDecodedDisplayText(value) {
     return typeof value === 'string' ? value : '';
   },
-  createMessageAttachmentNode() {
-    return null;
+  createMessageAttachmentNode(attachment) {
+    attachmentCalls.push(attachment);
+    return makeElement('video');
   },
   inThinkingBlock: false,
   finalizeThinkingBlock() {
@@ -107,6 +109,11 @@ const container = makeElement('div');
 const assistantMessage = {
   role: 'assistant',
   content: 'Before final answer:\n\n- item **one**\n- item `two`',
+  images: [{
+    assetId: 'fasset_1234567890abcdef12345678',
+    originalName: 'rough cut.mp4',
+    mimeType: 'video/mp4',
+  }],
   timestamp: '2026-03-17T10:00:00.000Z',
 };
 
@@ -115,10 +122,13 @@ const node = context.renderMessageInto(container, assistantMessage);
 assert.equal(container.children.length, 1, 'assistant message should append exactly one rendered node');
 assert.equal(container.children[0], node, 'renderMessageInto should return the appended assistant node');
 assert.equal(node.className, 'msg-assistant md-content', 'assistant messages should keep markdown-capable styling');
-assert.equal(node.children.length, 1, 'assistant node should contain a dedicated body wrapper');
+assert.equal(node.children.length, 2, 'assistant node should render both markdown and attachments when present');
 assert.equal(node.children[0].className, 'msg-assistant-body', 'assistant node should render into the assistant body wrapper');
+assert.equal(node.children[1].className, 'msg-images', 'assistant attachments should render in the attachment strip');
+assert.equal(node.children[1].children.length, 1, 'assistant attachment strip should include the generated download attachment');
 assert.equal(markdownCalls.length, 1, 'assistant message rendering should invoke the markdown renderer');
 assert.equal(markdownCalls[0].markdown, assistantMessage.content, 'assistant message rendering should pass the original message text into markdown');
+assert.equal(attachmentCalls.length, 1, 'assistant message rendering should build attachment nodes for assistant images');
 assert.equal(timestampCalls.length, 1, 'assistant message rendering should still append timestamps');
 
 console.log('test-chat-thought-block-message-markdown: ok');

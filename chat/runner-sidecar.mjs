@@ -4,6 +4,7 @@ import { createInterface } from 'readline';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createToolInvocation, prependAttachmentPaths, resolveCommand, resolveCwd } from './process-runner.mjs';
+import { materializeFileAssetAttachments } from './file-assets.mjs';
 import {
   buildCodexContextMetricsPayload,
   readLatestCodexSessionMetrics,
@@ -99,7 +100,30 @@ async function main() {
     process.exit(1);
   }
 
-  const prompt = prependAttachmentPaths(manifest.prompt || '', manifest.options?.images || []);
+  await updateRun(runId, (current) => ({
+    ...current,
+    state: 'running',
+    startedAt: current.startedAt || nowIso(),
+    runnerProcessId: process.pid,
+  }));
+
+  const materializedImages = await materializeFileAssetAttachments(manifest.options?.images || []);
+  if (materializedImages.some((attachment) => typeof attachment?.assetId === 'string' && typeof attachment?.savedPath === 'string')) {
+    await appendRunSpoolRecord(runId, {
+      ts: nowIso(),
+      stream: 'stdout',
+      line: JSON.stringify({
+        type: 'status',
+        content: 'Localized external file attachments for this run.',
+      }),
+      json: {
+        type: 'status',
+        content: 'Localized external file attachments for this run.',
+      },
+    });
+  }
+
+  const prompt = prependAttachmentPaths(manifest.prompt || '', materializedImages);
   const { command, args, runtimeFamily } = await createToolInvocation(manifest.tool, prompt, {
     dangerouslySkipPermissions: true,
     claudeSessionId: manifest.options?.claudeSessionId,
@@ -117,9 +141,6 @@ async function main() {
 
   await updateRun(runId, (current) => ({
     ...current,
-    state: 'running',
-    startedAt: current.startedAt || nowIso(),
-    runnerProcessId: process.pid,
     toolProcessId: proc.pid,
   }));
 

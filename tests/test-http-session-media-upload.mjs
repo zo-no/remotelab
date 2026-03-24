@@ -255,8 +255,10 @@ try {
     assert.equal(mediaRes.status, 200, 'uploaded video should be downloadable from the media route');
     assert.match(mediaRes.headers['content-type'] || '', /^video\/mp4/, 'media route should serve the correct video MIME type');
 
-    await waitFor(() => readCapturedPrompts(promptFile).length >= 1, 'captured runner prompt');
-    const prompt = readCapturedPrompts(promptFile).at(-1) || '';
+    const prompt = await waitFor(() => {
+      const prompts = readCapturedPrompts(promptFile);
+      return prompts.find((entry) => /\[User attached video: clip\.mp4 -> .*\.mp4\]/.test(entry)) || false;
+    }, 'captured runner prompt');
     assert.match(prompt, /\[User attached video: clip\.mp4 -> .*\.mp4\]/, 'runner prompt should include the original video name and stored path');
 
     const fileSession = await createSession(port);
@@ -290,7 +292,10 @@ try {
     assert.equal(fileMediaRes.status, 200, 'generic file should be downloadable from the media route');
     assert.equal(fileMediaRes.buffer.toString('utf8'), 'col1,col2\n1,2\n', 'downloaded generic file should keep its contents');
 
-    const updatedPrompt = readCapturedPrompts(promptFile).at(-1) || '';
+    const updatedPrompt = await waitFor(() => {
+      const prompts = readCapturedPrompts(promptFile);
+      return prompts.find((entry) => /\[User attached file: report\.csv -> .*\.csv\]/.test(entry)) || false;
+    }, 'captured generic-file runner prompt');
     assert.match(updatedPrompt, /\[User attached file: report\.csv -> .*\.csv\]/, 'runner prompt should include the original file name and stored path');
 
     const followUpRes = await submitJsonMessage(port, fileSession.id, 'req-generic-file-follow-up', 'Continue using the same attached file.');
@@ -302,7 +307,10 @@ try {
 
     const followUpPrompt = await waitFor(() => {
       const prompts = readCapturedPrompts(promptFile);
-      return prompts.length >= 3 ? prompts.at(-1) : false;
+      return prompts.find((entry) => (
+        /RemoteLab session continuity handoff for this existing conversation\./.test(entry)
+        && /\[Attached files: report\.csv -> .*\.csv\]/.test(entry)
+      )) || false;
     }, 'follow-up prompt with continued attachment path');
     assert.match(followUpPrompt, /RemoteLab session continuity handoff for this existing conversation\./, 'follow-up prompt should include session continuation');
     assert.match(followUpPrompt, /\[Attached files: report\.csv -> .*\.csv\]/, 'follow-up prompt should carry the stored attachment path into continuation context');

@@ -206,6 +206,7 @@ async function dispatchAction(msg) {
           ? await (async () => {
               const formData = new FormData();
               const existingImages = [];
+              const externalAssets = [];
               formData.set("requestId", requestId);
               formData.set("text", msg.text || "");
               if (msg.tool) formData.set("tool", msg.tool);
@@ -217,6 +218,14 @@ async function dispatchAction(msg) {
                   formData.append("images", image.file, image.originalName || image.file.name || "attachment");
                   continue;
                 }
+                if (image?.assetId) {
+                  externalAssets.push({
+                    assetId: image.assetId,
+                    originalName: image.originalName || "",
+                    mimeType: image.mimeType || "",
+                  });
+                  continue;
+                }
                 if (!image?.filename) continue;
                 existingImages.push({
                   filename: image.filename,
@@ -226,6 +235,9 @@ async function dispatchAction(msg) {
               }
               if (existingImages.length > 0) {
                 formData.set("existingImages", JSON.stringify(existingImages));
+              }
+              if (externalAssets.length > 0) {
+                formData.set("externalAssets", JSON.stringify(externalAssets));
               }
               return fetchJsonOrRedirect(requestUrl, {
                 method: "POST",
