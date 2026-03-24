@@ -73,6 +73,7 @@ import {
   updateRun,
   writeRunResult,
 } from './runs.mjs';
+import { readLatestCodexSessionMetrics } from './codex-session-metrics.mjs';
 import { spawnDetachedRunner } from './runner-supervisor.mjs';
 import {
   buildSessionActivity,
@@ -223,6 +224,22 @@ function getAutoCompactContextTokens(run) {
     1,
     Math.floor((contextWindowTokens * DEFAULT_AUTO_COMPACT_CONTEXT_WINDOW_PERCENT) / 100),
   );
+}
+
+async function refreshCodexContextMetrics(run) {
+  if (!run?.id || !run?.codexThreadId) return null;
+  const metrics = await readLatestCodexSessionMetrics(run.codexThreadId);
+  if (!Number.isInteger(metrics?.contextTokens)) return null;
+
+  await updateRun(run.id, (current) => ({
+    ...current,
+    contextInputTokens: metrics.contextTokens,
+    ...(Number.isInteger(metrics.contextWindowTokens)
+      ? { contextWindowTokens: metrics.contextWindowTokens }
+      : {}),
+  }));
+
+  return metrics;
 }
 
 function getAutoCompactStatusText(run) {
@@ -2998,8 +3015,22 @@ async function queueContextCompaction(sessionId, session, run, { automatic = fal
 async function maybeAutoCompact(sessionId, session, run, manifest) {
   if (!session || !run || manifest?.internalOperation) return false;
   if (getSessionQueueCount(session) > 0) return false;
-  const contextTokens = getRunLiveContextTokens(run);
-  const autoCompactTokens = getAutoCompactContextTokens(run);
+  let contextTokens = getRunLiveContextTokens(run);
+  let autoCompactTokens = getAutoCompactContextTokens(run);
+  if (!Number.isInteger(contextTokens) || !Number.isFinite(autoCompactTokens)) {
+    const refreshed = await refreshCodexContextMetrics(run);
+    if (refreshed) {
+      const syntheticRun = {
+        ...run,
+        contextInputTokens: refreshed.contextTokens,
+        ...(Number.isInteger(refreshed.contextWindowTokens)
+          ? { contextWindowTokens: refreshed.contextWindowTokens }
+          : {}),
+      };
+      contextTokens = refreshed.contextTokens;
+      autoCompactTokens = getAutoCompactContextTokens(syntheticRun);
+    }
+  }
   if (!Number.isInteger(contextTokens) || !Number.isFinite(autoCompactTokens)) return false;
   if (contextTokens <= autoCompactTokens) return false;
   return queueContextCompaction(sessionId, session, run, { automatic: true });
