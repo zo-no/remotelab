@@ -17,7 +17,7 @@ The visitor doesn't need to know anything about prompts, tools, or configuration
 
 RemoteLab now ships three built-in App starting points out of the box:
 
-- **Welcome** — the default guided intake surface for non-expert users; it nudges them to drop in messy materials first, remembers durable context, and takes responsibility for shaping the task into a workable project when needed
+- **Welcome** — the default guided intake surface for non-expert users; it nudges them to drop in messy materials first, keeps a hidden task card plus durable context across turns, and takes responsibility for shaping the task into a workable project when needed
 - **Basic Chat** — the default owner-side app for normal RemoteLab conversations; this is the baseline app layer for everyday sessions
 - **Create App** — a built-in app-building assistant; the sidebar `+ New App` shortcut simply creates a normal owner session under this app so the AI can turn a workflow/SOP into a finished App and share link
 

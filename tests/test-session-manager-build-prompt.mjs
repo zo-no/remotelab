@@ -165,4 +165,28 @@ assert.match(microAgentPrompt, /<private>[\s\S]*Manager note: RemoteLab remains 
 assert.match(microAgentPrompt, /User message:/);
 assert.match(microAgentPrompt, /Memory System — Pointer-First Activation/);
 
+const promptWithTaskCard = await buildPrompt(
+  'session-test-7',
+  {
+    ...baseSession,
+    taskCard: {
+      mode: 'project',
+      summary: '先吃透用户丢来的 Excel 和 PPT，再决定如何组织项目态。',
+      rawMaterials: ['sales.xlsx', 'deck.pptx'],
+      nextSteps: ['检查材料结构', '整理第一版任务摘要'],
+      memory: ['用户偏好直接给原始材料，不想先写长说明。'],
+    },
+  },
+  '继续推进。',
+  'codex',
+  'codex',
+  null,
+  { skipSessionContinuation: true },
+);
+
+assert.match(promptWithTaskCard, /Current carried task card/);
+assert.match(promptWithTaskCard, /Execution mode: project/);
+assert.match(promptWithTaskCard, /sales\.xlsx/);
+assert.match(promptWithTaskCard, /Durable user memory/);
+
 console.log('test-session-manager-build-prompt: ok');

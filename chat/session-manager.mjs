@@ -5,7 +5,7 @@ import { readFile, writeFile } from 'fs/promises';
 import { homedir } from 'os';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'path';
 import { createInterface } from 'readline';
-import { CHAT_IMAGES_DIR, FILE_ASSET_STORAGE_ENABLED, MEMORY_DIR } from '../lib/config.mjs';
+import { CHAT_IMAGES_DIR, MEMORY_DIR } from '../lib/config.mjs';
 import { getToolDefinitionAsync } from '../lib/tools.mjs';
 import { buildToolProcessEnv } from '../lib/user-shell-env.mjs';
 import { createToolInvocation, resolveCommand, resolveCwd } from './process-runner.mjs';
@@ -92,6 +92,7 @@ import {
 import { dispatchSessionEmailCompletionTargets, sanitizeEmailCompletionTargets } from '../lib/agent-mail-completion-targets.mjs';
 import {
   DEFAULT_APP_ID,
+  WELCOME_APP_ID,
   createApp,
   getApp,
   getBuiltinApp,
@@ -100,6 +101,11 @@ import {
 } from './apps.mjs';
 import { publishLocalFileAssetFromPath } from './file-assets.mjs';
 import { ensureDir, pathExists, statOrNull } from './fs-utils.mjs';
+import {
+  buildTaskCardPromptBlock,
+  normalizeSessionTaskCard,
+  parseTaskCardFromAssistantContent,
+} from './session-task-card.mjs';
 
 const MIME_EXTENSIONS = {
   'application/json': '.json',
@@ -1071,6 +1077,12 @@ function isContextCompactorSession(meta) {
 
 function shouldExposeSession(meta) {
   return !isInternalSession(meta);
+}
+
+function isTaskCardEnabledForSession(meta) {
+  if (!meta || isInternalSession(meta)) return false;
+  if (normalizeSessionTaskCard(meta.taskCard)) return true;
+  return resolveEffectiveAppId(meta.appId) === WELCOME_APP_ID;
 }
 
 function ensureLiveSession(sessionId) {
@@ -2650,6 +2662,19 @@ async function findLatestAssistantMessageForRun(sessionId, runId) {
   return null;
 }
 
+async function maybeApplyAssistantTaskCard(sessionId, runId, session = null) {
+  const currentSession = session || await getSession(sessionId);
+  if (!currentSession || !isTaskCardEnabledForSession(currentSession)) {
+    return null;
+  }
+
+  const assistantEvent = await findLatestAssistantMessageForRun(sessionId, runId);
+  const taskCard = parseTaskCardFromAssistantContent(assistantEvent?.content || '');
+  if (!taskCard) return null;
+
+  return updateSessionTaskCard(sessionId, taskCard);
+}
+
 async function findResultAssetMessageForRun(sessionId, runId) {
   const events = await loadHistory(sessionId, { includeBodies: false });
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -2663,7 +2688,7 @@ async function findResultAssetMessageForRun(sessionId, runId) {
 }
 
 async function maybePublishRunResultAssets(sessionId, run, manifest, normalizedEvents) {
-  if (!FILE_ASSET_STORAGE_ENABLED || manifest?.internalOperation) {
+  if (manifest?.internalOperation) {
     return false;
   }
 
@@ -2730,6 +2755,7 @@ function buildManagerTurnContextText(session, text = '') {
     MANAGER_TURN_POLICY_BLOCK,
     buildTurnRoutingHint(text),
     buildSessionAgreementsPromptBlock(session?.activeAgreements || []),
+    buildTaskCardPromptBlock(session?.taskCard),
   ].filter(Boolean).join('\n\n');
 }
 
@@ -3194,9 +3220,17 @@ async function finalizeDetachedRun(sessionId, run, manifest, normalizedEvents = 
     broadcastSessionInvalidation(sessionId);
     return { historyChanged, sessionChanged };
   }
-  const latestSession = await getSession(sessionId);
+  let latestSession = await getSession(sessionId);
   if (!latestSession) {
     return { historyChanged, sessionChanged };
+  }
+
+  if (!manifest?.internalOperation) {
+    const taskCardSession = await maybeApplyAssistantTaskCard(sessionId, run.id, latestSession);
+    if (taskCardSession) {
+      latestSession = taskCardSession;
+      sessionChanged = true;
+    }
   }
 
   historyChanged = await maybePublishRunResultAssets(sessionId, finalizedRun, manifest, normalizedEvents) || historyChanged;
@@ -3731,6 +3765,31 @@ export async function updateSessionGrouping(id, patch = {}) {
       session.updatedAt = nowIso();
     }
     return changed;
+  });
+
+  if (!result.meta) return null;
+  if (result.changed) {
+    broadcastSessionInvalidation(id);
+  }
+  return enrichSessionMeta(result.meta);
+}
+
+async function updateSessionTaskCard(id, taskCard) {
+  const nextTaskCard = normalizeSessionTaskCard(taskCard);
+  const result = await mutateSessionMeta(id, (session) => {
+    const currentTaskCard = normalizeSessionTaskCard(session.taskCard);
+    if (JSON.stringify(currentTaskCard) === JSON.stringify(nextTaskCard)) {
+      return false;
+    }
+
+    if (nextTaskCard) {
+      session.taskCard = nextTaskCard;
+    } else if (session.taskCard) {
+      delete session.taskCard;
+    }
+
+    session.updatedAt = nowIso();
+    return true;
   });
 
   if (!result.meta) return null;

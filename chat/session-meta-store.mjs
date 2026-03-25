@@ -12,6 +12,7 @@ import {
   normalizeSessionWorkflowState,
 } from './session-workflow-state.mjs';
 import { normalizeSessionAgreements } from './session-agreements.mjs';
+import { normalizeSessionTaskCard } from './session-task-card.mjs';
 
 let sessionsMetaCache = null;
 let sessionsMetaCacheMtimeMs = null;
@@ -107,6 +108,19 @@ function normalizeStoredSessionMeta(meta) {
       }
     } else {
       delete normalized.activeAgreements;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'taskCard')) {
+    const nextTaskCard = normalizeSessionTaskCard(normalized.taskCard);
+    if (nextTaskCard) {
+      if (JSON.stringify(normalized.taskCard) !== JSON.stringify(nextTaskCard)) {
+        normalized.taskCard = nextTaskCard;
+        changed = true;
+      }
+    } else {
+      delete normalized.taskCard;
       changed = true;
     }
   }

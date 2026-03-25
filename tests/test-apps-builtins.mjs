@@ -71,7 +71,10 @@ try {
   assert.match(welcomeApp?.systemPrompt || '', /raw materials|files, screenshots|PowerPoints/i);
   assert.match(welcomeApp?.systemPrompt || '', /project mechanics|project structure|folders, notes/i);
   assert.match(welcomeApp?.systemPrompt || '', /durable knowledge|repeat themselves/i);
+  assert.match(welcomeApp?.systemPrompt || '', /task_card|hidden <private>|mode, summary, goal/i);
+  assert.match(welcomeApp?.systemPrompt || '', /needsFromUser|rawMaterials|knownConclusions/i);
   assert.match(welcomeApp?.welcomeMessage || '', /原始材料|Excel|PPT|项目方式/u);
+  assert.match(welcomeApp?.welcomeMessage || '', /记下关键背景|偏好|下一步/u);
 
   const basicChatApp = await getApp(BASIC_CHAT_APP_ID);
   assert.equal(basicChatApp?.id, BASIC_CHAT_APP_ID);
