@@ -14,6 +14,7 @@ import {
   buildThreadReferencesHeader,
   decodeMaybeEncodedMailboxText,
   extractNormalizedMailboxContent,
+  extractRawMessageImages,
   loadMailboxAutomation,
   listQueue,
   updateQueueItem,
@@ -306,6 +307,20 @@ function extractReadableBodyFromRaw(item) {
   }
 }
 
+function extractImageAttachmentsFromRaw(item) {
+  const rawPath = trimString(item?.storage?.rawPath);
+  if (!rawPath) {
+    return [];
+  }
+
+  try {
+    return extractRawMessageImages(readFileSync(rawPath, 'utf8'), { includeData: true })
+      .filter((image) => typeof image?.data === 'string' && image.data);
+  } catch {
+    return [];
+  }
+}
+
 function buildReplyPrompt(item) {
   const sender = trimString(item?.message?.fromAddress);
   const subject = trimString(item?.message?.subject);
@@ -449,6 +464,14 @@ async function submitApprovedItem(item, rootDir, automation, runtime) {
     text: buildReplyPrompt(item),
     tool: runtimeSelection.tool,
   };
+  const images = extractImageAttachmentsFromRaw(item).map((image) => ({
+    data: image.data,
+    mimeType: image.mimeType,
+    originalName: image.originalName,
+  }));
+  if (images.length > 0) {
+    messagePayload.images = images;
+  }
   if (runtimeSelection.thinking) {
     messagePayload.thinking = true;
   }

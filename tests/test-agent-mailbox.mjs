@@ -348,6 +348,63 @@ function testDecodesNestedMultipartBodyText() {
   }
 }
 
+function testExtractsInlineImageAttachments() {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remotelab-agent-mailbox-inline-image-'));
+  try {
+    initializeMailbox({
+      rootDir,
+      name: 'Rowan',
+      localPart: 'rowan',
+      domain: 'jiujianian.dev',
+      allowEmails: ['jiujianian@gmail.com'],
+    });
+
+    const inlinePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2lmLcAAAAASUVORK5CYII=';
+    const ingested = ingestRawMessage(
+      [
+        'From: jiujianian@gmail.com',
+        'To: rowan@jiujianian.dev',
+        'Subject: Inline image test',
+        'Message-ID: <inline-image-message@example.com>',
+        'Content-Type: multipart/related; boundary="outer-boundary"',
+        '',
+        '--outer-boundary',
+        'Content-Type: multipart/alternative; boundary="alt-boundary"',
+        '',
+        '--alt-boundary',
+        'Content-Type: text/plain; charset="UTF-8"',
+        '',
+        '请看附件里的截图。',
+        '--alt-boundary',
+        'Content-Type: text/html; charset="UTF-8"',
+        '',
+        '<div><p>请看附件里的截图。</p><img src="cid:inline-image@example.com" /></div>',
+        '--alt-boundary--',
+        '--outer-boundary',
+        'Content-Type: image/png; name="screenshot.png"',
+        'Content-Transfer-Encoding: base64',
+        'Content-Disposition: inline; filename="screenshot.png"',
+        'Content-ID: <inline-image@example.com>',
+        '',
+        inlinePngBase64,
+        '--outer-boundary--',
+      ].join('\n'),
+      'inline-image.eml',
+      rootDir,
+    );
+
+    assert.equal(ingested.content.extractedText, '请看附件里的截图。');
+    assert.equal(ingested.content.images?.length, 1);
+    assert.equal(ingested.content.images[0].mimeType, 'image/png');
+    assert.equal(ingested.content.images[0].originalName, 'screenshot.png');
+    assert.equal(ingested.content.images[0].disposition, 'inline');
+    assert.equal(ingested.content.images[0].contentId, 'inline-image@example.com');
+    assert.ok(ingested.content.images[0].byteLength > 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 function testEnvelopeRecipientRoutesToGuestInstanceAlias() {
   const rootDir = mkdtempSync(join(tmpdir(), 'remotelab-agent-mailbox-routing-'));
   try {
@@ -401,5 +458,6 @@ testStripsQuotedReplyContent();
 testStripsUniformQuotedReplyContent();
 testDecodesBase64BodyText();
 testDecodesNestedMultipartBodyText();
+testExtractsInlineImageAttachments();
 testEnvelopeRecipientRoutesToGuestInstanceAlias();
 console.log('agent mailbox tests passed');

@@ -37,6 +37,7 @@ If any Cloudflare dashboard action is still needed, the AI should batch those as
 
 - Cloudflare only does inbound receive and outbound send.
 - RemoteLab and the local mailbox stack keep filtering, review, automation, session routing, and replies.
+- Inline or attached email images are forwarded into RemoteLab sessions as normal file attachments for the agent to inspect.
 - Edge config stays thin so provider migration remains easy.
 - The Worker forwards the raw message plus the real envelope recipient (`rcptTo`), which lets the local mailbox route aliases such as `rowan+trial6@domain` into the matching guest instance.
 

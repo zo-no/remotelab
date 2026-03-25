@@ -450,6 +450,74 @@ try {
   assert.equal(sessionCreates[3].completionTargets[0].references, '<blank-subject-thread@example.com>');
   assert.equal(sessionCreates[3].completionTargets[0].subject, '', 'blank-subject replies should preserve an empty subject');
 
+  const inlinePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2lmLcAAAAASUVORK5CYII=';
+  const imageIngested = ingestRawMessage(
+    [
+      'From: owner@example.com',
+      'To: rowan@example.com',
+      'Subject: Screenshot included',
+      'Message-ID: <image-thread@example.com>',
+      'Content-Type: multipart/mixed; boundary="image-boundary"',
+      '',
+      '--image-boundary',
+      'Content-Type: text/plain; charset="UTF-8"',
+      '',
+      'please inspect the attached screenshot.',
+      '--image-boundary',
+      'Content-Type: image/png; name="mail-shot.png"',
+      'Content-Transfer-Encoding: base64',
+      'Content-Disposition: attachment; filename="mail-shot.png"',
+      '',
+      inlinePngBase64,
+      '--image-boundary--',
+    ].join('\n'),
+    'image-thread.eml',
+    mailboxRoot,
+  );
+  const approvedImage = findQueueItem(imageIngested.id, mailboxRoot)?.item;
+  assert.equal(approvedImage?.queue, 'approved');
+  assert.equal(approvedImage?.content?.images?.length, 1);
+  assert.equal(approvedImage?.content?.images?.[0]?.originalName, 'mail-shot.png');
+
+  const fifthWorker = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(repoRoot, 'scripts', 'agent-mail-worker.mjs'), '--once', '--root', mailboxRoot], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: tempHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `worker exited with ${code}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+
+  const fifthSummary = JSON.parse(fifthWorker.stdout);
+  assert.equal(fifthSummary.processed, 1);
+  assert.equal(fifthSummary.failures.length, 0);
+  assert.equal(sessionCreates.length, 5);
+  assert.equal(messageSubmissions.length, 5);
+  assert.equal(messageSubmissions[4].images?.length, 1);
+  assert.equal(messageSubmissions[4].images[0].mimeType, 'image/png');
+  assert.equal(messageSubmissions[4].images[0].originalName, 'mail-shot.png');
+  assert.equal(messageSubmissions[4].images[0].data, inlinePngBase64);
+
+  const updatedImage = findQueueItem(approvedImage.id, mailboxRoot)?.item;
+  assert.equal(updatedImage?.status, 'processing_for_reply');
+  assert.equal(updatedImage?.automation?.status, 'processing_for_reply');
+
   requests.length = 0;
   sessionCreates.length = 0;
   messageSubmissions.length = 0;
