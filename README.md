@@ -55,6 +55,7 @@ The first goal is concrete: in a short conversation, help a user hand off a tedi
 
 - The biggest unmet need is not encouraging people to open endless concurrent sessions; it is finding repetitive work that is actually worth automating.
 - Most target users are not AI-native operators and do not arrive with product-manager-grade prompts; the AI needs to help clarify the task, gather examples, and design a workable approach.
+- The first high-fit user slice is not literally everyone with a computer; it looks more like time-pressed middle managers / owner-operators in traditional industries who both coordinate others and still personally carry repetitive digital admin work.
 - The first screen cannot be a blank session list. New users need a default `Welcome App` that briefly explains what RemoteLab can do, asks about their role and repetitive-work pain point, and guides them toward one concrete first automation.
 - The best wedge is simple, fast-payback digital work: data cleanup, analysis, file processing, reports, notifications, and other repetitive scriptable tasks.
 - Phone + desktop + real-machine execution is the product advantage: capture context anywhere, let the machine do the heavy work, and review results or approvals from the most convenient device.

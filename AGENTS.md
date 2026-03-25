@@ -228,7 +228,7 @@ Reusable AI workflows shareable via link. Each App defines: name, systemPrompt, 
 
 ## Current Priorities
 
-Current operating rule: prefer product slices that help non-expert users hand off repetitive digital work quickly from phone or desktop and see clear value fast. Treat multi-session orchestration, richer project structure, and broader workflow distribution as enabling layers unless they directly improve that mainstream automation path.
+Current operating rule: prefer product slices that help non-expert users — especially time-valuable middle managers / owner-operators who both delegate work and still personally absorb repetitive digital admin chores — hand off repetitive digital work quickly from phone or desktop and see clear value fast. Treat multi-session orchestration, richer project structure, and broader workflow distribution as enabling layers unless they directly improve that mainstream automation path.
 
 ### Done (recent)
 - [x] Owner/Visitor dual-role identity
