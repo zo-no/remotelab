@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 import assert from 'assert/strict';
 import http from 'http';
-import { mkdtemp, readFile, writeFile } from 'fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 
 const repoRoot = process.cwd();
+const tempHome = await mkdtemp(join(tmpdir(), 'remotelab-feishu-connector-'));
+process.env.HOME = tempHome;
+
 const { selectAssistantReplyEvent } = await import(pathToFileURL(join(repoRoot, 'lib', 'reply-selection.mjs')).href);
+const { saveUiRuntimeSelection } = await import(pathToFileURL(join(repoRoot, 'lib', 'runtime-selection.mjs')).href);
 
 const {
   DEFAULT_SESSION_SYSTEM_PROMPT,
+  buildSessionDescription,
   createRuntimeContext,
   buildRemoteLabMessage,
+  claimConnectorPidLock,
   compileFeishuReplyText,
   ensureAuthCookie,
   ensureAllowedSendersFile,
@@ -24,7 +30,10 @@ const {
   loadConfig,
   loadPersistedAccessState,
   normalizeReplyText,
+  normalizeProcessingReactionConfig,
+  releaseConnectorPidLock,
   summarizeChatMemberUserAddedEvent,
+  summarizeEvent,
 } = await import(pathToFileURL(join(repoRoot, 'scripts', 'feishu-connector.mjs')).href);
 
 const runtime = {
@@ -72,6 +81,282 @@ assert.equal(handled[0].metadata.reason, 'empty_assistant_reply');
 assert.equal(handled[0].metadata.sessionId, 'session_test_1');
 assert.equal(runtime.processingMessageIds.size, 0, 'message processing state should always be cleaned up');
 
+const confirmationTexts = [];
+sendCalls = 0;
+handled.length = 0;
+runtime.config = { silentConfirmationText: '[委屈]' };
+
+await handleMessage(runtime, { ...summary, messageId: 'msg_test_confirmation_1' }, 'test', {
+  wasMessageHandled: async () => false,
+  generateRemoteLabReply: async () => ({
+    sessionId: 'session_confirmation_test_1',
+    runId: 'run_confirmation_test_1',
+    requestId: 'request_confirmation_test_1',
+    duplicate: false,
+    replyText: '',
+  }),
+  sendFeishuText: async (_runtime, _summary, text) => {
+    sendCalls += 1;
+    confirmationTexts.push(text);
+    return { message_id: 'out_confirmation_test_1' };
+  },
+  markMessageHandled: async (_pathname, messageId, metadata) => {
+    handled.push({ messageId, metadata });
+  },
+});
+
+assert.equal(sendCalls, 0, 'emoji-only confirmation text should be stripped before sending');
+assert.deepEqual(confirmationTexts, []);
+assert.equal(handled.length, 1, 'confirmation sends should still be marked handled');
+assert.equal(handled[0].messageId, 'msg_test_confirmation_1');
+assert.equal(handled[0].metadata.status, 'silent_no_reply');
+assert.equal(handled[0].metadata.reason, 'empty_assistant_reply');
+assert.equal(handled[0].metadata.responseMessageId, undefined);
+
+runtime.config = { silentConfirmationText: '已收到。' };
+sendCalls = 0;
+handled.length = 0;
+
+await handleMessage(runtime, { ...summary, messageId: 'msg_test_confirmation_plain_1' }, 'test', {
+  wasMessageHandled: async () => false,
+  generateRemoteLabReply: async () => ({
+    sessionId: 'session_confirmation_plain_test_1',
+    runId: 'run_confirmation_plain_test_1',
+    requestId: 'request_confirmation_plain_test_1',
+    duplicate: false,
+    replyText: '',
+  }),
+  sendFeishuText: async (_runtime, _summary, text) => {
+    sendCalls += 1;
+    confirmationTexts.push(text);
+    return { message_id: 'out_confirmation_plain_test_1' };
+  },
+  markMessageHandled: async (_pathname, messageId, metadata) => {
+    handled.push({ messageId, metadata });
+  },
+});
+
+assert.equal(sendCalls, 1, 'plain-text confirmations should still be sent');
+assert.equal(confirmationTexts.at(-1), '已收到。');
+assert.equal(handled.length, 1, 'plain-text confirmation sends should still be marked handled');
+assert.equal(handled[0].messageId, 'msg_test_confirmation_plain_1');
+assert.equal(handled[0].metadata.status, 'confirmation_sent');
+assert.equal(handled[0].metadata.reason, 'empty_assistant_reply');
+assert.equal(handled[0].metadata.responseMessageId, 'out_confirmation_plain_test_1');
+
+const connectorLockDir = join(tempHome, 'connector-lock');
+const claimedLock = await claimConnectorPidLock(connectorLockDir, 54321);
+assert.equal(claimedLock.processId, 54321, 'pid lock should return the claimed process id');
+assert.equal(
+  (await readFile(claimedLock.pidPath, 'utf8')).trim(),
+  '54321',
+  'pid lock should persist the claimed pid',
+);
+releaseConnectorPidLock(claimedLock);
+
+await writeFile(claimedLock.pidPath, `${process.pid}\n`);
+await assert.rejects(
+  claimConnectorPidLock(connectorLockDir, 65432),
+  /already running/,
+  'pid lock should reject when another live connector already owns the lock',
+);
+
+await writeFile(claimedLock.pidPath, '999999\n');
+const recoveredLock = await claimConnectorPidLock(connectorLockDir, 65432);
+assert.equal(
+  (await readFile(recoveredLock.pidPath, 'utf8')).trim(),
+  '65432',
+  'pid lock should recover stale lock files',
+);
+releaseConnectorPidLock(recoveredLock);
+
+sendCalls = 0;
+handled.length = 0;
+
+await handleMessage(runtime, { ...summary, messageId: 'msg_test_duplicate_1' }, 'test', {
+  wasMessageHandled: async () => false,
+  generateRemoteLabReply: async () => ({
+    sessionId: 'session_duplicate_test_1',
+    runId: '',
+    requestId: 'request_duplicate_test_1',
+    duplicate: true,
+    queued: false,
+    replyText: '',
+  }),
+  sendFeishuText: async () => {
+    sendCalls += 1;
+    return { message_id: 'out_duplicate_test_1' };
+  },
+  markMessageHandled: async (_pathname, messageId, metadata) => {
+    handled.push({ messageId, metadata });
+  },
+});
+
+assert.equal(sendCalls, 0, 'duplicate no-reply paths should not send silent confirmations');
+assert.equal(handled.length, 1, 'duplicate no-reply paths should still be marked handled');
+assert.equal(handled[0].metadata.reason, 'duplicate_request');
+
+let reactionCalls = [];
+sendCalls = 0;
+handled.length = 0;
+runtime.config = { processingReaction: { removeOnCompletion: false } };
+
+await handleMessage(runtime, { ...summary, messageId: 'msg_test_processing_reaction' }, 'test', {
+  wasMessageHandled: async () => false,
+  addProcessingReaction: async (_runtime, reactionSummary) => {
+    reactionCalls.push(['add', reactionSummary.messageId]);
+    return { reactionId: 'react_test_1', emojiType: 'GLANCE' };
+  },
+  generateRemoteLabReply: async () => {
+    reactionCalls.push(['generate']);
+    return {
+      sessionId: 'session_reaction_test_1',
+      runId: 'run_reaction_test_1',
+      requestId: 'request_reaction_test_1',
+      duplicate: false,
+      replyText: 'Reaction-backed reply.',
+    };
+  },
+  sendFeishuText: async () => {
+    reactionCalls.push(['send']);
+    sendCalls += 1;
+    return { message_id: 'out_reaction_test_1' };
+  },
+  markMessageHandled: async (_pathname, messageId, metadata) => {
+    handled.push({ messageId, metadata });
+  },
+});
+
+assert.deepEqual(reactionCalls, [
+  ['add', 'msg_test_processing_reaction'],
+  ['generate'],
+  ['send'],
+], 'processing reactions should stay attached by default after the long-running reply path');
+assert.equal(sendCalls, 1, 'non-empty assistant replies should still be sent');
+assert.equal(handled.length, 1, 'reaction-backed replies should still be marked handled');
+assert.equal(handled[0].metadata.status, 'sent');
+
+reactionCalls = [];
+sendCalls = 0;
+handled.length = 0;
+runtime.config = { processingReaction: { removeOnCompletion: true } };
+
+await handleMessage(runtime, { ...summary, messageId: 'msg_test_processing_reaction_silent' }, 'test', {
+  wasMessageHandled: async () => false,
+  addProcessingReaction: async (_runtime, reactionSummary) => {
+    reactionCalls.push(['add', reactionSummary.messageId]);
+    return { reactionId: 'react_test_2', emojiType: 'GLANCE' };
+  },
+  generateRemoteLabReply: async () => {
+    reactionCalls.push(['generate']);
+    return {
+      sessionId: 'session_reaction_test_2',
+      runId: 'run_reaction_test_2',
+      requestId: 'request_reaction_test_2',
+      duplicate: false,
+      replyText: '',
+    };
+  },
+  sendFeishuText: async () => {
+    sendCalls += 1;
+    return { message_id: 'out_reaction_test_2' };
+  },
+  removeProcessingReaction: async (_runtime, reactionSummary, reaction) => {
+    reactionCalls.push(['remove', reactionSummary.messageId, reaction.reactionId]);
+    return true;
+  },
+  markMessageHandled: async (_pathname, messageId, metadata) => {
+    handled.push({ messageId, metadata });
+  },
+});
+
+assert.deepEqual(reactionCalls, [
+  ['add', 'msg_test_processing_reaction_silent'],
+  ['generate'],
+  ['remove', 'msg_test_processing_reaction_silent', 'react_test_2'],
+], 'processing reactions should still be removable when explicitly configured');
+assert.equal(sendCalls, 0, 'silent assistant replies should not send Feishu messages');
+assert.equal(handled.length, 1, 'silent reaction-backed replies should still be marked handled');
+assert.equal(handled[0].metadata.status, 'silent_no_reply');
+
+const imageSummary = summarizeEvent({
+  event_id: 'evt_image_1',
+  event_type: 'im.message.receive_v1',
+  tenant_key: 'tenant_image_1',
+  sender: {
+    sender_id: { open_id: 'ou_image_1' },
+    sender_type: 'user',
+    tenant_key: 'tenant_image_1',
+  },
+  message: {
+    chat_id: 'chat_image_1',
+    chat_type: 'group',
+    message_id: 'msg_image_1',
+    message_type: 'image',
+    content: JSON.stringify({ image_key: 'img_v2_1' }),
+  },
+});
+
+assert.equal(imageSummary.textPreview, '', 'image payloads should not fake a text preview');
+assert.equal(imageSummary.contentSummary, 'Image attachment');
+assert.deepEqual(imageSummary.contentKeys, ['image_key']);
+
+const richPostSummary = summarizeEvent({
+  event_id: 'evt_post_1',
+  event_type: 'im.message.receive_v1',
+  tenant_key: 'tenant_post_1',
+  sender: {
+    sender_id: { open_id: 'ou_post_1' },
+    sender_type: 'user',
+    tenant_key: 'tenant_post_1',
+  },
+  message: {
+    chat_id: 'chat_post_1',
+    chat_type: 'group',
+    message_id: 'msg_post_1',
+    message_type: 'post',
+    content: JSON.stringify({
+      title: 'Weekly update',
+      content: [[
+        { tag: 'text', text: 'Alpha milestone' },
+        { tag: 'text', text: 'Beta follow-up' },
+      ]],
+    }),
+  },
+});
+
+assert.match(richPostSummary.contentSummary, /Rich text post/i);
+assert.match(richPostSummary.contentSummary, /Weekly update/i);
+
+sendCalls = 0;
+handled.length = 0;
+let unsupportedInvokedRemoteLab = false;
+
+await handleMessage(runtime, imageSummary, 'test', {
+  wasMessageHandled: async () => false,
+  generateRemoteLabReply: async () => {
+    unsupportedInvokedRemoteLab = true;
+    throw new Error('unsupported messages should not invoke RemoteLab');
+  },
+  sendFeishuText: async () => {
+    sendCalls += 1;
+    return { message_id: 'out_test_image' };
+  },
+  markMessageHandled: async (_pathname, messageId, metadata) => {
+    handled.push({ messageId, metadata });
+  },
+});
+
+assert.equal(unsupportedInvokedRemoteLab, false, 'unsupported non-text payloads should stop before RemoteLab submission');
+assert.equal(sendCalls, 0, 'unsupported non-text payloads should not send fallback replies');
+assert.equal(handled.length, 1, 'unsupported non-text payloads should still be marked handled');
+assert.equal(handled[0].messageId, 'msg_image_1');
+assert.equal(handled[0].metadata.status, 'silent_no_reply');
+assert.equal(handled[0].metadata.reason, 'unsupported_message_type');
+assert.equal(handled[0].metadata.messageType, 'image');
+assert.equal(handled[0].metadata.contentSummary, 'Image attachment');
+assert.equal(runtime.processingMessageIds.size, 0, 'unsupported payload processing state should always be cleaned up');
+
 const authRefreshRuntime = {
   authCookie: 'session_token=stale-cookie',
   authToken: 'stale-token',
@@ -97,6 +382,8 @@ assert.equal(authRefreshRuntime.authCookie, 'session_token=fresh-token');
 assert.equal(normalizeReplyText('  \n\n  '), '');
 assert.equal(normalizeReplyText('  hello\r\n'), 'hello');
 assert.equal(normalizeReplyText(' <private>internal only</private> '), '');
+assert.equal(normalizeReplyText('  😺 hello [委屈]\r\n'), 'hello');
+assert.equal(normalizeReplyText('好的😺，我来处理。'), '好的，我来处理。');
 
 sendCalls = 0;
 handled.length = 0;
@@ -191,14 +478,23 @@ const mentionSummary = {
 };
 
 const mentionPrompt = buildRemoteLabMessage(mentionSummary);
-assert.match(mentionPrompt, /User message \(rendered mentions\):\n厉害不，@江虹 你发一条消息/);
-assert.match(mentionPrompt, /Original mention-token message:\n厉害不，@_user_1 你发一条消息/);
-assert.match(mentionPrompt, /Mention map:\n- @_user_1 => @江虹 \| open_id=ou_mention_1 \| union_id=on_mention_1/);
-assert.match(mentionPrompt, /include their exact mention token/);
-assert.match(mentionPrompt, /If you should stay silent, output an empty string\./);
+assert.equal(mentionPrompt, '厉害不，@江虹 你发一条消息');
+assert.doesNotMatch(mentionPrompt, /open_id=|union_id=|Chat type:|Thread ID:|Sender:/);
+assert.doesNotMatch(mentionPrompt, /^Group chat\./);
+assert.doesNotMatch(mentionPrompt, /If you need to mention someone in your reply, use these exact tokens:/);
+assert.doesNotMatch(mentionPrompt, /Write the exact plain-text Feishu reply to send back/);
 
-assert.match(DEFAULT_SESSION_SYSTEM_PROMPT, /prefer silence by default/i);
-assert.match(DEFAULT_SESSION_SYSTEM_PROMPT, /output an empty string/i);
+assert.equal(
+  buildSessionDescription({
+    chatType: 'group',
+    chatId: 'chat_group_1',
+    sender: { openId: 'ou_sender_1' },
+  }),
+  'Inbound Feishu group chat',
+  'session descriptions should stay human-readable instead of embedding transport IDs',
+);
+
+assert.match(DEFAULT_SESSION_SYSTEM_PROMPT, /Keep connector-specific overrides minimal/i);
 
 const tempConfigDir = await mkdtemp(join(tmpdir(), 'remotelab-feishu-config-'));
 const tempConfigPath = join(tempConfigDir, 'config.json');
@@ -210,13 +506,59 @@ await writeFile(tempConfigPath, `${JSON.stringify({
 }, null, 2)}\n`, 'utf8');
 
 const loadedConfig = await loadConfig(tempConfigPath);
-assert.match(loadedConfig.systemPrompt, /prefer silence by default/i, 'default config prompt should include silence-first guidance');
-assert.match(loadedConfig.systemPrompt, /empty string means no Feishu message should be sent/i, 'default config prompt should explain silent no-reply behavior');
+assert.equal(loadedConfig.systemPrompt, '', 'default config should rely on backend-owned source prompt logic');
+assert.equal(loadedConfig.runtimeSelectionMode, 'ui');
+assert.deepEqual(loadedConfig.processingReaction, {
+  enabled: false,
+  emojiType: 'THINKING',
+  removeOnCompletion: false,
+}, 'processing reactions should default to disabled');
+assert.equal(loadedConfig.silentConfirmationText, '', 'silent confirmations should default to disabled');
+
+assert.deepEqual(normalizeProcessingReactionConfig(true), {
+  enabled: true,
+  emojiType: 'THINKING',
+  removeOnCompletion: false,
+});
+assert.deepEqual(normalizeProcessingReactionConfig('wronged'), {
+  enabled: true,
+  emojiType: 'WRONGED',
+  removeOnCompletion: false,
+});
+assert.deepEqual(normalizeProcessingReactionConfig('fingerheart'), {
+  enabled: true,
+  emojiType: 'FINGERHEART',
+  removeOnCompletion: false,
+});
+assert.deepEqual(normalizeProcessingReactionConfig('thinking'), {
+  enabled: true,
+  emojiType: 'THINKING',
+  removeOnCompletion: false,
+});
+assert.deepEqual(normalizeProcessingReactionConfig({
+  enabled: true,
+  emojiType: 'smart',
+  removeOnCompletion: false,
+}), {
+  enabled: true,
+  emojiType: 'SMART',
+  removeOnCompletion: false,
+});
 
 assert.equal(
   compileFeishuReplyText('@_user_1 这是一条消息。', mentionSummary.mentions),
   '<at user_id="ou_mention_1">江虹</at> 这是一条消息。',
   'reply mention tokens should compile into Feishu mention tags before sending',
+);
+assert.equal(
+  compileFeishuReplyText('@江虹 这是一条消息。', mentionSummary.mentions),
+  '<at user_id="ou_mention_1">江虹</at> 这是一条消息。',
+  'natural @displayName mentions should also compile into Feishu mention tags',
+);
+assert.equal(
+  compileFeishuReplyText('😺 @_user_1 [委屈] 这是一条消息。', mentionSummary.mentions),
+  '<at user_id="ou_mention_1">江虹</at> 这是一条消息。',
+  'outbound emoji and sticker aliases should be stripped before mention compilation',
 );
 
 const tempDir = await mkdtemp(join(tmpdir(), 'remotelab-feishu-whitelist-'));
@@ -390,6 +732,7 @@ assert.ok(persistedAfterJoin.membershipGrants['chat_group_approve_1:ou_new_user_
 assert.equal(persistedAfterJoin.approvedChats.chat_group_approve_1.name, 'Family Group');
 
 let createdPayload = null;
+let submittedPayload = null;
 const server = http.createServer(async (req, res) => {
   let body = '';
   req.on('data', (chunk) => {
@@ -404,7 +747,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/api/sessions/sess_feishu_1') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      session: {
+        id: 'sess_feishu_1',
+        latestSeq: 1,
+        activity: {
+          run: { state: 'idle' },
+          queue: { count: 0 },
+          compact: { state: 'idle' },
+        },
+      },
+    }));
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/api/sessions/sess_feishu_1/messages') {
+    submittedPayload = JSON.parse(body || '{}');
     res.writeHead(202, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ run: { id: 'run_feishu_1' } }));
     return;
@@ -439,6 +799,12 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
 try {
   const address = server.address();
+  await saveUiRuntimeSelection({
+    selectedTool: 'claude',
+    selectedModel: 'claude-sonnet-4-5',
+    thinkingEnabled: true,
+    reasoningKind: 'toggle',
+  });
   const reply = await generateRemoteLabReply(
     {
       authCookie: 'session_token=test-cookie',
@@ -446,11 +812,11 @@ try {
       config: {
         chatBaseUrl: `http://127.0.0.1:${address.port}`,
         sessionFolder: repoRoot,
-        sessionTool: 'codex',
+        sessionTool: 'micro-agent',
         systemPrompt: 'Reply with plain text only.',
         thinking: false,
-        model: '',
-        effort: '',
+        model: 'gpt-5.4',
+        effort: 'low',
       },
     },
     {
@@ -464,17 +830,181 @@ try {
 
   assert.equal(createdPayload?.appId, 'feishu');
   assert.equal(createdPayload?.appName, 'Feishu');
+  assert.equal(createdPayload?.sourceId, 'feishu');
+  assert.equal(createdPayload?.sourceName, 'Feishu');
+  assert.equal(createdPayload?.tool, 'claude');
+  assert.equal(createdPayload?.systemPrompt, 'Reply with plain text only.');
   assert.equal(createdPayload?.externalTriggerId, 'feishu:p2p:chat_for_scope');
+  assert.equal(createdPayload?.sourceContext?.chatType, 'p2p');
+  assert.equal(createdPayload?.sourceContext?.chatId, 'chat_for_scope');
+  assert.equal(submittedPayload?.tool, 'claude');
+  assert.equal(submittedPayload?.model, 'claude-sonnet-4-5');
+  assert.equal(submittedPayload?.thinking, true);
+  assert.equal(submittedPayload?.effort, undefined);
+  assert.equal(submittedPayload?.text, 'Please confirm the app scope.');
+  assert.equal(submittedPayload?.sourceContext?.messageId, 'msg_for_scope');
+  assert.equal(submittedPayload?.sourceContext?.chatType, 'p2p');
   assert.equal(reply.sessionId, 'sess_feishu_1');
   assert.equal(reply.runId, 'run_feishu_1');
   assert.equal(reply.replyText, 'Feishu reply ready.');
 } finally {
   await new Promise((resolve) => server.close(resolve));
+  await rm(tempHome, { recursive: true, force: true });
+}
+
+let queuedSubmittedPayload = null;
+const queuedServer = http.createServer(async (req, res) => {
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk.toString();
+  });
+  await new Promise((resolve) => req.on('end', resolve));
+
+  if (req.method === 'POST' && req.url === '/api/sessions') {
+    res.writeHead(201, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      session: {
+        id: 'sess_feishu_queued_1',
+        latestSeq: 7,
+        activity: {
+          run: { state: 'idle' },
+          queue: { count: 0 },
+          compact: { state: 'idle' },
+        },
+      },
+    }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/sessions/sess_feishu_queued_1') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      session: {
+        id: 'sess_feishu_queued_1',
+        latestSeq: 7,
+        activity: {
+          run: { state: 'idle' },
+          queue: { count: 0 },
+          compact: { state: 'idle' },
+        },
+      },
+    }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/sessions/sess_feishu_queued_1/messages') {
+    queuedSubmittedPayload = JSON.parse(body || '{}');
+    res.writeHead(202, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      queued: true,
+      run: null,
+      session: {
+        id: 'sess_feishu_queued_1',
+        activity: {
+          run: { state: 'running' },
+          queue: { count: 1 },
+          compact: { state: 'idle' },
+        },
+      },
+    }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/sessions/sess_feishu_queued_1/events?filter=all') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      events: [
+        {
+          seq: 8,
+          type: 'message',
+          role: 'user',
+          runId: 'run_feishu_queued_1',
+          requestId: 'queued_batch_internal',
+          sourceContext: {
+            queuedMessages: [{
+              requestId: 'feishu:msg_queued_scope',
+              sourceContext: {
+                connector: 'feishu',
+                messageId: 'msg_queued_scope',
+                chatType: 'group',
+              },
+            }],
+          },
+        },
+      ],
+    }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/runs/run_feishu_queued_1') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ run: { id: 'run_feishu_queued_1', state: 'completed' } }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/sessions/sess_feishu_queued_1/events') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      events: [{
+        seq: 9,
+        type: 'message',
+        role: 'assistant',
+        runId: 'run_feishu_queued_1',
+        requestId: 'queued_batch_internal',
+        content: 'Queued reply is ready now.',
+      }],
+    }));
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not found' }));
+});
+
+await new Promise((resolve) => queuedServer.listen(0, '127.0.0.1', resolve));
+
+try {
+  const address = queuedServer.address();
+  await saveUiRuntimeSelection({
+    selectedTool: 'codex',
+    selectedModel: '',
+    thinkingEnabled: false,
+  });
+  const reply = await generateRemoteLabReply(
+    {
+      authCookie: 'session_token=test-cookie',
+      authToken: 'ignored',
+      config: {
+        chatBaseUrl: `http://127.0.0.1:${address.port}`,
+        sessionFolder: repoRoot,
+        sessionTool: 'codex',
+        systemPrompt: 'Reply with plain text only.',
+      },
+    },
+    {
+      chatType: 'group',
+      chatId: 'chat_queued_scope',
+      messageId: 'msg_queued_scope',
+      textPreview: 'Please wait until the queued reply is actually ready.',
+      sender: { openId: 'ou_scope_test_queued' },
+    },
+  );
+
+  assert.equal(queuedSubmittedPayload?.requestId, 'feishu:msg_queued_scope');
+  assert.equal(reply.sessionId, 'sess_feishu_queued_1');
+  assert.equal(reply.runId, 'run_feishu_queued_1');
+  assert.equal(reply.queued, true);
+  assert.equal(reply.replyText, 'Queued reply is ready now.');
+} finally {
+  await new Promise((resolve) => queuedServer.close(resolve));
 }
 
 console.log('ok - empty assistant replies stay silent');
+console.log('ok - processing reactions bracket delayed Feishu replies');
+console.log('ok - non-text Feishu payloads are summarized and ignored silently');
 console.log('ok - mention tokens are rendered inbound and compiled outbound');
 console.log('ok - whitelist file reloads without restart');
 console.log('ok - local group approval commands persist approved chats');
 console.log('ok - approved chats auto-grant newly joined members');
 console.log('ok - generated Feishu sessions use the feishu app scope');
+console.log('ok - queued Feishu follow-ups wait for the eventual assistant reply');

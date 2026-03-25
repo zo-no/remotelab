@@ -1,159 +1,8 @@
-// ---- Responsive layout ----
-const MOBILE_KEYBOARD_OPEN_THRESHOLD = 120;
-const layoutSubscribers = new Set();
-let layoutPassHandle = 0;
-let pendingLayoutReason = null;
-let currentLayoutState = null;
-
-function scheduleAnimationFrame(callback) {
-  if (typeof window?.requestAnimationFrame === "function") {
-    return window.requestAnimationFrame(callback);
-  }
-  if (typeof requestAnimationFrame === "function") {
-    return requestAnimationFrame(callback);
-  }
-  callback();
-  return 0;
-}
-
-function getLayoutViewportHeightPx() {
-  const innerHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  return Math.round(innerHeight);
-}
-
-function getVisualViewportHeightPx() {
-  const visualHeight = window.visualViewport?.height;
-  if (Number.isFinite(visualHeight) && visualHeight > 0) {
-    return Math.round(visualHeight);
-  }
-  return 0;
-}
-
-function buildLayoutState() {
-  const layoutViewportHeight = getLayoutViewportHeightPx();
-  const visualViewportHeight = getVisualViewportHeightPx();
-  const viewportHeight = visualViewportHeight > 0
-    ? Math.min(layoutViewportHeight || visualViewportHeight, visualViewportHeight)
-    : layoutViewportHeight;
-  const keyboardInsetHeight = !isDesktop && layoutViewportHeight > 0
-    ? Math.max(0, layoutViewportHeight - viewportHeight)
-    : 0;
-  return {
-    isDesktop,
-    layoutViewportHeight,
-    viewportHeight,
-    keyboardInsetHeight,
-    keyboardOpen: !isDesktop && keyboardInsetHeight >= MOBILE_KEYBOARD_OPEN_THRESHOLD,
-  };
-}
-
-function applyLayoutState(state) {
-  if (state.viewportHeight > 0) {
-    document.documentElement.style.setProperty("--app-height", `${state.viewportHeight}px`);
-  }
-  document.documentElement.style.setProperty("--keyboard-inset-height", `${state.keyboardInsetHeight}px`);
-  document.documentElement.classList.toggle("keyboard-open", state.keyboardOpen);
-  document.body?.classList.toggle("keyboard-open", state.keyboardOpen);
-}
-
-function getLayoutState() {
-  if (!currentLayoutState) {
-    currentLayoutState = buildLayoutState();
-    applyLayoutState(currentLayoutState);
-  }
-  return currentLayoutState;
-}
-
-function runLayoutPass(reason = "layout") {
-  layoutPassHandle = 0;
-  pendingLayoutReason = null;
-  currentLayoutState = buildLayoutState();
-  applyLayoutState(currentLayoutState);
-  for (const subscriber of layoutSubscribers) {
-    try {
-      subscriber(currentLayoutState, reason);
-    } catch (error) {
-      console.warn("[layout] Subscriber failed:", error.message);
-    }
-  }
-  return currentLayoutState;
-}
-
-function requestLayoutPass(reason = "layout") {
-  pendingLayoutReason = reason;
-  if (layoutPassHandle) {
-    return layoutPassHandle;
-  }
-  layoutPassHandle = scheduleAnimationFrame(() => {
-    runLayoutPass(pendingLayoutReason || reason);
-  });
-  return layoutPassHandle;
-}
-
-function subscribeLayoutPass(subscriber, { immediate = false } = {}) {
-  if (typeof subscriber !== "function") {
-    return () => {};
-  }
-  layoutSubscribers.add(subscriber);
-  if (immediate) {
-    subscriber(getLayoutState(), "subscribe");
-  }
-  return () => {
-    layoutSubscribers.delete(subscriber);
-  };
-}
-
-function getViewportHeightPx() {
-  return getLayoutState().viewportHeight;
-}
-
-function syncViewportHeight() {
-  return runLayoutPass("viewport");
-}
-
-function focusComposer({ force = false, preventScroll = false } = {}) {
-  if (!msgInput?.focus) return false;
-  if (!force && !getLayoutState().isDesktop) return false;
-  try {
-    if (preventScroll) {
-      msgInput.focus({ preventScroll: true });
-    } else {
-      msgInput.focus();
-    }
-  } catch {
-    msgInput.focus();
-  }
-  return true;
-}
-
-window.RemoteLabLayout = {
-  getState: getLayoutState,
-  getViewportHeight: getViewportHeightPx,
-  requestPass: requestLayoutPass,
-  subscribe: subscribeLayoutPass,
-  syncNow: runLayoutPass,
-  focusComposer,
-};
-
-function initResponsiveLayout() {
-  const mq = window.matchMedia("(min-width: 768px)");
-  function onBreakpointChange(e) {
-    isDesktop = e.matches;
-    sidebarOverlay.classList.remove("collapsed");
-    if (isDesktop) {
-      document.documentElement.classList.remove("keyboard-open");
-      document.body?.classList.remove("keyboard-open");
-      sidebarOverlay.classList.remove("open");
-    }
-    runLayoutPass("breakpoint");
-  }
-  window.addEventListener("resize", () => requestLayoutPass("window-resize"));
-  window.visualViewport?.addEventListener("resize", () => requestLayoutPass("visual-viewport-resize"));
-  mq.addEventListener("change", onBreakpointChange);
-  onBreakpointChange(mq);
-}
-
 // ---- Thinking toggle / effort select ----
+function t(key, vars) {
+  return window.remotelabT ? window.remotelabT(key, vars) : key;
+}
+
 let runtimeSelectionSyncPromise = Promise.resolve();
 let lastSyncedRuntimeSelectionPayload = '';
 
@@ -309,7 +158,7 @@ function getAddToolDraft() {
     addToolRuntimeFamilySelect?.value || "claude-stream-json";
   const models = parseModelLines(addToolModelsInput?.value || "");
   const reasoningKind = addToolReasoningKindSelect?.value || "toggle";
-  const reasoning = { kind: reasoningKind, label: "Thinking" };
+  const reasoning = { kind: reasoningKind, label: t("tooling.thinking") };
   if (reasoningKind === "enum") {
     reasoning.levels = parseReasoningLevels(addToolReasoningLevelsInput?.value || "")
       .length > 0
@@ -373,6 +222,11 @@ function updateCopyButtonLabel(button, label) {
   }, 1400);
 }
 
+function getToolingLabel(key, vars) {
+  if (typeof t === "function") return t(key, vars);
+  return window.remotelabT ? window.remotelabT(key, vars) : key;
+}
+
 function resetHeaderActionButton(button) {
   if (!button) return;
   button.disabled = false;
@@ -404,6 +258,20 @@ function syncForkButton() {
   forkSessionBtn.disabled = !session || activity.run.state === "running" || activity.compact.state === "pending";
 }
 
+function getShareSnapshotTitle(session) {
+  const name = typeof session?.name === "string" ? session.name.trim() : "";
+  if (name) return name;
+  const tool = typeof session?.tool === "string" ? session.tool.trim() : "";
+  if (tool) return tool;
+  return `RemoteLab ${getToolingLabel("status.readOnlySnapshot")}`;
+}
+
+function buildShareSnapshotShareText(session, shareUrl) {
+  const title = getShareSnapshotTitle(session);
+  const link = typeof shareUrl === "string" ? shareUrl.trim() : "";
+  return link ? `${title}\n${link}` : title;
+}
+
 async function shareCurrentSessionSnapshot() {
   if (!currentSessionId || visitorMode || !shareSnapshotBtn) return;
 
@@ -423,6 +291,7 @@ async function shareCurrentSessionSnapshot() {
     const shareUrl = payload?.share?.url
       ? new URL(payload.share.url, location.origin).toString()
       : null;
+    const shareText = buildShareSnapshotShareText(currentSession, shareUrl);
 
     if (!res.ok || !shareUrl) {
       throw new Error(payload?.error || "Failed to create share link");
@@ -430,12 +299,8 @@ async function shareCurrentSessionSnapshot() {
 
     if (navigator.share) {
       try {
-        await navigator.share({
-          title: currentSession?.name || currentSession?.tool || "RemoteLab snapshot",
-          text: "Read-only RemoteLab session snapshot",
-          url: shareUrl,
-        });
-        updateCopyButtonLabel(shareSnapshotBtn, "Shared");
+        await navigator.share({ text: shareText });
+        updateCopyButtonLabel(shareSnapshotBtn, getToolingLabel("action.share"));
         return;
       } catch (err) {
         if (err?.name === "AbortError") return;
@@ -443,15 +308,15 @@ async function shareCurrentSessionSnapshot() {
     }
 
     try {
-      await copyText(shareUrl);
-      updateCopyButtonLabel(shareSnapshotBtn, "Copied");
+      await copyText(shareText);
+      updateCopyButtonLabel(shareSnapshotBtn, getToolingLabel("action.copied"));
     } catch {
-      window.prompt("Copy share link", shareUrl);
-      updateCopyButtonLabel(shareSnapshotBtn, "Ready");
+      window.prompt("Copy share text", shareText);
+      updateCopyButtonLabel(shareSnapshotBtn, getToolingLabel("action.copy"));
     }
   } catch (err) {
     console.warn("[share] Failed to create snapshot:", err.message);
-    updateCopyButtonLabel(shareSnapshotBtn, "Failed");
+    updateCopyButtonLabel(shareSnapshotBtn, getToolingLabel("action.copyFailed"));
   } finally {
     shareSnapshotBtn.disabled = false;
     syncShareButton();
@@ -464,7 +329,7 @@ async function forkCurrentSession() {
   const original = forkSessionBtn.dataset.originalLabel || forkSessionBtn.textContent;
   forkSessionBtn.dataset.originalLabel = original;
   forkSessionBtn.disabled = true;
-  forkSessionBtn.textContent = "Forking…";
+  forkSessionBtn.textContent = `${getToolingLabel("action.fork")}…`;
 
   try {
     const data = await fetchJsonOrRedirect(`/api/sessions/${encodeURIComponent(currentSessionId)}/fork`, {
@@ -473,13 +338,13 @@ async function forkCurrentSession() {
     if (data.session) {
       upsertSession(data.session);
       renderSessionList();
-      updateCopyButtonLabel(forkSessionBtn, "Forked");
+      updateCopyButtonLabel(forkSessionBtn, getToolingLabel("action.fork"));
     } else {
-      updateCopyButtonLabel(forkSessionBtn, "Failed");
+      updateCopyButtonLabel(forkSessionBtn, getToolingLabel("action.copyFailed"));
     }
   } catch (err) {
     console.warn("[fork] Failed to fork session:", err.message);
-    updateCopyButtonLabel(forkSessionBtn, "Failed");
+    updateCopyButtonLabel(forkSessionBtn, getToolingLabel("action.copyFailed"));
   } finally {
     syncForkButton();
   }
@@ -587,7 +452,7 @@ function renderInlineToolOptions(selectedValue, emptyMessage = "No agents found"
 
   const addMoreOpt = document.createElement("option");
   addMoreOpt.value = ADD_MORE_TOOL_VALUE;
-  addMoreOpt.textContent = "+ Add more...";
+  addMoreOpt.textContent = t("settings.apps.addToolMore");
   inlineToolSelect.appendChild(addMoreOpt);
 
   if (selectedValue && toolsList.some((tool) => tool.id === selectedValue)) {
@@ -595,6 +460,32 @@ function renderInlineToolOptions(selectedValue, emptyMessage = "No agents found"
   } else if (toolsList[0]) {
     inlineToolSelect.value = toolsList[0].id;
   }
+}
+
+function getVisiblePrimaryToolOptions(keepToolIds = []) {
+  const allKeepIds = [
+    ...(Array.isArray(keepToolIds) ? keepToolIds : [keepToolIds]),
+    selectedTool,
+    preferredTool,
+  ];
+  return prioritizeToolOptions(
+    filterPrimaryToolOptions(
+      (Array.isArray(allToolsList) ? allToolsList : []).filter((tool) => tool?.available),
+      { keepIds: allKeepIds },
+    ),
+  );
+}
+
+function refreshPrimaryToolPicker({ keepToolIds = [], selectedValue = "" } = {}) {
+  toolsList = getVisiblePrimaryToolOptions(keepToolIds);
+  const resolvedTool = resolvePreferredToolId(toolsList, [
+    selectedValue,
+    ...(Array.isArray(keepToolIds) ? keepToolIds : [keepToolIds]),
+    selectedTool,
+    preferredTool,
+  ]);
+  renderInlineToolOptions(resolvedTool);
+  return resolvedTool;
 }
 
 const modelResponseCache = new Map();
@@ -606,7 +497,7 @@ async function fetchModelResponse(toolId, { refresh = false } = {}) {
       models: [],
       effortLevels: null,
       defaultModel: null,
-      reasoning: { kind: "none", label: "Thinking" },
+      reasoning: { kind: "none", label: t("tooling.thinking") },
     };
   }
 
@@ -635,6 +526,7 @@ async function fetchModelResponse(toolId, { refresh = false } = {}) {
 
 async function loadInlineTools({ skipModelLoad = false } = {}) {
   if (visitorMode) {
+    allToolsList = [];
     toolsList = [];
     selectedTool = null;
     selectedModel = null;
@@ -643,11 +535,8 @@ async function loadInlineTools({ skipModelLoad = false } = {}) {
   }
   try {
     const data = await fetchJsonOrRedirect("/api/tools");
-    toolsList = (data.tools || []).filter((t) => t.available);
-    const initialTool = [selectedTool, preferredTool, toolsList[0]?.id].find(
-      (toolId) => toolId && toolsList.some((t) => t.id === toolId),
-    );
-    renderInlineToolOptions(initialTool);
+    allToolsList = Array.isArray(data.tools) ? data.tools : [];
+    const initialTool = refreshPrimaryToolPicker();
     if (initialTool) {
       selectedTool = initialTool;
       if (!preferredTool) {
@@ -665,6 +554,7 @@ async function loadInlineTools({ skipModelLoad = false } = {}) {
       renderSettingsAppsPanel();
     }
   } catch (err) {
+    allToolsList = [];
     toolsList = [];
     console.warn("[tools] Failed to load tools:", err.message);
     renderInlineToolOptions("", "Failed to load agents");
@@ -677,7 +567,7 @@ async function loadInlineTools({ skipModelLoad = false } = {}) {
 inlineToolSelect.addEventListener("change", async () => {
   const nextTool = inlineToolSelect.value;
   if (nextTool === ADD_MORE_TOOL_VALUE) {
-    renderInlineToolOptions(selectedTool || preferredTool || toolsList[0]?.id || "");
+    renderInlineToolOptions(resolvePreferredToolId(toolsList, [selectedTool, preferredTool]));
     openAddToolModal();
     return;
   }
@@ -697,7 +587,7 @@ async function loadModelsForCurrentTool({ refresh = false } = {}) {
     currentToolModels = [];
     currentToolEffortLevels = null;
     currentToolReasoningKind = "none";
-    currentToolReasoningLabel = "Thinking";
+    currentToolReasoningLabel = t("tooling.thinking");
     currentToolReasoningDefault = null;
     selectedModel = null;
     selectedEffort = null;
@@ -712,7 +602,7 @@ async function loadModelsForCurrentTool({ refresh = false } = {}) {
     currentToolModels = [];
     currentToolEffortLevels = null;
     currentToolReasoningKind = "none";
-    currentToolReasoningLabel = "Thinking";
+    currentToolReasoningLabel = t("tooling.thinking");
     currentToolReasoningDefault = null;
     selectedModel = null;
     selectedEffort = null;
@@ -729,7 +619,7 @@ async function loadModelsForCurrentTool({ refresh = false } = {}) {
     currentToolModels = data.models || [];
     currentToolReasoningKind =
       data.reasoning?.kind || (data.effortLevels ? "enum" : "toggle");
-    currentToolReasoningLabel = data.reasoning?.label || "Thinking";
+    currentToolReasoningLabel = data.reasoning?.label || t("tooling.thinking");
     currentToolReasoningDefault = data.reasoning?.default || null;
     currentToolEffortLevels =
       currentToolReasoningKind === "enum"
@@ -741,7 +631,7 @@ async function loadModelsForCurrentTool({ refresh = false } = {}) {
     inlineModelSelect.innerHTML = "";
     const defaultOpt = document.createElement("option");
     defaultOpt.value = "";
-    defaultOpt.textContent = "default";
+    defaultOpt.textContent = t("tooling.defaultModel");
     inlineModelSelect.appendChild(defaultOpt);
     for (const m of currentToolModels) {
       const opt = document.createElement("option");
@@ -871,7 +761,7 @@ saveToolConfigBtn.addEventListener("click", saveSimpleToolConfig);
 copyProviderPromptBtn.addEventListener("click", async () => {
   try {
     await copyText(buildProviderBasePrompt());
-    updateCopyButtonLabel(copyProviderPromptBtn, "Copied");
+    updateCopyButtonLabel(copyProviderPromptBtn, t("action.copied"));
   } catch (err) {
     console.warn("[copy] Failed to copy provider prompt:", err.message);
   }

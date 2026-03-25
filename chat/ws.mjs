@@ -3,6 +3,13 @@ import { isAuthenticated, getAuthSession } from '../lib/auth.mjs';
 import { setWss } from './ws-clients.mjs';
 import { getPageBuildInfo } from './router.mjs';
 
+function sendJson(ws, payload) {
+  if (ws.readyState !== 1) return;
+  try {
+    ws.send(JSON.stringify(payload));
+  } catch {}
+}
+
 async function sendBuildInfo(ws) {
   try {
     const buildInfo = await getPageBuildInfo();

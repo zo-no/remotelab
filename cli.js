@@ -31,7 +31,13 @@ Usage:
   remotelab start                    Start all services
   remotelab stop                     Stop all services
   remotelab restart [service]        Restart services (chat|tunnel|all)
+  remotelab release                  Create, gate, and activate a release snapshot
+  remotelab guest-instance           Create isolated guest instances on this machine
   remotelab chat                     Run chat server in foreground
+  remotelab api                      Call the local RemoteLab HTTP API with owner auth
+  remotelab trigger                  Manage durable session triggers
+  remotelab usage-summary            Summarize local Codex token usage
+  remotelab session-spawn            Spawn a focused parallel session from a source session
   remotelab generate-token           Generate a new access token
   remotelab set-password             Set username & password for login
   remotelab --help                   Show this help message
@@ -64,6 +70,75 @@ switch (command) {
   case 'chat':
     await import(scriptPath('chat-server.mjs'));
     break;
+
+  case 'release': {
+    const { runReleaseCommand } = await import(scriptPath('lib/release-command.mjs'));
+    try {
+      process.exitCode = await runReleaseCommand(args);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'guest-instance':
+  case 'guest-instances': {
+    const { runGuestInstanceCommand } = await import(scriptPath('lib/guest-instance-command.mjs'));
+    try {
+      process.exitCode = await runGuestInstanceCommand(args);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'api': {
+    const { runRemoteLabApiCommand } = await import(scriptPath('lib/remotelab-api-command.mjs'));
+    try {
+      process.exitCode = await runRemoteLabApiCommand(args);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'trigger':
+  case 'triggers': {
+    const { runTriggerCommand } = await import(scriptPath('lib/trigger-command.mjs'));
+    try {
+      process.exitCode = await runTriggerCommand(args);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'usage-summary': {
+    const { runUsageSummaryCommand } = await import(scriptPath('lib/usage-summary-command.mjs'));
+    try {
+      process.exitCode = await runUsageSummaryCommand(args);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'session-spawn':
+  case 'spawn-session': {
+    const { runSessionSpawnCommand } = await import(scriptPath('lib/session-spawn-command.mjs'));
+    try {
+      process.exitCode = await runSessionSpawnCommand(args);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(1);
+    }
+    break;
+  }
 
   case 'generate-token': {
     try {

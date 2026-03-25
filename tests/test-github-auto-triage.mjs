@@ -153,6 +153,8 @@ const server = http.createServer(async (req, res) => {
     const payload = JSON.parse(body || '{}');
     assert.equal(payload.appId, 'github');
     assert.equal(payload.appName, 'GitHub');
+    assert.equal(payload.sourceId, 'github');
+    assert.equal(payload.sourceName, 'GitHub');
     assert.equal(payload.externalTriggerId, 'github:owner/repo#7');
     assert.equal(payload.tool, 'codex');
     assert.equal(payload.folder, repoRoot);

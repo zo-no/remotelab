@@ -3,6 +3,10 @@ import { resolve, join } from 'path';
 import { createClaudeAdapter, buildClaudeArgs } from './adapters/claude.mjs';
 import { createCodexAdapter, buildCodexArgs } from './adapters/codex.mjs';
 import { getToolDefinitionAsync, getToolCommandAsync, resolveToolCommandPathAsync } from '../lib/tools.mjs';
+import {
+  formatAttachmentContextReference,
+  getAttachmentSavedPath,
+} from './attachment-utils.mjs';
 import { pathExists } from './fs-utils.mjs';
 
 export function resolveCwd(folder) {
@@ -54,6 +58,7 @@ export async function createToolInvocation(toolId, prompt, options = {}) {
       threadId: options.codexThreadId,
       model: options.model,
       reasoningEffort: options.effort,
+      developerInstructions: options.developerInstructions,
       systemPrefix: options.systemPrefix,
     });
   } else {
@@ -68,7 +73,14 @@ export async function createToolInvocation(toolId, prompt, options = {}) {
     });
   }
 
-  return { command, adapter, args, isClaudeFamily, isCodexFamily };
+  return {
+    command,
+    adapter,
+    args,
+    isClaudeFamily,
+    isCodexFamily,
+    runtimeFamily,
+  };
 }
 
 function describeAttachmentLabel(attachment) {
@@ -80,9 +92,13 @@ function describeAttachmentLabel(attachment) {
 
 export function prependAttachmentPaths(prompt, images) {
   const paths = (images || [])
-    .map((img) => ({ savedPath: img?.savedPath, label: describeAttachmentLabel(img) }))
+    .map((img) => ({
+      savedPath: getAttachmentSavedPath(img),
+      reference: formatAttachmentContextReference(img),
+      label: describeAttachmentLabel(img),
+    }))
     .filter((entry) => entry.savedPath);
   if (paths.length === 0) return prompt;
-  const refs = paths.map((entry) => `[User attached ${entry.label}: ${entry.savedPath}]`).join('\n');
+  const refs = paths.map((entry) => `[User attached ${entry.label}: ${entry.reference}]`).join('\n');
   return `${refs}\n\n${prompt}`;
 }

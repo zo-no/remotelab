@@ -1,35 +1,90 @@
 "use strict";
 
 (function attachRemoteLabSessionStateModel(root) {
-  const defaultBoardColumn = {
-    key: "unassigned",
-    label: "Unassigned",
-    title: "Sessions that are not yet arranged by the board model.",
-    emptyText: "Nothing here yet",
-    order: 0,
+  const fallbackStrings = {
+    "status.idle": "idle",
+    "status.running": "running",
+    "workflow.priority.high": "High",
+    "workflow.priority.highTitle": "Needs user attention soon.",
+    "workflow.priority.medium": "Medium",
+    "workflow.priority.mediumTitle": "Worth checking soon, but not urgent.",
+    "workflow.priority.low": "Low",
+    "workflow.priority.lowTitle": "Safe to leave for later.",
+    "workflow.status.waiting": "waiting",
+    "workflow.status.waitingTitle": "Waiting on user input",
+    "workflow.status.done": "done",
+    "workflow.status.doneTitle": "Current task complete",
+    "workflow.status.parked": "parked",
+    "workflow.status.parkedTitle": "Parked for later",
+    "workflow.status.queued": "queued",
+    "workflow.status.queuedTitle": "{count} follow-up{suffix} queued",
+    "workflow.status.compacting": "compacting",
+    "workflow.status.renaming": "renaming",
+    "workflow.status.renameFailed": "rename failed",
+    "workflow.status.renameFailedTitle": "Session rename failed",
+    "workflow.status.unread": "new",
+    "workflow.status.unreadTitle": "Updated since you last reviewed this session",
   };
 
+  function fallbackTranslate(key, vars = {}) {
+    const template = fallbackStrings[key];
+    if (!template) return key;
+    return template.replace(/\{(\w+)\}/g, (match, token) => (
+      Object.prototype.hasOwnProperty.call(vars, token) ? String(vars[token]) : match
+    ));
+  }
+
+  const t = root.remotelabT
+    ? (key, vars) => root.remotelabT(key, vars)
+    : fallbackTranslate;
   const workflowPrioritySpecs = {
     high: {
       key: "high",
-      label: "High",
+      label: t("workflow.priority.high"),
       rank: 3,
-      className: "board-priority-high",
-      title: "Needs user attention soon.",
+      className: "workflow-priority-high",
+      title: t("workflow.priority.highTitle"),
     },
     medium: {
       key: "medium",
-      label: "Medium",
+      label: t("workflow.priority.medium"),
       rank: 2,
-      className: "board-priority-medium",
-      title: "Worth checking soon, but not urgent.",
+      className: "workflow-priority-medium",
+      title: t("workflow.priority.mediumTitle"),
     },
     low: {
       key: "low",
-      label: "Low",
+      label: t("workflow.priority.low"),
       rank: 1,
-      className: "board-priority-low",
-      title: "Safe to leave for later.",
+      className: "workflow-priority-low",
+      title: t("workflow.priority.lowTitle"),
+    },
+  };
+
+  const workflowStatusSpecs = {
+    waiting_user: {
+      key: "waiting_user",
+      label: t("workflow.status.waiting"),
+      className: "status-waiting-user",
+      dotClass: "",
+      itemClass: "",
+      title: t("workflow.status.waitingTitle"),
+    },
+    done: {
+      key: "done",
+      label: t("workflow.status.done"),
+      className: "status-done",
+      dotClass: "",
+      itemClass: "",
+      title: t("workflow.status.doneTitle"),
+    },
+    parked: {
+      key: "parked",
+      label: t("workflow.status.parked"),
+      className: "status-parked",
+      dotClass: "",
+      itemClass: "",
+      title: t("workflow.status.parkedTitle"),
     },
   };
 
@@ -95,69 +150,44 @@
     return { ...workflowPrioritySpecs[normalized] };
   }
 
-  function getSessionSortTime(session) {
-    const stamp = session?.lastEventAt || session?.updatedAt || session?.created || "";
-    const time = new Date(stamp).getTime();
+  function getWorkflowStatusInfo(value) {
+    const normalized = normalizeSessionWorkflowState(value);
+    if (!normalized || !workflowStatusSpecs[normalized]) return null;
+    return { ...workflowStatusSpecs[normalized] };
+  }
+
+  function parseSessionTime(value) {
+    const time = new Date(value || "").getTime();
     return Number.isFinite(time) ? time : 0;
   }
 
-  function normalizeBoardColumnKey(value) {
-    return typeof value === "string"
-      ? value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
-      : "";
+  function getSessionLatestChangeTime(session) {
+    const stamp = session?.lastEventAt || session?.updatedAt || session?.created || "";
+    return parseSessionTime(stamp);
   }
 
-  function normalizeBoardLayout(layout, sessions = []) {
-    const rawColumns = Array.isArray(layout?.columns) ? layout.columns : [];
-    const sessionList = Array.isArray(sessions) ? sessions : [];
-    const columns = [];
-    const seenKeys = new Set();
+  function getSessionReviewTime(session) {
+    return Math.max(
+      parseSessionTime(session?.lastReviewedAt),
+      parseSessionTime(session?.localReviewedAt),
+      parseSessionTime(session?.reviewBaselineAt),
+    );
+  }
 
-    for (const entry of rawColumns) {
-      const key = normalizeBoardColumnKey(entry?.key || entry?.label);
-      const label = typeof entry?.label === "string" && entry.label.trim()
-        ? entry.label.trim()
-        : "";
-      if (!key || !label || seenKeys.has(key)) continue;
-      columns.push({
-        key,
-        label,
-        title: typeof entry?.description === "string" && entry.description.trim()
-          ? entry.description.trim()
-          : (typeof entry?.title === "string" ? entry.title.trim() : ""),
-        emptyText: typeof entry?.emptyText === "string" && entry.emptyText.trim()
-          ? entry.emptyText.trim()
-          : `No sessions in ${label}`,
-        order: Number.isInteger(entry?.order) ? entry.order : columns.length * 10,
-      });
-      seenKeys.add(key);
+  function getSessionSortTime(session) {
+    const activity = normalizeSessionActivity(session);
+    if (activity.run.state === "running" && activity.run.startedAt) {
+      const startedAt = parseSessionTime(activity.run.startedAt);
+      if (startedAt > 0) return startedAt;
     }
+    return getSessionLatestChangeTime(session);
+  }
 
-    for (const session of sessionList) {
-      const key = normalizeBoardColumnKey(session?.board?.columnKey || session?.board?.columnLabel);
-      const label = typeof session?.board?.columnLabel === "string" && session.board.columnLabel.trim()
-        ? session.board.columnLabel.trim()
-        : "";
-      if (!key || !label || seenKeys.has(key)) continue;
-      columns.push({
-        key,
-        label,
-        title: "",
-        emptyText: `No sessions in ${label}`,
-        order: Number.isInteger(session?.board?.columnOrder) ? session.board.columnOrder : columns.length * 10,
-      });
-      seenKeys.add(key);
-    }
-
-    if (columns.length === 0) {
-      return [{ ...defaultBoardColumn }];
-    }
-
-    columns.sort((a, b) => (
-      (Number.isInteger(a.order) ? a.order : 9999) - (Number.isInteger(b.order) ? b.order : 9999)
-      || a.label.localeCompare(b.label)
-    ));
-    return columns;
+  function normalizeSessionSidebarOrder(value) {
+    const parsed = typeof value === "number"
+      ? value
+      : Number.parseInt(String(value || "").trim(), 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
   }
 
   function normalizeSessionActivity(session) {
@@ -184,6 +214,7 @@
       run: {
         state: runState,
         phase: typeof raw?.run?.phase === "string" ? raw.run.phase : null,
+        startedAt: typeof raw?.run?.startedAt === "string" ? raw.run.startedAt : null,
         runId: typeof raw?.run?.runId === "string" ? raw.run.runId : null,
         cancelRequested: raw?.run?.cancelRequested === true,
       },
@@ -214,7 +245,7 @@
     }
 
     const indicators = getSessionStatusSummary(session, options).indicators;
-    return indicators[0] || createStatus("idle", "idle");
+    return indicators[0] || createStatus("idle", t("status.idle"));
   }
 
   function getSessionStatusSummary(session, { includeToolFallback = false } = {}) {
@@ -222,45 +253,48 @@
     const indicators = [];
 
     if (activity.run.state === "running") {
-      indicators.push(createStatus("running", "running", "status-running", "running"));
+      indicators.push(createStatus("running", t("status.running"), "status-running", "running"));
     }
 
     if (activity.queue.state === "queued") {
       indicators.push(createStatus(
         "queued",
-        "queued",
+        t("workflow.status.queued"),
         "status-queued",
         "queued",
         "",
         activity.queue.count > 0
-          ? `${activity.queue.count} follow-up${activity.queue.count === 1 ? "" : "s"} queued`
+          ? t("workflow.status.queuedTitle", {
+            count: activity.queue.count,
+            suffix: activity.queue.count === 1 ? "" : "s",
+          })
           : "",
       ));
     }
 
     if (activity.compact.state === "pending") {
-      indicators.push(createStatus("compacting", "compacting", "status-compacting", "compacting"));
+      indicators.push(createStatus("compacting", t("workflow.status.compacting"), "status-compacting", "compacting"));
     }
 
     if (activity.rename.state === "pending") {
-      indicators.push(createStatus("renaming", "renaming", "status-renaming", "renaming"));
+      indicators.push(createStatus("renaming", t("workflow.status.renaming"), "status-renaming", "renaming"));
     }
 
     if (activity.rename.state === "failed") {
       indicators.push(createStatus(
         "rename-failed",
-        "rename failed",
+        t("workflow.status.renameFailed"),
         "status-rename-failed",
         "rename-failed",
         "",
-        activity.rename.error || "Session rename failed",
+        activity.rename.error || t("workflow.status.renameFailedTitle"),
       ));
     }
 
     const primary = indicators[0] || (
       session?.tool && includeToolFallback
         ? createStatus("tool", session.tool)
-        : createStatus("idle", "idle")
+        : createStatus("idle", t("status.idle"))
     );
 
     return {
@@ -273,33 +307,66 @@
     return getSessionStatusSummary(session, options).primary;
   }
 
-  function getBoardColumns(layout, sessions = []) {
-    return normalizeBoardLayout(layout, sessions).map((column) => ({ ...column }));
-  }
-
-  function getSessionBoardColumn(session, layout, sessions = []) {
-    const columns = getBoardColumns(layout, sessions);
-    const requestedKey = normalizeBoardColumnKey(session?.board?.columnKey || session?.board?.columnLabel);
-    return columns.find((column) => column.key === requestedKey) || columns[0] || { ...defaultBoardColumn };
-  }
-
-  function getSessionBoardPriority(session) {
-    const explicitPriority = getWorkflowPriorityInfo(session?.board?.priority || session?.workflowPriority);
+  function getSessionWorkflowPriorityInfo(session) {
+    const explicitPriority = getWorkflowPriorityInfo(session?.workflowPriority);
     if (explicitPriority) return explicitPriority;
+    const workflowState = normalizeSessionWorkflowState(session?.workflowState || "");
+    if (workflowState === "waiting_user") return getWorkflowPriorityInfo("high");
+    if (workflowState === "done") return getWorkflowPriorityInfo("low");
     return getWorkflowPriorityInfo("medium");
   }
 
-  function getSessionBoardOrder(session) {
-    return Number.isInteger(session?.board?.order)
-      ? session.board.order
-      : 9999;
+  function hasSessionUnreadUpdate(session) {
+    if (!session) return false;
+    if (isSessionBusy(session)) return false;
+    return getSessionLatestChangeTime(session) > getSessionReviewTime(session);
   }
 
-  function compareBoardSessions(a, b) {
-    const boardOrderDiff = getSessionBoardOrder(a) - getSessionBoardOrder(b);
-    if (boardOrderDiff) return boardOrderDiff;
+  function getSessionReviewStatusInfo(session) {
+    if (!hasSessionUnreadUpdate(session)) return null;
+    return createStatus(
+      "unread",
+      t("workflow.status.unread"),
+      "status-unread",
+      "",
+      "",
+      t("workflow.status.unreadTitle"),
+    );
+  }
 
-    const priorityDiff = (getSessionBoardPriority(b)?.rank || 0) - (getSessionBoardPriority(a)?.rank || 0);
+  function isSessionCompleteAndReviewed(session) {
+    const workflowState = normalizeSessionWorkflowState(session?.workflowState || "");
+    return workflowState === "done"
+      && !isSessionBusy(session)
+      && !hasSessionUnreadUpdate(session);
+  }
+
+  function getSessionAttentionBand(session) {
+    const workflowState = normalizeSessionWorkflowState(session?.workflowState || "");
+    const busy = isSessionBusy(session);
+    const unread = hasSessionUnreadUpdate(session);
+
+    if (unread && workflowState === "waiting_user") return 0;
+    if (unread) return 1;
+    if (workflowState === "waiting_user") return 2;
+    if (!busy && workflowState !== "done" && workflowState !== "parked") return 3;
+    if (busy) return 4;
+    if (workflowState === "parked") return 5;
+    if (workflowState === "done") return 6;
+    return 3;
+  }
+
+  function compareSessionListSessions(a, b) {
+    const sidebarOrderA = normalizeSessionSidebarOrder(a?.sidebarOrder);
+    const sidebarOrderB = normalizeSessionSidebarOrder(b?.sidebarOrder);
+    if (sidebarOrderA && sidebarOrderB && sidebarOrderA !== sidebarOrderB) {
+      return sidebarOrderA - sidebarOrderB;
+    }
+
+    const attentionBandDiff = getSessionAttentionBand(a) - getSessionAttentionBand(b);
+    if (attentionBandDiff) return attentionBandDiff;
+
+    const priorityDiff = (getSessionWorkflowPriorityInfo(b)?.rank || 0) - (getSessionWorkflowPriorityInfo(a)?.rank || 0);
     if (priorityDiff) return priorityDiff;
 
     const pinDiff = (b?.pinned === true ? 1 : 0) - (a?.pinned === true ? 1 : 0);
@@ -314,13 +381,15 @@
     normalizeSessionWorkflowState,
     normalizeSessionActivity,
     isSessionBusy,
+    getSessionSortTime,
+    getWorkflowStatusInfo,
     getSessionPrimaryStatus,
     getSessionStatusSummary,
     getSessionVisualStatus,
-    getBoardColumns,
-    getSessionBoardColumn,
-    getSessionBoardPriority,
-    getSessionBoardOrder,
-    compareBoardSessions,
+    hasSessionUnreadUpdate,
+    getSessionReviewStatusInfo,
+    isSessionCompleteAndReviewed,
+    getSessionWorkflowPriorityInfo,
+    compareSessionListSessions,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);

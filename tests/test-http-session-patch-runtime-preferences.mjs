@@ -128,6 +128,7 @@ try {
     const older = await createSession(port, 'Older session');
     await sleep(25);
     const newer = await createSession(port, 'Newer session');
+    const reviewStamp = '2026-03-15T08:09:10.000Z';
 
     const patched = await request(port, 'PATCH', `/api/sessions/${older.id}`, {
       pinned: true,
@@ -137,6 +138,7 @@ try {
       model: 'gpt-5-codex',
       effort: 'high',
       thinking: true,
+      lastReviewedAt: reviewStamp,
     });
     assert.equal(patched.status, 200, 'PATCH should accept pinned and runtime preference fields together');
     assert.equal(patched.json.session?.id, older.id, 'PATCH should return the updated session');
@@ -147,6 +149,7 @@ try {
     assert.equal(patched.json.session?.model, 'gpt-5-codex', 'PATCH should persist the model');
     assert.equal(patched.json.session?.effort, 'high', 'PATCH should persist the effort');
     assert.equal(patched.json.session?.thinking, true, 'PATCH should persist the thinking flag');
+    assert.equal(patched.json.session?.lastReviewedAt, reviewStamp, 'PATCH should persist the session review timestamp');
 
     const newest = await createSession(port, 'Newest session');
     const listAfterPin = await request(port, 'GET', '/api/sessions');
@@ -156,6 +159,10 @@ try {
       [older.id, newest.id, newer.id],
       'pinned sessions should stay ahead of newer unpinned sessions after runtime preference updates',
     );
+    const pinnedListEntry = listAfterPin.json.sessions.find((session) => session.id === older.id);
+    assert.equal(pinnedListEntry?.workflowState, 'waiting_user', 'session list payload should keep workflow state for session attention logic');
+    assert.equal(pinnedListEntry?.workflowPriority, 'high', 'session list payload should keep workflow priority for session attention logic');
+    assert.equal(pinnedListEntry?.lastReviewedAt, reviewStamp, 'session list payload should expose the persisted review timestamp');
 
     const detail = await request(port, 'GET', `/api/sessions/${older.id}`);
     assert.equal(detail.status, 200, 'session detail should remain readable after the patch');
@@ -163,6 +170,7 @@ try {
     assert.equal(detail.json.session?.model, 'gpt-5-codex', 'detail should expose persisted model');
     assert.equal(detail.json.session?.workflowState, 'waiting_user', 'detail should expose persisted workflow state');
     assert.equal(detail.json.session?.workflowPriority, 'high', 'detail should expose persisted workflow priority');
+    assert.equal(detail.json.session?.lastReviewedAt, reviewStamp, 'detail should expose the persisted review timestamp');
 
     const invalidPinned = await request(port, 'PATCH', `/api/sessions/${older.id}`, {
       pinned: 'yes',
@@ -184,15 +192,22 @@ try {
     });
     assert.equal(invalidWorkflowPriority.status, 400, 'invalid workflow priorities should be rejected');
 
+    const invalidReviewStamp = await request(port, 'PATCH', `/api/sessions/${older.id}`, {
+      lastReviewedAt: 'not-a-date',
+    });
+    assert.equal(invalidReviewStamp.status, 400, 'invalid review timestamps should be rejected');
+
     const unpinned = await request(port, 'PATCH', `/api/sessions/${older.id}`, {
       pinned: false,
       workflowState: null,
       workflowPriority: null,
+      lastReviewedAt: null,
     });
     assert.equal(unpinned.status, 200, 'unpinned PATCH should still succeed');
     assert.equal(unpinned.json.session?.pinned, undefined, 'unpinned PATCH should clear the pinned flag');
     assert.equal(unpinned.json.session?.workflowState, undefined, 'workflowState should clear when PATCH passes null');
     assert.equal(unpinned.json.session?.workflowPriority, undefined, 'workflowPriority should clear when PATCH passes null');
+    assert.equal(unpinned.json.session?.lastReviewedAt, undefined, 'lastReviewedAt should clear when PATCH passes null');
 
     const listAfterUnpin = await request(port, 'GET', '/api/sessions');
     assert.equal(listAfterUnpin.status, 200, 'listing sessions should still work after unpinning');

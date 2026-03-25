@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { isAuthenticated } from '../lib/auth.mjs';
+import { FILE_ASSET_ALLOWED_ORIGINS } from '../lib/config.mjs';
 
 // ---- Rate limiting ----
 
@@ -45,10 +46,12 @@ const BASE_SECURITY_HEADERS = {
   'X-UA-Compatible': 'IE=edge',
   'X-Frame-Options': 'SAMEORIGIN',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()',
 };
 
 export function setSecurityHeaders(res, nonce) {
+  const connectSrc = ["'self'", 'ws:', 'wss:', ...FILE_ASSET_ALLOWED_ORIGINS];
+  const mediaSrc = ["'self'", 'data:', 'blob:', ...FILE_ASSET_ALLOWED_ORIGINS];
   for (const [key, value] of Object.entries(BASE_SECURITY_HEADERS)) {
     res.setHeader(key, value);
   }
@@ -57,8 +60,9 @@ export function setSecurityHeaders(res, nonce) {
     `script-src 'self' 'nonce-${nonce}'`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
-    "connect-src 'self' ws: wss:",
-    "img-src 'self' data: blob:",
+    `connect-src ${connectSrc.join(' ')}`,
+    `img-src ${mediaSrc.join(' ')}`,
+    `media-src ${mediaSrc.join(' ')}`,
   ].join('; '));
 }
 

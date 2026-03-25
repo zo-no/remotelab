@@ -3,6 +3,10 @@ export function parseSessionGetRoute(pathname) {
     return { kind: 'list' };
   }
 
+  if (pathname === '/api/sessions/archived') {
+    return { kind: 'archived-list' };
+  }
+
   const parts = pathname.split('/').filter(Boolean);
   if (parts[0] !== 'api' || parts[1] !== 'sessions') {
     return null;
@@ -19,6 +23,21 @@ export function parseSessionGetRoute(pathname) {
 
   if (parts.length === 4 && parts[3] === 'events') {
     return { kind: 'events', sessionId };
+  }
+
+  if (parts.length === 4 && parts[3] === 'source-context') {
+    return { kind: 'source-context', sessionId };
+  }
+
+  if (parts.length === 6 && parts[3] === 'events' && parts[4] === 'blocks') {
+    const match = /^([1-9]\d*)-([1-9]\d*)$/.exec(parts[5] || '');
+    if (!match) return null;
+    const startSeq = parseInt(match[1], 10);
+    const endSeq = parseInt(match[2], 10);
+    if (!Number.isInteger(startSeq) || !Number.isInteger(endSeq) || endSeq < startSeq) {
+      return null;
+    }
+    return { kind: 'event-block', sessionId, startSeq, endSeq };
   }
 
   if (parts.length === 6 && parts[3] === 'events' && parts[5] === 'body') {

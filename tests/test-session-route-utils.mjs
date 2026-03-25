@@ -10,8 +10,8 @@ assert.deepEqual(
 
 assert.deepEqual(
   parseSessionGetRoute('/api/sessions/archived'),
-  { kind: 'detail', sessionId: 'archived' },
-  'archive is no longer a dedicated collection route',
+  { kind: 'archived-list' },
+  'archive should stay a dedicated collection route',
 );
 
 assert.deepEqual(
@@ -24,6 +24,12 @@ assert.deepEqual(
   parseSessionGetRoute('/api/sessions/session-123/events'),
   { kind: 'events', sessionId: 'session-123' },
   'session event routes should still parse normally',
+);
+
+assert.deepEqual(
+  parseSessionGetRoute('/api/sessions/session-123/events/blocks/10-20'),
+  { kind: 'event-block', sessionId: 'session-123', startSeq: 10, endSeq: 20 },
+  'collapsed event-block routes should parse normally',
 );
 
 assert.equal(

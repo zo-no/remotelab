@@ -3,10 +3,21 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { statOrNull } from './fs-utils.mjs';
 
-const CODEX_SESSIONS_DIR = join(homedir(), '.codex', 'sessions');
 const SESSION_LOG_CACHE = new Map();
 const TAIL_CHUNK_BYTES = 128 * 1024;
 const MAX_TAIL_SCAN_BYTES = 2 * 1024 * 1024;
+let cachedSessionsDir = '';
+
+function getCodexSessionsDir() {
+  const homeOverride = typeof process.env.HOME === 'string' ? process.env.HOME.trim() : '';
+  const homeDir = homeOverride || homedir();
+  const sessionsDir = join(homeDir, '.codex', 'sessions');
+  if (sessionsDir !== cachedSessionsDir) {
+    cachedSessionsDir = sessionsDir;
+    SESSION_LOG_CACHE.clear();
+  }
+  return sessionsDir;
+}
 
 function pickNonNegativeInt(value) {
   return Number.isInteger(value) && value >= 0 ? value : null;
@@ -41,12 +52,13 @@ async function findSessionLogRecursive(rootDir, threadId) {
 export async function findCodexSessionLog(threadId) {
   if (!threadId) return null;
 
+  const sessionsDir = getCodexSessionsDir();
   const cached = SESSION_LOG_CACHE.get(threadId);
   if (cached && await statOrNull(cached)) {
     return cached;
   }
 
-  const located = await findSessionLogRecursive(CODEX_SESSIONS_DIR, threadId);
+  const located = await findSessionLogRecursive(sessionsDir, threadId);
   if (located) {
     SESSION_LOG_CACHE.set(threadId, located);
     return located;

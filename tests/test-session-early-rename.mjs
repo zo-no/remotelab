@@ -115,17 +115,18 @@ await waitFor(
 await waitFor(
   async () => {
     const current = await getSession(session.id);
-    return current?.name === 'Rename Flow'
+    return current?.name === 'Refactor the…'
       && current?.group === 'RemoteLab'
-      && current?.description === 'Refactor the naming flow before the first run finishes.';
+      && current?.description === 'Refactor the naming flow before the first run finishes.'
+      && current?.autoRenamePending === true;
   },
-  'session should receive early title and grouping before the main run ends',
+  'session should keep the temporary draft title while early grouping lands',
 );
 
 assert.equal(
   (await getSession(session.id))?.activity?.run?.state,
   'running',
-  'early rename and grouping should land while the main task is still running',
+  'early grouping should land while the main task is still running',
 );
 
 await waitFor(
@@ -133,15 +134,26 @@ await waitFor(
   'session should finish running',
 );
 
+await waitFor(
+  async () => {
+    const current = await getSession(session.id);
+    return current?.name === 'Rename Flow'
+      && current?.group === 'RemoteLab'
+      && current?.description === 'Refactor the naming flow before the first run finishes.'
+      && current?.autoRenamePending === false;
+  },
+  'session should receive the final AI title after the first turn completes',
+);
+
 const finished = await getSession(session.id);
-assert.equal(finished?.name, 'Rename Flow', 'finished session should keep the de-duplicated early AI title');
+assert.equal(finished?.name, 'Rename Flow', 'finished session should adopt the final AI title after the first turn');
 assert.equal(finished?.group, 'RemoteLab', 'finished session should keep the early AI grouping');
 assert.equal(
   finished?.description,
   'Refactor the naming flow before the first run finishes.',
-  'finished session should keep the early AI description',
+  'finished session should keep the AI description',
 );
-assert.equal(finished?.autoRenamePending, false, 'successful early rename should clear autoRenamePending');
+assert.equal(finished?.autoRenamePending, false, 'post-turn rename should clear autoRenamePending');
 
 killAll();
 rmSync(tempHome, { recursive: true, force: true });

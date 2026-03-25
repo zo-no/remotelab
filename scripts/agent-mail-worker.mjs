@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'fs';
-import { resolve } from 'path';
+import { homedir } from 'os';
+import { join, resolve } from 'path';
 import { pathToFileURL } from 'url';
 
 import { AUTH_FILE } from '../lib/config.mjs';
@@ -13,11 +14,16 @@ import {
   buildThreadReferencesHeader,
   decodeMaybeEncodedMailboxText,
   extractNormalizedMailboxContent,
+  extractRawMessageImages,
   loadMailboxAutomation,
   listQueue,
   updateQueueItem,
 } from '../lib/agent-mailbox.mjs';
+import { resolveExternalRuntimeSelection } from '../lib/external-runtime-selection.mjs';
 import { loadUiRuntimeSelection } from '../lib/runtime-selection.mjs';
+
+const DEFAULT_OWNER_CONFIG_DIR = join(homedir(), '.config', 'remotelab');
+const DEFAULT_GUEST_REGISTRY_FILE = join(DEFAULT_OWNER_CONFIG_DIR, 'guest-instances.json');
 
 function parseArgs(argv) {
   const positional = [];
@@ -55,20 +61,51 @@ function trimString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function normalizeDeliveryMode(value) {
+  const normalized = trimString(value).toLowerCase();
+  if (normalized === 'session_only' || normalized === 'session-only' || normalized === 'session') {
+    return 'session_only';
+  }
+  return 'reply_email';
+}
+
+function expandHomePath(value) {
+  const trimmed = trimString(value);
+  if (!trimmed) return '';
+  if (trimmed === '~') return homedir();
+  if (trimmed.startsWith('~/')) return join(homedir(), trimmed.slice(2));
+  return resolve(trimmed);
+}
+
+function normalizeAuthFile(value) {
+  return expandHomePath(value);
+}
+
+function readJsonFile(filePath, fallbackValue) {
+  const normalizedPath = normalizeAuthFile(filePath);
+  if (!normalizedPath) return fallbackValue;
+  try {
+    return JSON.parse(readFileSync(normalizedPath, 'utf8'));
+  } catch {
+    return fallbackValue;
+  }
+}
+
 function printUsage() {
   console.log(`Usage:
-  node scripts/agent-mail-worker.mjs [--root <dir>] [--chat-base-url <url>] [--interval-ms <ms>] [--once]
+  node scripts/agent-mail-worker.mjs [--root <dir>] [--chat-base-url <url>] [--auth-file <path>] [--interval-ms <ms>] [--once]
 
 Examples:
   node scripts/agent-mail-worker.mjs --once
   node scripts/agent-mail-worker.mjs --interval-ms 5000`);
 }
 
-function readOwnerToken() {
-  const auth = JSON.parse(readFileSync(AUTH_FILE, 'utf8'));
+function readOwnerToken(authFile = AUTH_FILE) {
+  const resolvedAuthFile = normalizeAuthFile(authFile) || AUTH_FILE;
+  const auth = JSON.parse(readFileSync(resolvedAuthFile, 'utf8'));
   const token = trimString(auth?.token);
   if (!token) {
-    throw new Error(`No owner token found in ${AUTH_FILE}`);
+    throw new Error(`No owner token found in ${resolvedAuthFile}`);
   }
   return token;
 }
@@ -79,6 +116,78 @@ function normalizeBaseUrl(baseUrl) {
     throw new Error('chat base URL is required');
   }
   return normalized.replace(/\/+$/, '');
+}
+
+function normalizeBaseUrlMatch(value) {
+  try {
+    return normalizeBaseUrl(value);
+  } catch {
+    return '';
+  }
+}
+
+function sameBaseUrl(leftValue, rightValue) {
+  const left = normalizeBaseUrlMatch(leftValue);
+  const right = normalizeBaseUrlMatch(rightValue);
+  return !!left && left === right;
+}
+
+function loadGuestRegistry() {
+  const records = readJsonFile(process.env.REMOTELAB_GUEST_REGISTRY_FILE || DEFAULT_GUEST_REGISTRY_FILE, []);
+  if (!Array.isArray(records)) return [];
+  return records
+    .map((record) => ({
+      name: trimString(record?.name).toLowerCase(),
+      authFile: normalizeAuthFile(record?.authFile),
+      localBaseUrl: trimString(record?.localBaseUrl),
+      publicBaseUrl: trimString(record?.publicBaseUrl),
+    }))
+    .filter((record) => record.name);
+}
+
+function findGuestInstanceByName(name, registry = loadGuestRegistry()) {
+  const normalizedName = trimString(name).toLowerCase();
+  if (!normalizedName) return null;
+  return registry.find((record) => record.name === normalizedName) || null;
+}
+
+function findGuestInstanceByBaseUrl(baseUrl, registry = loadGuestRegistry()) {
+  const normalizedBaseUrl = normalizeBaseUrlMatch(baseUrl);
+  if (!normalizedBaseUrl) return null;
+  return registry.find((record) => sameBaseUrl(record.localBaseUrl, normalizedBaseUrl) || sameBaseUrl(record.publicBaseUrl, normalizedBaseUrl)) || null;
+}
+
+function resolveRuntimeTarget(item, automation, fallbackBaseUrl = '') {
+  const registry = loadGuestRegistry();
+  const routedInstance = trimString(item?.routing?.instanceName).toLowerCase();
+  if (routedInstance) {
+    const guest = findGuestInstanceByName(routedInstance, registry);
+    if (!guest) {
+      throw new Error(`Mailbox recipient targeted guest instance "${routedInstance}" but no matching guest instance was found`);
+    }
+    const guestBaseUrl = trimString(guest.localBaseUrl) || trimString(guest.publicBaseUrl);
+    if (!guestBaseUrl) {
+      throw new Error(`Guest instance "${routedInstance}" does not have a usable base URL`);
+    }
+    return {
+      baseUrl: guestBaseUrl,
+      authFile: guest.authFile,
+      guestInstance: guest.name,
+      source: 'recipient_subaddress',
+    };
+  }
+
+  const configuredBaseUrl = trimString(fallbackBaseUrl) || trimString(automation?.chatBaseUrl);
+  if (!configuredBaseUrl) {
+    throw new Error('chat base URL is required');
+  }
+  const matchingGuest = findGuestInstanceByBaseUrl(configuredBaseUrl, registry);
+  return {
+    baseUrl: configuredBaseUrl,
+    authFile: normalizeAuthFile(automation?.authFile) || trimString(matchingGuest?.authFile),
+    guestInstance: trimString(matchingGuest?.name),
+    source: matchingGuest ? 'configured_guest_instance' : 'automation_chat_base_url',
+  };
 }
 
 async function loginWithToken(baseUrl, token) {
@@ -115,11 +224,14 @@ async function requestJson(baseUrl, path, { method = 'GET', cookie, body } = {})
   return { response, json, text };
 }
 
-function createRemoteLabRuntime(baseUrl) {
+function createRemoteLabRuntime(baseUrl, { authFile = '' } = {}) {
+  const normalizedAuthFile = normalizeAuthFile(authFile);
   return {
     baseUrl: normalizeBaseUrl(baseUrl),
+    authFile: normalizedAuthFile,
     authToken: '',
     authCookie: '',
+    readOwnerToken: async () => readOwnerToken(normalizedAuthFile || AUTH_FILE),
   };
 }
 
@@ -152,6 +264,12 @@ async function requestRemoteLab(runtime, path, options = {}) {
   return result;
 }
 
+function runtimeMatchesTarget(runtime, target) {
+  if (!runtime || !target) return false;
+  return sameBaseUrl(runtime.baseUrl, target.baseUrl)
+    && normalizeAuthFile(runtime.authFile) === normalizeAuthFile(target.authFile);
+}
+
 function buildReplySubject(subject) {
   const trimmed = trimString(subject);
   if (!trimmed) return '';
@@ -161,9 +279,9 @@ function buildReplySubject(subject) {
 function buildSessionName(item) {
   const subject = trimString(item?.message?.subject);
   const sender = trimString(item?.message?.fromAddress);
-  if (subject) return `Mail: ${subject}`;
-  if (sender) return `Mail from ${sender}`;
-  return 'Mail reply';
+  if (subject) return subject;
+  if (sender) return sender;
+  return '';
 }
 
 function buildSessionDescription(item, fallbackDescription) {
@@ -189,6 +307,20 @@ function extractReadableBodyFromRaw(item) {
   }
 }
 
+function extractImageAttachmentsFromRaw(item) {
+  const rawPath = trimString(item?.storage?.rawPath);
+  if (!rawPath) {
+    return [];
+  }
+
+  try {
+    return extractRawMessageImages(readFileSync(rawPath, 'utf8'), { includeData: true })
+      .filter((image) => typeof image?.data === 'string' && image.data);
+  } catch {
+    return [];
+  }
+}
+
 function buildReplyPrompt(item) {
   const sender = trimString(item?.message?.fromAddress);
   const subject = trimString(item?.message?.subject);
@@ -203,20 +335,13 @@ function buildReplyPrompt(item) {
   const body = rawDerivedBody || decodedStoredBody;
 
   return [
-    'An approved inbound email needs a reply.',
-    'Write the exact plain-text email body to send back to the sender.',
-    'Take the time needed to fully answer everything the sender is asking.',
-    'Prefer completeness, careful troubleshooting, and explicit resolution over speed or brevity.',
-    'Keep the tone natural, calm, and helpful.',
-    'Do not include email headers, markdown fences, or internal process notes.',
-    '',
-    'Inbound email metadata:',
+    'Inbound email.',
     `- From: ${sender || '(unknown sender)'}`,
     `- Subject: ${subject || '(no subject)'}`,
     `- Date: ${date || '(no date)'}`,
     `- Message-ID: ${messageId || '(no message id)'}`,
     '',
-    'Original email:',
+    'User message:',
     body || '(empty body)',
   ].join('\n');
 }
@@ -232,29 +357,18 @@ function hasExplicitPinnedRuntime(automation) {
 function resolveReplyRuntimeSelection(automation, uiSelection) {
   const session = automation?.session || {};
   const pinned = hasExplicitPinnedRuntime(automation);
-  const selectedTool = trimString(uiSelection?.selectedTool);
-  const selectedModel = trimString(uiSelection?.selectedModel);
-  const selectedEffort = trimString(uiSelection?.selectedEffort);
-  const reasoningKind = trimString(uiSelection?.reasoningKind).toLowerCase();
   const defaultTool = trimString(DEFAULT_AUTOMATION_SETTINGS.session.tool) || 'codex';
-  const fallbackTool = trimString(session.tool) || defaultTool;
-  const effectiveTool = pinned
-    ? fallbackTool
-    : selectedTool || fallbackTool || defaultTool;
-  const uiMatchesEffectiveTool = !!selectedTool && selectedTool === effectiveTool;
-
-  return {
-    tool: effectiveTool || defaultTool,
-    model: pinned
-      ? trimString(session.model)
-      : (uiMatchesEffectiveTool ? selectedModel : ''),
-    effort: pinned
-      ? trimString(session.effort)
-      : (uiMatchesEffectiveTool && reasoningKind === 'enum' ? selectedEffort : ''),
-    thinking: pinned
-      ? session.thinking === true
-      : (uiMatchesEffectiveTool && reasoningKind === 'toggle' && uiSelection?.thinkingEnabled === true),
-  };
+  return resolveExternalRuntimeSelection({
+    uiSelection,
+    mode: pinned ? 'pinned' : 'ui',
+    fallback: {
+      tool: trimString(session.tool) || defaultTool,
+      model: trimString(session.model),
+      effort: trimString(session.effort),
+      thinking: session.thinking === true,
+    },
+    defaultTool,
+  });
 }
 
 function buildCompletionTarget(item, rootDir, requestId) {
@@ -279,6 +393,18 @@ function buildCompletionTarget(item, rootDir, requestId) {
   };
 }
 
+function requestIdPrefixForMode(deliveryMode) {
+  return deliveryMode === 'session_only' ? 'mailbox_session_' : 'mailbox_reply_';
+}
+
+function submittedStatusForMode(deliveryMode) {
+  return deliveryMode === 'session_only' ? 'submitted_to_session' : 'processing_for_reply';
+}
+
+function failureStatusForMode(deliveryMode) {
+  return deliveryMode === 'session_only' ? 'session_submission_failed' : 'reply_failed';
+}
+
 function shouldProcessItem(item) {
   const status = trimString(item?.status);
   const automationStatus = trimString(item?.automation?.status);
@@ -286,11 +412,14 @@ function shouldProcessItem(item) {
   if (status === 'reply_sent' || automationStatus === 'reply_sent') return false;
   if (status === 'processing_for_reply' || automationStatus === 'processing_for_reply') return false;
   if (status === 'reply_failed' || automationStatus === 'reply_failed') return false;
+  if (status === 'submitted_to_session' || automationStatus === 'submitted_to_session') return false;
+  if (status === 'session_submission_failed' || automationStatus === 'session_submission_failed') return false;
   return true;
 }
 
 async function submitApprovedItem(item, rootDir, automation, runtime) {
-  const requestId = trimString(item?.automation?.requestId) || `mailbox_reply_${item.id}`;
+  const deliveryMode = normalizeDeliveryMode(automation.deliveryMode);
+  const requestId = trimString(item?.automation?.requestId) || `${requestIdPrefixForMode(deliveryMode)}${item.id}`;
   const externalTriggerId = trimString(item?.message?.externalTriggerId)
     || buildEmailThreadExternalTriggerId({
       messageId: trimString(item?.message?.messageId),
@@ -298,7 +427,10 @@ async function submitApprovedItem(item, rootDir, automation, runtime) {
       references: trimString(item?.message?.references),
     })
     || `mailbox:${item.id}`;
-  const completionTarget = buildCompletionTarget(item, rootDir, requestId);
+  const runtimeTarget = resolveRuntimeTarget(item, automation, runtime?.baseUrl || automation.chatBaseUrl);
+  const effectiveRuntime = runtimeMatchesTarget(runtime, runtimeTarget)
+    ? runtime
+    : createRemoteLabRuntime(runtimeTarget.baseUrl, { authFile: runtimeTarget.authFile });
   const uiSelection = await loadUiRuntimeSelection();
   const runtimeSelection = resolveReplyRuntimeSelection(automation, uiSelection);
   const sessionPayload = {
@@ -307,14 +439,18 @@ async function submitApprovedItem(item, rootDir, automation, runtime) {
     name: buildSessionName(item),
     appId: 'email',
     appName: 'Email',
+    sourceId: 'email',
+    sourceName: 'Email',
     group: automation.session.group,
     description: buildSessionDescription(item, automation.session.description),
     systemPrompt: automation.session.systemPrompt,
-    completionTargets: [completionTarget],
     externalTriggerId,
   };
+  if (deliveryMode === 'reply_email') {
+    sessionPayload.completionTargets = [buildCompletionTarget(item, rootDir, requestId)];
+  }
 
-  const createResult = await requestRemoteLab(runtime, '/api/sessions', {
+  const createResult = await requestRemoteLab(effectiveRuntime, '/api/sessions', {
     method: 'POST',
     body: sessionPayload,
   });
@@ -328,6 +464,14 @@ async function submitApprovedItem(item, rootDir, automation, runtime) {
     text: buildReplyPrompt(item),
     tool: runtimeSelection.tool,
   };
+  const images = extractImageAttachmentsFromRaw(item).map((image) => ({
+    data: image.data,
+    mimeType: image.mimeType,
+    originalName: image.originalName,
+  }));
+  if (images.length > 0) {
+    messagePayload.images = images;
+  }
   if (runtimeSelection.thinking) {
     messagePayload.thinking = true;
   }
@@ -338,7 +482,7 @@ async function submitApprovedItem(item, rootDir, automation, runtime) {
     messagePayload.effort = runtimeSelection.effort;
   }
 
-  const submitResult = await requestRemoteLab(runtime, `/api/sessions/${session.id}/messages`, {
+  const submitResult = await requestRemoteLab(effectiveRuntime, `/api/sessions/${session.id}/messages`, {
     method: 'POST',
     body: messagePayload,
   });
@@ -347,15 +491,19 @@ async function submitApprovedItem(item, rootDir, automation, runtime) {
   }
 
   const run = submitResult.json.run;
+  const submittedStatus = submittedStatusForMode(deliveryMode);
   updateQueueItem(item.id, rootDir, (draft) => {
-    draft.status = 'processing_for_reply';
+    draft.status = submittedStatus;
     draft.automation = {
       ...(draft.automation || {}),
-      status: 'processing_for_reply',
+      status: submittedStatus,
+      deliveryMode,
       sessionId: session.id,
       runId: run.id,
       requestId,
       externalTriggerId,
+      targetBaseUrl: runtimeTarget.baseUrl,
+      targetInstance: runtimeTarget.guestInstance || null,
       submittedAt: draft.automation?.submittedAt || nowIso(),
       duplicate: submitResult.json?.duplicate === true,
       lastError: null,
@@ -369,11 +517,15 @@ async function submitApprovedItem(item, rootDir, automation, runtime) {
     sessionId: session.id,
     runId: run.id,
     duplicate: submitResult.json?.duplicate === true,
+    deliveryMode,
+    targetBaseUrl: runtimeTarget.baseUrl,
+    targetInstance: runtimeTarget.guestInstance || null,
   };
 }
 
 async function runSweep({ rootDir, baseUrl, runtime = createRemoteLabRuntime(baseUrl) }) {
   const automation = loadMailboxAutomation(rootDir);
+  const deliveryMode = normalizeDeliveryMode(automation.deliveryMode);
   if (automation.enabled === false) {
     return {
       processed: 0,
@@ -392,11 +544,12 @@ async function runSweep({ rootDir, baseUrl, runtime = createRemoteLabRuntime(bas
       successes.push(await submitApprovedItem(item, rootDir, automation, runtime));
     } catch (error) {
       updateQueueItem(item.id, rootDir, (draft) => {
-        draft.status = 'reply_failed';
+        draft.status = failureStatusForMode(deliveryMode);
         draft.automation = {
           ...(draft.automation || {}),
-          status: 'reply_failed',
-          requestId: trimString(draft.automation?.requestId) || `mailbox_reply_${item.id}`,
+          status: failureStatusForMode(deliveryMode),
+          deliveryMode,
+          requestId: trimString(draft.automation?.requestId) || `${requestIdPrefixForMode(deliveryMode)}${item.id}`,
           lastError: error.message,
           updatedAt: nowIso(),
         };
@@ -429,9 +582,10 @@ async function main() {
   const rootDir = optionValue(options, 'root', DEFAULT_ROOT_DIR);
   const automation = loadMailboxAutomation(rootDir);
   const baseUrl = optionValue(options, 'chat-base-url', automation.chatBaseUrl);
+  const authFile = optionValue(options, 'auth-file', automation.authFile);
   const intervalMs = Math.max(1000, parseInt(optionValue(options, 'interval-ms', '5000'), 10) || 5000);
   const once = optionValue(options, 'once', false) === true;
-  const runtime = createRemoteLabRuntime(baseUrl);
+  const runtime = createRemoteLabRuntime(baseUrl, { authFile });
 
   if (once) {
     console.log(JSON.stringify(await runSweep({ rootDir, baseUrl, runtime }), null, 2));

@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { readLastTurnEvents } from './history.mjs';
-import { fullPath } from '../lib/tools.mjs';
+import { buildToolProcessEnv } from '../lib/user-shell-env.mjs';
 import { createToolInvocation, resolveCommand, resolveCwd } from './process-runner.mjs';
 import {
   normalizeGeneratedSessionTitle,
@@ -83,82 +83,6 @@ function formatHistoryForPrompt(events) {
   });
 }
 
-function describeSessionActivity(session) {
-  const parts = [];
-  const runState = session?.activity?.run?.state;
-  const queueCount = Number.isInteger(session?.activity?.queue?.count)
-    ? session.activity.queue.count
-    : 0;
-  if (runState === 'running') {
-    parts.push('running');
-  }
-  if (queueCount > 0) {
-    parts.push(`${queueCount} queued`);
-  }
-  if (session?.activity?.compact?.state === 'pending') {
-    parts.push('compacting');
-  }
-  const workflowState = normalizeSessionWorkflowState(session?.workflowState || '');
-  if (workflowState) {
-    parts.push(`state=${workflowState}`);
-  }
-  const workflowPriority = normalizeSessionWorkflowPriority(session?.workflowPriority || '');
-  if (workflowPriority) {
-    parts.push(`priority=${workflowPriority}`);
-  }
-  return parts.join(', ');
-}
-
-function formatActiveBoardSessionsForPrompt(sessions, currentSessionId) {
-  const orderedSessions = [...(Array.isArray(sessions) ? sessions : [])].sort((a, b) => {
-    const aCurrent = a?.id === currentSessionId ? 1 : 0;
-    const bCurrent = b?.id === currentSessionId ? 1 : 0;
-    return bCurrent - aCurrent;
-  });
-  const lines = [];
-  for (const session of orderedSessions) {
-    if (!session?.id) continue;
-    const parts = [
-      `id=${session.id}`,
-      `title=${JSON.stringify(session.name || '(unnamed)')}`,
-    ];
-    const group = normalizeSessionGroup(session.group || '');
-    if (group) parts.push(`group=${JSON.stringify(group)}`);
-    const description = normalizeSessionDescription(session.description || '');
-    if (description) parts.push(`description=${JSON.stringify(description)}`);
-    if (session.folder) parts.push(`folder=${JSON.stringify(session.folder)}`);
-    if (session.sourceName) parts.push(`source=${JSON.stringify(session.sourceName)}`);
-    if (session.appName) parts.push(`app=${JSON.stringify(session.appName)}`);
-    const activity = describeSessionActivity(session);
-    if (activity) parts.push(`activity=${JSON.stringify(activity)}`);
-    if (session.board?.columnLabel) {
-      parts.push(`board=${JSON.stringify(`${session.board.columnLabel} @ ${session.board.order ?? 0}`)}`);
-    }
-    if (session.id === currentSessionId) {
-      parts.push('current=true');
-    }
-    const updatedAt = session.lastEventAt || session.updatedAt || session.created || '';
-    if (updatedAt) parts.push(`updatedAt=${JSON.stringify(updatedAt)}`);
-    lines.push(`- ${parts.join(' | ')}`);
-  }
-  return lines.join('\n');
-}
-
-function formatExistingBoardLayoutForPrompt(layout) {
-  const columns = Array.isArray(layout?.columns) ? layout.columns : [];
-  const placements = Array.isArray(layout?.placements) ? layout.placements : [];
-  if (columns.length === 0) return '';
-  const lines = [];
-  for (const column of columns) {
-    const placed = placements
-      .filter((placement) => placement.columnKey === column.key)
-      .sort((a, b) => (Number(a.order || 0) - Number(b.order || 0)))
-      .map((placement) => `${placement.sessionId}${placement.priority ? `(${placement.priority})` : ''}`);
-    lines.push(`- ${column.label} [${column.key}]${placed.length > 0 ? `: ${placed.join(', ')}` : ''}`);
-  }
-  return lines.join('\n');
-}
-
 async function runToolJsonPrompt(sessionMeta, prompt) {
   const {
     id: sessionId,
@@ -186,7 +110,7 @@ async function runToolJsonPrompt(sessionMeta, prompt) {
     `[summarizer] Calling tool=${tool} cmd=${resolvedCmd} model=${model || 'default'} effort=${effort || 'default'} thinking=${!!thinking} for session ${sessionId.slice(0, 8)}`
   );
 
-  const subEnv = { ...process.env, PATH: fullPath };
+  const subEnv = buildToolProcessEnv();
   delete subEnv.CLAUDECODE;
   delete subEnv.CLAUDE_CODE_ENTRYPOINT;
 
@@ -268,17 +192,6 @@ export function triggerSessionWorkflowStateSuggestion(sessionMeta, options = {})
   });
 }
 
-export function triggerSessionBoardLayoutSuggestion(sessionMeta, options = {}) {
-  console.log(`[board-layout] triggerSessionBoardLayoutSuggestion called for session ${sessionMeta.id?.slice(0, 8)}`);
-  return runSessionBoardLayoutSuggestion(sessionMeta, options).catch((err) => {
-    console.error(`[board-layout] Session board layout suggestion error for ${sessionMeta.id?.slice(0, 8)}: ${err.message}`);
-    return {
-      ok: false,
-      error: err.message,
-    };
-  });
-}
-
 async function runSessionLabelSuggestion(sessionMeta, onRename, options = {}) {
   const {
     id: sessionId,
@@ -286,6 +199,8 @@ async function runSessionLabelSuggestion(sessionMeta, onRename, options = {}) {
     name,
     group,
     description,
+    appName,
+    sourceName,
     autoRenamePending,
   } = sessionMeta;
 
@@ -337,12 +252,15 @@ async function runSessionLabelSuggestion(sessionMeta, onRename, options = {}) {
     `Current session name: ${name || '(unnamed)'}`,
     currentGroup ? `Current display group: ${currentGroup}` : '',
     currentDescription ? `Current session description: ${currentDescription}` : '',
+    appName ? `Current app label: ${appName}` : '',
+    sourceName ? `Current source label: ${sourceName}` : '',
     promptContext.contextSummary ? `Earlier session context:\n${promptContext.contextSummary}` : '',
     promptContext.scopeRouter ? `Known scope router entries:\n${promptContext.scopeRouter}` : '',
     promptContext.existingSessions ? `Current non-archived sessions:\n${promptContext.existingSessions}` : '',
-    shouldGenerateTitle ? 'The current name is only a temporary draft. Generate a better final title based mainly on the latest user request.' : '',
+    shouldGenerateTitle ? 'The current name is only a temporary draft. Generate a better final title based on the latest full turn, using the user request as the main signal and the assistant reply to sharpen the task wording.' : '',
     shouldGenerateGrouping ? 'Also generate a stable one-level display group for session-list organization. This is not a filesystem path.' : '',
     shouldGenerateTitle ? 'The display group is shown separately in the UI. The title must focus on the specific task inside that group and should not repeat the group/domain words unless disambiguation truly requires it.' : '',
+    shouldGenerateTitle ? 'Likewise, avoid repeating connector, provider, source, or app labels that are already captured elsewhere in session metadata unless they add real disambiguating context.' : '',
     '',
     'Latest turn:',
     turnText,
@@ -465,7 +383,7 @@ async function runSessionWorkflowStateSuggestion(sessionMeta, _options = {}) {
     '- If the assistant delivered the requested result or clearly closed the task, prefer "done".',
     '- If the session is paused, open-ended, or only loosely pending without needing the user right now, choose "parked".',
     '- On failures that require user intervention, prefer "waiting_user". On failures that simply stop progress without a clear ask, prefer "parked".',
-    '- Also choose the user-attention priority for the next glance at the board.',
+    '- Also choose the user-attention priority for the next glance at the session list.',
     '- Use "high" when the user should probably look soon, especially for blockers, approvals, decisions, or important next actions.',
     '- Use "medium" for meaningful open work that matters but is not urgent right now.',
     '- Use "low" for safely parked or completed work that does not deserve immediate attention.',
@@ -516,92 +434,5 @@ async function runSessionWorkflowStateSuggestion(sessionMeta, _options = {}) {
     workflowState: nextWorkflowState,
     workflowPriority: nextWorkflowPriority,
     reason: typeof stateResult?.reason === 'string' ? stateResult.reason.trim() : '',
-  };
-}
-
-async function runSessionBoardLayoutSuggestion(sessionMeta, _options = {}) {
-  const {
-    id: sessionId,
-    folder,
-    name,
-    group,
-    description,
-    currentHistory,
-    activeSessions,
-    existingBoardLayout,
-  } = sessionMeta;
-
-  const historyText = formatHistoryForPrompt(Array.isArray(currentHistory) ? currentHistory : []);
-  const sessionsText = formatActiveBoardSessionsForPrompt(activeSessions, sessionId);
-  if (!sessionsText.trim()) {
-    return {
-      ok: false,
-      skipped: 'no_sessions',
-    };
-  }
-
-  const prompt = [
-    'You are arranging the RemoteLab owner board for session work.',
-    'This board is a pure UI lens over sessions. You control the columns, their order, and each session placement.',
-    'Your job is not to mirror runtime states. Your job is to help the owner see what deserves attention and to avoid duplicate or overlapping columns.',
-    'Important principles:',
-    '- You may create as many columns as needed, but prefer a compact board with clear semantic buckets.',
-    '- Merge similar work into shared columns instead of inventing near-duplicate lanes.',
-    '- Left-most columns should usually be the most actionable or highest-attention buckets.',
-    '- Every active session must appear exactly once in placements.',
-    '- You may use runtime clues, but runtime state must not force the column structure.',
-    '- Use priority to decide what the owner should look at first: high, medium, or low.',
-    '- If an existing column still makes sense, reuse it instead of renaming everything unnecessarily.',
-    '- Avoid empty columns unless they carry real value right now.',
-    '',
-    `Current anchor session folder: ${folder}`,
-    `Current anchor session name: ${name || '(unnamed)'}`,
-    normalizeSessionGroup(group || '') ? `Current anchor session group: ${normalizeSessionGroup(group || '')}` : '',
-    normalizeSessionDescription(description || '') ? `Current anchor session description: ${normalizeSessionDescription(description || '')}` : '',
-    '',
-    'Current anchor session full history:',
-    historyText || '(no history available)',
-    '',
-    'All active sessions metadata:',
-    sessionsText,
-    '',
-    formatExistingBoardLayoutForPrompt(existingBoardLayout)
-      ? `Existing board layout:\n${formatExistingBoardLayoutForPrompt(existingBoardLayout)}`
-      : '',
-    '',
-    'Respond with ONLY valid JSON using exactly this shape:',
-    '{',
-    '  "columns": [',
-    '    { "key": "focus_now", "label": "Focus now", "order": 10, "description": "Optional short description" }',
-    '  ],',
-    '  "placements": [',
-    '    { "sessionId": "exact-session-id", "columnKey": "focus_now", "order": 10, "priority": "high", "reason": "short reason" }',
-    '  ]',
-    '}',
-    'Rules for JSON output:',
-    '- Use exact session ids from the provided metadata.',
-    '- Include every active session exactly once in placements.',
-    '- Use only "high", "medium", or "low" for priority.',
-    '- Use integer order values; lower order means earlier from left to right for columns and top to bottom for cards.',
-    '- Keep descriptions and reasons short.',
-    '- No markdown. No explanation outside JSON.',
-  ].filter((line) => line !== '').join('\n');
-
-  const modelText = await runToolJsonPrompt(sessionMeta, prompt);
-  const boardResult = parseJsonObject(modelText);
-  if (!boardResult || !Array.isArray(boardResult.columns) || !Array.isArray(boardResult.placements)) {
-    console.error(`[board-layout] Unexpected board layout output for ${sessionId.slice(0, 8)}: ${modelText.slice(0, 200)}`);
-    return {
-      ok: false,
-      error: `Unexpected model output: ${modelText.slice(0, 200)}`,
-    };
-  }
-
-  return {
-    ok: true,
-    boardLayout: {
-      columns: boardResult.columns,
-      placements: boardResult.placements,
-    },
   };
 }

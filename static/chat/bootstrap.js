@@ -6,7 +6,7 @@ const pageBootstrap =
     ? window.__REMOTELAB_BOOTSTRAP__
     : {};
 const buildAssetVersion = buildInfo.assetVersion || "dev";
-const BUILD_FORCE_RELOAD_HOLD_MS = 700;
+const bootstrapT = window.remotelabT || ((key) => key);
 
 function normalizeBootstrapText(value) {
   if (typeof value !== "string") return "";
@@ -17,8 +17,9 @@ function normalizeBootstrapText(value) {
 function normalizeBootstrapAuthInfo(raw) {
   if (!raw || typeof raw !== "object") return null;
   const role = raw.role === "visitor" ? "visitor" : "owner";
+  const preferredLanguage = normalizeBootstrapText(raw.preferredLanguage);
   if (role === "owner") {
-    return { role };
+    return preferredLanguage ? { role, preferredLanguage } : { role };
   }
 
   const sessionId = normalizeBootstrapText(raw.sessionId);
@@ -32,13 +33,100 @@ function normalizeBootstrapAuthInfo(raw) {
   const visitorId = normalizeBootstrapText(raw.visitorId);
   if (appId) info.appId = appId;
   if (visitorId) info.visitorId = visitorId;
+  if (preferredLanguage) info.preferredLanguage = preferredLanguage;
   return info;
 }
 
 const bootstrapAuthInfo = normalizeBootstrapAuthInfo(pageBootstrap.auth);
 
+function normalizeBootstrapAssetUploads(raw) {
+  if (!raw || typeof raw !== "object") {
+    return {
+      enabled: false,
+      directUpload: false,
+      provider: "",
+    };
+  }
+  return {
+    enabled: raw.enabled === true,
+    directUpload: raw.directUpload === true,
+    provider: normalizeBootstrapText(raw.provider),
+  };
+}
+
+const bootstrapAssetUploads = normalizeBootstrapAssetUploads(pageBootstrap.assetUploads);
+
+function normalizeBootstrapShareSnapshot(rawPayload, rawMeta = null) {
+  const payload = rawPayload && typeof rawPayload === "object"
+    ? rawPayload
+    : {};
+  const meta = rawMeta && typeof rawMeta === "object"
+    ? rawMeta
+    : {};
+  if (Object.keys(payload).length === 0 && Object.keys(meta).length === 0) {
+    return null;
+  }
+
+  const id = normalizeBootstrapText(payload.id || meta.id || meta.shareId);
+  const sessionRaw = payload.session && typeof payload.session === "object"
+    ? payload.session
+    : (meta.session && typeof meta.session === "object" ? meta.session : {});
+  const payloadView = payload.view && typeof payload.view === "object"
+    ? payload.view
+    : {};
+  const metaView = meta.view && typeof meta.view === "object"
+    ? meta.view
+    : {};
+  const view = {
+    ...payloadView,
+    ...metaView,
+  };
+  if (meta.badge && !view.badge) view.badge = meta.badge;
+  if (meta.note && !view.note) view.note = meta.note;
+  if (meta.titleSuffix && !view.titleSuffix) view.titleSuffix = meta.titleSuffix;
+  const eventBlocks = payload.eventBlocks && typeof payload.eventBlocks === "object"
+    ? Object.fromEntries(
+      Object.entries(payload.eventBlocks)
+        .filter(([key, events]) => typeof key === "string" && Array.isArray(events)),
+    )
+    : {};
+  const displayEvents = Array.isArray(payload.displayEvents)
+    ? payload.displayEvents.filter((event) => event && typeof event === "object")
+    : [];
+
+  return {
+    id,
+    version: payload.version,
+    createdAt: normalizeBootstrapText(payload.createdAt || meta.createdAt) || null,
+    session: {
+      name: normalizeBootstrapText(sessionRaw.name),
+      tool: normalizeBootstrapText(sessionRaw.tool),
+      created: normalizeBootstrapText(sessionRaw.created) || null,
+    },
+    view,
+    eventCount: Number.isInteger(payload.eventCount)
+      ? payload.eventCount
+      : displayEvents.length,
+    displayEvents,
+    eventBlocks,
+  };
+}
+
+const bootstrapShareSnapshot = normalizeBootstrapShareSnapshot(
+  window.__REMOTELAB_SHARE__,
+  pageBootstrap.shareSnapshot,
+);
+
 function getBootstrapAuthInfo() {
   return bootstrapAuthInfo ? { ...bootstrapAuthInfo } : null;
+}
+
+function getBootstrapShareSnapshot() {
+  return bootstrapShareSnapshot;
+}
+
+function getBootstrapAssetUploads() {
+  return { ...bootstrapAssetUploads };
 }
 
 console.info(
@@ -48,7 +136,6 @@ console.info(
 
 let buildRefreshScheduled = false;
 let newerBuildInfo = null;
-let buildForceReloadHoldTimer = null;
 
 async function clearFrontendCaches() {
   if (!("serviceWorker" in navigator)) return;
@@ -67,24 +154,17 @@ function updateFrontendRefreshUi() {
   const hasUpdate = !!newerBuildInfo?.assetVersion;
   refreshFrontendBtn.hidden = !hasUpdate;
   refreshFrontendBtn.classList.toggle("ready", hasUpdate);
-  refreshFrontendBtn.textContent = hasUpdate ? "Update" : "";
+  const updateTitle = hasUpdate
+    ? bootstrapT("status.frontendUpdateReady")
+    : bootstrapT("status.frontendReloadLatest");
+  refreshFrontendBtn.title = updateTitle;
+  refreshFrontendBtn.setAttribute("aria-label", updateTitle);
+  if (!hasUpdate) {
+    refreshFrontendBtn.removeAttribute("aria-busy");
+  }
 }
 
-function hasPendingComposerState() {
-  const draft = typeof msgInput?.value === "string" ? msgInput.value.trim() : "";
-  return draft.length > 0 || pendingImages.length > 0;
-}
-
-function canAutoApplyFreshBuild() {
-  if (document.visibilityState !== "visible") return false;
-  if (addToolModal && !addToolModal.hidden) return false;
-  if (document.activeElement === msgInput) return false;
-  if (hasPendingComposerState()) return false;
-  if (["running", "queued", "compacting"].includes(sessionStatus)) return false;
-  return true;
-}
-
-async function reloadForFreshBuild(nextBuildInfo, { force = false } = {}) {
+async function reloadForFreshBuild(nextBuildInfo) {
   if (buildRefreshScheduled) return;
   buildRefreshScheduled = true;
   refreshFrontendBtn?.setAttribute("aria-busy", "true");
@@ -96,13 +176,6 @@ async function reloadForFreshBuild(nextBuildInfo, { force = false } = {}) {
       newerBuildInfo?.assetVersion ||
       "unknown",
   );
-  if (!force && !canAutoApplyFreshBuild()) {
-    buildRefreshScheduled = false;
-    refreshFrontendBtn?.removeAttribute("aria-busy");
-    newerBuildInfo = nextBuildInfo || newerBuildInfo;
-    updateFrontendRefreshUi();
-    return false;
-  }
   try {
     await clearFrontendCaches();
   } catch {}
@@ -124,7 +197,7 @@ async function applyBuildInfo(nextBuildInfo) {
   }
   newerBuildInfo = nextBuildInfo;
   updateFrontendRefreshUi();
-  return reloadForFreshBuild(nextBuildInfo);
+  return false;
 }
 
 window.RemoteLabBuild = {
@@ -144,17 +217,20 @@ const sessionListFooter = document.getElementById("sessionListFooter");
 const newUserNameInput = document.getElementById("newUserNameInput");
 const newUserAppsPicker = document.getElementById("newUserAppsPicker");
 const newUserDefaultAppSelect = document.getElementById("newUserDefaultAppSelect");
+const newUserLanguageSelect = document.getElementById("newUserLanguageSelect");
 const createUserBtn = document.getElementById("createUserBtn");
 const userFormStatus = document.getElementById("userFormStatus");
 const settingsUsersList = document.getElementById("settingsUsersList");
 const settingsAppsList = document.getElementById("settingsAppsList");
+const uiLanguageSelect = document.getElementById("uiLanguageSelect");
+const uiLanguageStatus = document.getElementById("uiLanguageStatus");
 const newAppNameInput = document.getElementById("newAppNameInput");
 const newAppToolSelect = document.getElementById("newAppToolSelect");
 const newAppWelcomeInput = document.getElementById("newAppWelcomeInput");
 const newAppSystemPromptInput = document.getElementById("newAppSystemPromptInput");
 const createAppConfigBtn = document.getElementById("createAppConfigBtn");
 const appFormStatus = document.getElementById("appFormStatus");
-const newAppBtn = document.getElementById("newAppBtn");
+const sortSessionListBtn = document.getElementById("sortSessionListBtn");
 const newSessionBtn = document.getElementById("newSessionBtn");
 const messagesEl = document.getElementById("messages");
 const messagesInner = document.getElementById("messagesInner");
@@ -182,14 +258,13 @@ const sessionTemplateRow = document.getElementById("sessionTemplateRow");
 const sessionTemplateSelect = document.getElementById("sessionTemplateSelect");
 const sessionTemplateStatus = document.getElementById("sessionTemplateStatus");
 const tabSessions = document.getElementById("tabSessions");
-const tabBoard = document.getElementById("tabBoard");
 const tabSettings = document.getElementById("tabSettings");
 const sourceFilterSelect = document.getElementById("sourceFilterSelect");
 const sessionAppFilterSelect = document.getElementById("sessionAppFilterSelect");
 const userFilterSelect = document.getElementById("userFilterSelect");
-const boardPanel = document.getElementById("boardPanel");
 const settingsPanel = document.getElementById("settingsPanel");
 const inputArea = document.getElementById("inputArea");
+const composerPendingState = document.getElementById("composerPendingState");
 const inputResizeHandle = document.getElementById("inputResizeHandle");
 const addToolModal = document.getElementById("addToolModal");
 const closeAddToolModalBtn = document.getElementById("closeAddToolModal");
@@ -213,27 +288,8 @@ const providerPromptCode = document.getElementById("providerPromptCode");
 const saveToolConfigBtn = document.getElementById("saveToolConfigBtn");
 const copyProviderPromptBtn = document.getElementById("copyProviderPromptBtn");
 
-function startBuildForceReloadHold() {
-  clearTimeout(buildForceReloadHoldTimer);
-  buildForceReloadHoldTimer = setTimeout(() => {
-    void reloadForFreshBuild(newerBuildInfo, { force: true });
-  }, BUILD_FORCE_RELOAD_HOLD_MS);
-}
-
-function cancelBuildForceReloadHold() {
-  clearTimeout(buildForceReloadHoldTimer);
-  buildForceReloadHoldTimer = null;
-}
-
-[headerTitle, statusDot, statusText].forEach((element) => {
-  element?.addEventListener("pointerdown", startBuildForceReloadHold);
-  element?.addEventListener("pointerup", cancelBuildForceReloadHold);
-  element?.addEventListener("pointerleave", cancelBuildForceReloadHold);
-  element?.addEventListener("pointercancel", cancelBuildForceReloadHold);
-});
-
 refreshFrontendBtn?.addEventListener("click", () => {
-  void reloadForFreshBuild(newerBuildInfo, { force: true });
+  void reloadForFreshBuild(newerBuildInfo);
 });
 
 let ws = null;
@@ -245,6 +301,8 @@ const ACTIVE_SOURCE_FILTER_STORAGE_KEY = "activeSourceFilter";
 const ACTIVE_SESSION_APP_FILTER_STORAGE_KEY = "activeSessionAppFilter";
 const ACTIVE_USER_FILTER_STORAGE_KEY = "activeUserFilter";
 const LEGACY_SESSION_SEND_FAILURES_STORAGE_KEY = "sessionSendFailures";
+const SESSION_REVIEW_MARKERS_STORAGE_KEY = "sessionReviewedAtById";
+const SESSION_REVIEW_BASELINE_AT_STORAGE_KEY = "sessionReviewBaselineAt";
 const FILTER_ALL_VALUE = "__all__";
 const SOURCE_FILTER_CHAT_VALUE = "chat_ui";
 const SOURCE_FILTER_BOT_VALUE = "bot";
@@ -252,240 +310,18 @@ const SOURCE_FILTER_AUTOMATION_VALUE = "automation";
 const ADMIN_USER_FILTER_VALUE = "user_admin";
 const USER_FILTER_ALL_VALUE = "__all_users__";
 const DEFAULT_APP_ID = "chat";
+const WELCOME_APP_ID = "app_welcome";
 const BASIC_CHAT_APP_ID = "app_basic_chat";
+const WELCOME_TEMPLATE_APP_ID = WELCOME_APP_ID;
+const BASIC_CHAT_TEMPLATE_APP_ID = BASIC_CHAT_APP_ID;
+const CREATE_APP_TEMPLATE_APP_ID = "app_create_app";
 const DEFAULT_APP_NAME = "Chat";
 const sessionStateModel = window.RemoteLabSessionStateModel;
 if (!sessionStateModel) {
   throw new Error("RemoteLabSessionStateModel must load before bootstrap.js");
 }
-let pendingNavigationState = readNavigationStateFromLocation();
-let currentSessionId =
-  pendingNavigationState.sessionId ||
-  localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY) ||
-  null;
-let hasAttachedSession = false;
-let sessionStatus = "idle";
-let reconnectTimer = null;
-let sessions = [];
-let sessionBoardLayout = null;
-let sessionAppCatalog = [];
-let availableApps = [];
-let availableUsers = [];
-let hasLoadedSessions = false;
-let visitorMode = false;
-let visitorSessionId = null;
-let currentSessionRefreshPromise = null;
-let pendingCurrentSessionRefresh = false;
-let hasSeenWsOpen = false;
-const sidebarSessionRefreshPromises = new Map();
-const pendingSidebarSessionRefreshes = new Set();
-const jsonResponseCache = new Map();
-const eventBodyCache = new Map();
-const eventBodyRequests = new Map();
-const messageTimeFormatter = new Intl.DateTimeFormat(undefined, {
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
-const renderedEventState = {
-  sessionId: null,
-  latestSeq: 0,
-  eventCount: 0,
-};
-
-let currentTokens = 0;
-
-let preferredTool =
-  localStorage.getItem("preferredTool") ||
-  localStorage.getItem("selectedTool") ||
-  null;
-let selectedTool = preferredTool;
-// Default thinking to enabled; only disable if explicitly set to 'false'
-let thinkingEnabled = localStorage.getItem("thinkingEnabled") !== "false";
-// Model/effort are stored per-tool: "selectedModel_claude", "selectedModel_codex"
-let selectedModel = null;
-let selectedEffort = null;
-let currentToolModels = []; // model list for current tool
-let currentToolEffortLevels = null; // null = binary toggle, string[] = effort dropdown
-let currentToolReasoningKind = "toggle";
-let currentToolReasoningLabel = "Thinking";
-let currentToolReasoningDefault = null;
-let toolsList = [];
-let isDesktop = window.matchMedia("(min-width: 768px)").matches;
-const ADD_MORE_TOOL_VALUE = "__add_more__";
-const COLLAPSED_GROUPS_STORAGE_KEY = "collapsedSessionGroups";
-let isSavingToolConfig = false;
-let collapsedFolders = JSON.parse(
-  localStorage.getItem(COLLAPSED_GROUPS_STORAGE_KEY) ||
-    localStorage.getItem("collapsedFolders") ||
-    "{}",
-);
-
-try {
-  localStorage.removeItem(LEGACY_SESSION_SEND_FAILURES_STORAGE_KEY);
-} catch {}
-
-function readStoredJsonValue(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw);
-    return parsed ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeStoredJsonValue(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {}
-}
-
-function createEmptySessionStatus() {
-  return sessionStateModel.createEmptyStatus();
-}
-
-function getSessionActivity(session) {
-  return sessionStateModel.normalizeSessionActivity(session);
-}
-
-function isSessionBusy(session) {
-  return sessionStateModel.isSessionBusy(session);
-}
-
-function getSessionStatusSummary(session, { includeToolFallback = false } = {}) {
-  return sessionStateModel.getSessionStatusSummary(session, { includeToolFallback });
-}
-
-function getSessionVisualStatus(session, options = {}) {
-  return getSessionStatusSummary(session, options).primary;
-}
-
-function getSessionBoardColumns() {
-  return typeof sessionStateModel.getBoardColumns === "function"
-    ? sessionStateModel.getBoardColumns(sessionBoardLayout, getActiveSessions())
-    : [];
-}
-
-function getSessionBoardColumn(session) {
-  return typeof sessionStateModel.getSessionBoardColumn === "function"
-    ? sessionStateModel.getSessionBoardColumn(session, sessionBoardLayout, getActiveSessions())
-    : {
-      key: "unassigned",
-      label: "Unassigned",
-      title: "Sessions that are not yet arranged by the board model.",
-      emptyText: "Nothing here yet",
-    };
-}
-
-function getSessionBoardPriority(session) {
-  return typeof sessionStateModel.getSessionBoardPriority === "function"
-    ? sessionStateModel.getSessionBoardPriority(session)
-    : {
-      key: "medium",
-      label: "Medium",
-      rank: 2,
-      className: "board-priority-medium",
-      title: "Worth checking soon, but not urgent.",
-    };
-}
-
-function compareBoardSessions(a, b) {
-  return typeof sessionStateModel.compareBoardSessions === "function"
-    ? sessionStateModel.compareBoardSessions(a, b)
-    : 0;
-}
-
-function refreshSessionAttentionUi(sessionId = currentSessionId) {
-  if (typeof renderSessionList === "function") {
-    renderSessionList();
-  }
-  if (
-    sessionId
-    && sessionId === currentSessionId
-    && typeof updateStatus === "function"
-    && typeof getCurrentSession === "function"
-  ) {
-    const session = getCurrentSession();
-    updateStatus("connected", session);
-  }
-}
-
-// Thinking block state
-let currentThinkingBlock = null; // { el, body, tools: Set }
-let inThinkingBlock = false;
-
-let activeSourceFilter = normalizeSourceFilter(
-  localStorage.getItem(ACTIVE_SOURCE_FILTER_STORAGE_KEY)
-  || localStorage.getItem(LEGACY_ACTIVE_SOURCE_FILTER_STORAGE_KEY)
-  || FILTER_ALL_VALUE,
-);
-let activeSessionAppFilter = normalizeSessionAppFilter(
-  localStorage.getItem(ACTIVE_SESSION_APP_FILTER_STORAGE_KEY) || FILTER_ALL_VALUE,
-);
-let activeUserFilter = normalizeUserFilter(
-  localStorage.getItem(ACTIVE_USER_FILTER_STORAGE_KEY) || ADMIN_USER_FILTER_VALUE,
-);
-
-function registerHiddenMarkdownExtensions() {
-  const hiddenTagStart = /<(private|hide)\b/i;
-  const hiddenBlockPattern = /^(?: {0,3})<(private|hide)\b[^>]*>[\s\S]*?<\/\1>(?:\n+|$)/i;
-  const hiddenInlinePattern = /^<(private|hide)\b[^>]*>[\s\S]*?<\/\1>/i;
-  marked.use({
-    extensions: [
-      {
-        name: "hiddenUiBlock",
-        level: "block",
-        start(src) {
-          const match = src.match(hiddenTagStart);
-          return match ? match.index : undefined;
-        },
-        tokenizer(src) {
-          const match = src.match(hiddenBlockPattern);
-          if (!match) return undefined;
-          return { type: "hiddenUiBlock", raw: match[0] };
-        },
-        renderer() {
-          return "";
-        },
-      },
-      {
-        name: "hiddenUiInline",
-        level: "inline",
-        start(src) {
-          const match = src.match(hiddenTagStart);
-          return match ? match.index : undefined;
-        },
-        tokenizer(src) {
-          const match = src.match(hiddenInlinePattern);
-          if (!match) return undefined;
-          return { type: "hiddenUiInline", raw: match[0] };
-        },
-        renderer() {
-          return "";
-        },
-      },
-    ],
-  });
-}
-
-function initializePushNotifications() {
-  if (visitorMode || !("Notification" in window)) return;
-  if (Notification.permission === "default") {
-    Notification.requestPermission().then((perm) => {
-      if (perm === "granted" && !visitorMode) setupPushNotifications();
-    });
-  } else if (Notification.permission === "granted") {
-    setupPushNotifications();
-  }
-}
-
-registerHiddenMarkdownExtensions();
 
 function normalizeSidebarTab(tab) {
-  if (tab === "board" || tab === "progress") return "board";
   if (tab === "settings") return "settings";
   return "sessions";
 }
@@ -522,572 +358,230 @@ function readNavigationStateFromLocation() {
   });
 }
 
-function persistActiveSessionId(sessionId) {
-  if (visitorMode) return;
-  if (sessionId) {
-    localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
-  } else {
-    localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+let pendingNavigationState = readNavigationStateFromLocation();
+let currentSessionId =
+  pendingNavigationState.sessionId ||
+  localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY) ||
+  null;
+let hasAttachedSession = false;
+let sessionStatus = "idle";
+let reconnectTimer = null;
+let sessions = [];
+let sessionAppCatalog = [];
+let availableApps = [];
+let availableUsers = [];
+let hasLoadedSessions = false;
+let archivedSessionCount = 0;
+let archivedSessionsLoaded = false;
+let archivedSessionsLoading = false;
+let archivedSessionsRefreshPromise = null;
+let visitorMode = false;
+let visitorSessionId = null;
+let shareSnapshotMode = false;
+let shareSnapshotPayload = bootstrapShareSnapshot;
+let currentSessionRefreshPromise = null;
+let pendingCurrentSessionRefresh = false;
+let hasSeenWsOpen = false;
+const sidebarSessionRefreshPromises = new Map();
+const pendingSidebarSessionRefreshes = new Set();
+const jsonResponseCache = new Map();
+const eventBodyCache = new Map();
+const eventBodyRequests = new Map();
+const eventBlockCache = new Map();
+const eventBlockRequests = new Map();
+const messageTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const renderedEventState = {
+  sessionId: null,
+  latestSeq: 0,
+  eventCount: 0,
+  eventBaseKeys: [],
+  eventKeys: [],
+  runState: "idle",
+  runningBlockExpanded: false,
+};
+
+function setRunningEventBlockExpanded(sessionId, expanded) {
+  if (!sessionId || renderedEventState.sessionId !== sessionId) return;
+  renderedEventState.runningBlockExpanded = expanded === true;
+}
+
+function shouldUseVisitorRequests() {
+  if (visitorMode) return true;
+  try {
+    return new URL(window.location.href).searchParams.get("visitor") === "1";
+  } catch {
+    return false;
   }
 }
 
-function persistActiveSidebarTab(tab) {
-  if (visitorMode) return;
-  localStorage.setItem(
-    ACTIVE_SIDEBAR_TAB_STORAGE_KEY,
-    normalizeSidebarTab(tab),
-  );
-}
-
-function buildNavigationUrl(state = {}) {
-  const nextSessionId =
-    state.sessionId === undefined ? currentSessionId : state.sessionId;
-  const nextTab = normalizeSidebarTab(
-    state.tab === undefined ? activeTab : state.tab,
-  );
-  const url = new URL(window.location.href);
-  url.searchParams.delete("visitor");
-  url.searchParams.delete("source");
-  if (nextSessionId) url.searchParams.set("session", nextSessionId);
-  else url.searchParams.delete("session");
-  if (nextTab === "settings" || nextTab === "board") {
-    url.searchParams.set("tab", nextTab);
-  } else {
-    url.searchParams.delete("tab");
+function withVisitorModeUrl(url) {
+  const parsed = new URL(String(url || ""), window.location.href);
+  if (shouldUseVisitorRequests()) {
+    parsed.searchParams.set("visitor", "1");
   }
-  return `${url.pathname}${url.search}`;
+  if (parsed.origin === window.location.origin) {
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  }
+  return parsed.toString();
 }
 
-function syncBrowserState(state = {}) {
-  if (visitorMode) return;
-  const nextSessionId =
-    state.sessionId === undefined ? currentSessionId : state.sessionId;
-  const nextTab = normalizeSidebarTab(
-    state.tab === undefined ? activeTab : state.tab,
-  );
-  persistActiveSessionId(nextSessionId);
-  persistActiveSidebarTab(nextTab);
-  const nextUrl = buildNavigationUrl({
-    sessionId: nextSessionId,
-    tab: nextTab,
-  });
-  const currentUrl = `${window.location.pathname}${window.location.search}`;
-  if (nextUrl !== currentUrl) {
-    history.replaceState(null, "", nextUrl);
+let currentTokens = 0;
+
+const DEFAULT_TOOL_ID = "codex";
+const LEGACY_AUTO_PREFERRED_TOOL_IDS = new Set(["codex", "micro-agent"]);
+
+function normalizeStoredToolId(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function derivePreferredToolId(storedPreferredTool, storedLegacySelectedTool) {
+  const preferred = normalizeStoredToolId(storedPreferredTool);
+  const legacySelected = normalizeStoredToolId(storedLegacySelectedTool);
+  if (preferred && !(LEGACY_AUTO_PREFERRED_TOOL_IDS.has(preferred) && !legacySelected)) {
+    return preferred;
+  }
+  if (legacySelected) {
+    return legacySelected;
+  }
+  return null;
+}
+
+const storedPreferredTool = normalizeStoredToolId(localStorage.getItem("preferredTool"));
+const storedLegacySelectedTool = normalizeStoredToolId(localStorage.getItem("selectedTool"));
+
+let preferredTool = derivePreferredToolId(storedPreferredTool, storedLegacySelectedTool);
+let selectedTool = preferredTool;
+// Default thinking to enabled; only disable if explicitly set to 'false'
+let thinkingEnabled = localStorage.getItem("thinkingEnabled") !== "false";
+// Model/effort are stored per-tool: "selectedModel_claude", "selectedModel_codex"
+let selectedModel = null;
+let selectedEffort = null;
+let currentToolModels = []; // model list for current tool
+let currentToolEffortLevels = null; // null = binary toggle, string[] = effort dropdown
+let currentToolReasoningKind = "toggle";
+let currentToolReasoningLabel = "Thinking";
+let currentToolReasoningDefault = null;
+let allToolsList = [];
+let toolsList = [];
+let isDesktop = window.matchMedia("(min-width: 768px)").matches;
+const ADD_MORE_TOOL_VALUE = "__add_more__";
+const COLLAPSED_GROUPS_STORAGE_KEY = "collapsedSessionGroups";
+let isSavingToolConfig = false;
+let collapsedFolders = JSON.parse(
+  localStorage.getItem(COLLAPSED_GROUPS_STORAGE_KEY) ||
+    localStorage.getItem("collapsedFolders") ||
+    "{}",
+);
+
+try {
+  localStorage.removeItem(LEGACY_SESSION_SEND_FAILURES_STORAGE_KEY);
+} catch {}
+
+let sessionReviewMarkers = readStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, {});
+let sessionReviewBaselineAt = readStoredTimestampValue(SESSION_REVIEW_BASELINE_AT_STORAGE_KEY);
+if (!sessionReviewBaselineAt) {
+  sessionReviewBaselineAt = new Date().toISOString();
+  writeStoredTimestampValue(SESSION_REVIEW_BASELINE_AT_STORAGE_KEY, sessionReviewBaselineAt);
+}
+
+function readStoredJsonValue(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed ?? fallback;
+  } catch {
+    return fallback;
   }
 }
 
-function normalizeAppId(appId, { fallbackDefault = false } = {}) {
-  const trimmed = typeof appId === "string" ? appId.trim() : "";
-  if (!trimmed) {
-    return fallbackDefault ? DEFAULT_APP_ID : "";
+function writeStoredJsonValue(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+
+function normalizeStoredTimestamp(value) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) return "";
+  const time = new Date(trimmed).getTime();
+  return Number.isFinite(time) ? new Date(time).toISOString() : "";
+}
+
+function readStoredTimestampValue(key) {
+  try {
+    return normalizeStoredTimestamp(localStorage.getItem(key));
+  } catch {
+    return "";
   }
-  const normalizedDefault = trimmed.toLowerCase();
-  if (normalizedDefault === DEFAULT_APP_ID) return DEFAULT_APP_ID;
-  return trimmed;
 }
 
-function normalizeSourceFilter(value) {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  return [
-    SOURCE_FILTER_CHAT_VALUE,
-    SOURCE_FILTER_BOT_VALUE,
-    SOURCE_FILTER_AUTOMATION_VALUE,
-  ].includes(normalized)
-    ? normalized
-    : FILTER_ALL_VALUE;
-}
-
-function isTemplateAppScopeId(appId) {
-  const normalized = normalizeAppId(appId);
-  return /^app[_-]/i.test(normalized);
-}
-
-function normalizeSessionAppFilter(appId) {
-  const normalized = normalizeAppId(appId);
-  return normalized && isTemplateAppScopeId(normalized)
-    ? normalized
-    : FILTER_ALL_VALUE;
-}
-
-function normalizeUserFilter(value) {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  if (normalized === USER_FILTER_ALL_VALUE) return USER_FILTER_ALL_VALUE;
-  return normalized || ADMIN_USER_FILTER_VALUE;
-}
-
-function persistActiveSourceFilter(value) {
-  if (visitorMode) return;
-  localStorage.setItem(ACTIVE_SOURCE_FILTER_STORAGE_KEY, normalizeSourceFilter(value));
-}
-
-function persistActiveSessionAppFilter(appId) {
-  if (visitorMode) return;
-  localStorage.setItem(
-    ACTIVE_SESSION_APP_FILTER_STORAGE_KEY,
-    normalizeSessionAppFilter(appId),
-  );
-}
-
-function persistActiveUserFilter(value) {
-  if (visitorMode) return;
-  localStorage.setItem(ACTIVE_USER_FILTER_STORAGE_KEY, normalizeUserFilter(value));
-}
-
-function formatAppNameFromId(appId) {
-  const normalized = normalizeAppId(appId);
-  if (!normalized) return DEFAULT_APP_NAME;
-  if (normalized === DEFAULT_APP_ID) return DEFAULT_APP_NAME;
-  return normalized
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function getEffectiveSessionAppId(session) {
-  return normalizeAppId(session?.appId, { fallbackDefault: true });
-}
-
-function getEffectiveSessionSourceId(session) {
-  const explicitSourceId = normalizeAppId(session?.sourceId);
-  if (explicitSourceId) return explicitSourceId;
-
-  const legacyAppId = normalizeAppId(session?.appId, { fallbackDefault: true });
-  if (!legacyAppId || isTemplateAppScopeId(legacyAppId)) {
-    return DEFAULT_APP_ID;
-  }
-  return legacyAppId;
-}
-
-function getEffectiveSessionSourceName(session) {
-  const explicitSourceName = typeof session?.sourceName === "string"
-    ? session.sourceName.trim()
-    : "";
-  if (explicitSourceName) return explicitSourceName;
-
-  const sourceId = getEffectiveSessionSourceId(session);
-  if (
-    typeof session?.appName === "string"
-    && session.appName.trim()
-    && !isTemplateAppScopeId(session?.appId)
-    && normalizeAppId(session?.appId) === sourceId
-  ) {
-    return session.appName.trim();
-  }
-
-  return formatAppNameFromId(sourceId);
-}
-
-function getEffectiveSessionTemplateAppId(session) {
-  const explicitTemplateId = normalizeAppId(session?.templateAppId || session?.appId);
-  if (isTemplateAppScopeId(explicitTemplateId)) {
-    return explicitTemplateId;
-  }
-  return BASIC_CHAT_APP_ID;
-}
-
-function getSessionSourceCategory(session) {
-  const sourceId = getEffectiveSessionSourceId(session);
-  if (sourceId === DEFAULT_APP_ID) return SOURCE_FILTER_CHAT_VALUE;
-  if (sourceId === "automation" || sourceId.startsWith("automation")) {
-    return SOURCE_FILTER_AUTOMATION_VALUE;
-  }
-  return SOURCE_FILTER_BOT_VALUE;
-}
-
-function sortTemplateAppCatalogEntries(a, b) {
-  const rank = (app) => {
-    if (app?.id === BASIC_CHAT_APP_ID) return 0;
-    if (app?.id === "app_create_app") return 1;
-    if (app?.id === "app_video_cut") return 2;
-    return 3;
-  };
-  return rank(a) - rank(b) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-}
-
-function createTemplateAppCatalogEntry(app) {
-  const id = normalizeAppId(app?.id);
-  if (!id || !isTemplateAppScopeId(id)) return null;
-  const name =
-    typeof app?.appName === "string" && app.appName.trim()
-      ? app.appName.trim()
-      : typeof app?.name === "string" && app.name.trim()
-        ? app.name.trim()
-        : formatAppNameFromId(id);
-  return {
-    ...app,
-    id,
-    name,
-  };
-}
-
-function getSessionAppCatalogEntry(appId) {
-  const normalized = normalizeAppId(appId);
-  if (!normalized) return null;
-  return (
-    sessionAppCatalog.find((entry) => entry.id === normalized)
-    || createTemplateAppCatalogEntry({ id: normalized })
-  );
-}
-
-function getTemplateApps() {
-  return availableApps.filter((app) => (
-    isTemplateAppScopeId(app?.id)
-    && app?.templateSelectable !== false
-  ));
-}
-
-function getShareableTemplateApps() {
-  return getTemplateApps().filter((app) => app?.shareEnabled !== false);
-}
-
-function getCurrentUserRecord() {
-  if (activeUserFilter === USER_FILTER_ALL_VALUE || activeUserFilter === ADMIN_USER_FILTER_VALUE) {
-    return null;
-  }
-  return availableUsers.find((user) => user.id === activeUserFilter) || null;
-}
-
-function getSessionAppFilterCatalog() {
-  const allTemplateApps = getTemplateApps().map((app) => createTemplateAppCatalogEntry(app)).filter(Boolean);
-  const user = getCurrentUserRecord();
-  const filteredApps = user
-    ? allTemplateApps.filter((app) => user.appIds.includes(app.id))
-    : allTemplateApps;
-  return filteredApps.sort(sortTemplateAppCatalogEntries);
-}
-
-function refreshAppCatalog(apps = availableApps) {
-  const nextSessionApps = new Map();
-
-  for (const app of apps) {
-    const entry = createTemplateAppCatalogEntry(app);
-    if (entry) nextSessionApps.set(entry.id, entry);
-  }
-
-  for (const session of sessions) {
-    const entry = createTemplateAppCatalogEntry({ id: session?.appId, appName: session?.appName });
-    if (entry && !nextSessionApps.has(entry.id)) {
-      nextSessionApps.set(entry.id, entry);
-    }
-  }
-
-  sessionAppCatalog = [...nextSessionApps.values()].filter(Boolean).sort(sortTemplateAppCatalogEntries);
-
-  const availableFilterAppIds = new Set(getSessionAppFilterCatalog().map((app) => app.id));
-  if (
-    hasLoadedSessions
-    && activeSessionAppFilter !== FILTER_ALL_VALUE
-    && !availableFilterAppIds.has(activeSessionAppFilter)
-  ) {
-    activeSessionAppFilter = FILTER_ALL_VALUE;
-    persistActiveSessionAppFilter(activeSessionAppFilter);
-  }
-
-  renderSourceFilterOptions();
-  renderSessionAppFilterOptions();
-  renderUserFilterOptions();
-}
-
-function getFilteredActiveSessions({ ignoreSource = false, ignoreTemplateApp = false, ignoreUser = false } = {}) {
-  return getActiveSessions().filter((session) => (
-    (ignoreSource || matchesSourceFilter(session, activeSourceFilter))
-    && (ignoreTemplateApp || matchesSessionAppFilter(session, activeSessionAppFilter))
-    && (ignoreUser || matchesUserFilter(session, activeUserFilter))
-  ));
-}
-
-function matchesSourceFilter(session, sourceFilter = activeSourceFilter) {
-  if (sourceFilter === FILTER_ALL_VALUE) return true;
-  return getSessionSourceCategory(session) === sourceFilter;
-}
-
-function matchesSessionAppFilter(session, appFilter = activeSessionAppFilter) {
-  if (appFilter === FILTER_ALL_VALUE) return true;
-  return getEffectiveSessionTemplateAppId(session) === appFilter;
-}
-
-function matchesUserFilter(session, scope = activeUserFilter) {
-  if (scope === USER_FILTER_ALL_VALUE) return true;
-  if (scope === ADMIN_USER_FILTER_VALUE) {
-    return !session?.userId && !session?.visitorId;
-  }
-  return session?.userId === scope;
-}
-
-function matchesCurrentFilters(session) {
-  return matchesUserFilter(session, activeUserFilter)
-    && matchesSourceFilter(session, activeSourceFilter)
-    && matchesSessionAppFilter(session, activeSessionAppFilter);
-}
-
-function getVisibleActiveSessions() {
-  return getActiveSessions().filter((session) => !session.pinned && matchesCurrentFilters(session));
-}
-
-function getVisiblePinnedSessions() {
-  return getActiveSessions().filter((session) => session.pinned === true && matchesCurrentFilters(session));
-}
-
-function getVisibleArchivedSessions() {
-  return getArchivedSessions().filter((session) => matchesCurrentFilters(session));
-}
-
-function getSessionCountForSourceFilter(sourceFilter) {
-  const activeSessions = getFilteredActiveSessions({ ignoreSource: true });
-  if (sourceFilter === FILTER_ALL_VALUE) return activeSessions.length;
-  return activeSessions.filter((session) => getSessionSourceCategory(session) === sourceFilter).length;
-}
-
-function getSessionCountForTemplateApp(appId) {
-  const activeSessions = getFilteredActiveSessions({ ignoreTemplateApp: true });
-  if (appId === FILTER_ALL_VALUE) return activeSessions.length;
-  return activeSessions.filter((session) => getEffectiveSessionTemplateAppId(session) === appId).length;
-}
-
-function getSessionCountForUser(scope = activeUserFilter) {
-  const activeSessions = getFilteredActiveSessions({ ignoreUser: true });
-  if (scope === USER_FILTER_ALL_VALUE) return activeSessions.length;
-  if (scope === ADMIN_USER_FILTER_VALUE) {
-    return activeSessions.filter((session) => !session?.userId && !session?.visitorId).length;
-  }
-  return activeSessions.filter((session) => session?.userId === scope).length;
-}
-
-function syncSidebarFiltersVisibility(showingSessions = null) {
-  if (!sidebarFilters) return;
-  const resolvedShowingSessions = typeof showingSessions === "boolean"
-    ? showingSessions
-    : (typeof activeTab === "string" ? activeTab === "sessions" : true);
-  const visible = resolvedShowingSessions && !visitorMode;
-  sidebarFilters.classList.toggle("hidden", !visible);
-}
-
-function renderSourceFilterOptions() {
-  if (!sourceFilterSelect || visitorMode) {
-    if (sourceFilterSelect) sourceFilterSelect.style.display = "none";
-    syncSidebarFiltersVisibility();
-    return;
-  }
-
-  sourceFilterSelect.style.display = "";
-  sourceFilterSelect.innerHTML = "";
-
-  const options = [
-    [FILTER_ALL_VALUE, `All Origins (${getSessionCountForSourceFilter(FILTER_ALL_VALUE)})`],
-    [SOURCE_FILTER_CHAT_VALUE, `Chat UI (${getSessionCountForSourceFilter(SOURCE_FILTER_CHAT_VALUE)})`],
-    [SOURCE_FILTER_BOT_VALUE, `Bots (${getSessionCountForSourceFilter(SOURCE_FILTER_BOT_VALUE)})`],
-    [SOURCE_FILTER_AUTOMATION_VALUE, `Automation (${getSessionCountForSourceFilter(SOURCE_FILTER_AUTOMATION_VALUE)})`],
-  ];
-  for (const [value, label] of options) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    sourceFilterSelect.appendChild(option);
-  }
-  sourceFilterSelect.value = normalizeSourceFilter(activeSourceFilter);
-  syncSidebarFiltersVisibility();
-}
-
-function renderSessionAppFilterOptions() {
-  if (!sessionAppFilterSelect || visitorMode) {
-    if (sessionAppFilterSelect) sessionAppFilterSelect.style.display = "none";
-    syncSidebarFiltersVisibility();
-    return;
-  }
-
-  sessionAppFilterSelect.style.display = "";
-
-  const catalog = getSessionAppFilterCatalog();
-  const previousValue = normalizeSessionAppFilter(sessionAppFilterSelect.value || activeSessionAppFilter);
-  const selectedValue = catalog.some((app) => app.id === previousValue)
-    ? previousValue
-    : catalog.some((app) => app.id === activeSessionAppFilter)
-      ? activeSessionAppFilter
-      : FILTER_ALL_VALUE;
-
-  sessionAppFilterSelect.innerHTML = "";
-
-  const allOption = document.createElement("option");
-  allOption.value = FILTER_ALL_VALUE;
-  allOption.textContent = `All Apps (${getSessionCountForTemplateApp(FILTER_ALL_VALUE)})`;
-  sessionAppFilterSelect.appendChild(allOption);
-
-  for (const app of catalog) {
-    const option = document.createElement("option");
-    option.value = app.id;
-    option.textContent = `${app.name} (${getSessionCountForTemplateApp(app.id)})`;
-    sessionAppFilterSelect.appendChild(option);
-  }
-
-  sessionAppFilterSelect.value = normalizeSessionAppFilter(selectedValue);
-  syncSidebarFiltersVisibility();
-}
-
-function renderUserFilterOptions() {
-  if (!userFilterSelect || visitorMode) {
-    if (userFilterSelect) userFilterSelect.style.display = "none";
-    syncSidebarFiltersVisibility();
-    return;
-  }
-
-  const availableUserIds = new Set(availableUsers.map((user) => user.id));
-  if (
-    activeUserFilter !== USER_FILTER_ALL_VALUE
-    && activeUserFilter !== ADMIN_USER_FILTER_VALUE
-    && !availableUserIds.has(activeUserFilter)
-  ) {
-    activeUserFilter = ADMIN_USER_FILTER_VALUE;
-    persistActiveUserFilter(activeUserFilter);
-  }
-
-  userFilterSelect.style.display = "";
-  userFilterSelect.innerHTML = "";
-
-  const adminOption = document.createElement("option");
-  adminOption.value = ADMIN_USER_FILTER_VALUE;
-  adminOption.textContent = `Admin (${getSessionCountForUser(ADMIN_USER_FILTER_VALUE)})`;
-  userFilterSelect.appendChild(adminOption);
-
-  const customUsers = availableUsers.slice().sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" }));
-  for (const user of customUsers) {
-    const option = document.createElement("option");
-    option.value = user.id;
-    option.textContent = `${user.name || "User"} (${getSessionCountForUser(user.id)})`;
-    userFilterSelect.appendChild(option);
-  }
-
-  const allOption = document.createElement("option");
-  allOption.value = USER_FILTER_ALL_VALUE;
-  allOption.textContent = `All Users (${getSessionCountForUser(USER_FILTER_ALL_VALUE)})`;
-  userFilterSelect.appendChild(allOption);
-
-  userFilterSelect.value = normalizeUserFilter(activeUserFilter);
-  syncSidebarFiltersVisibility();
-}
-
-if (sourceFilterSelect) {
-  sourceFilterSelect.addEventListener("change", () => {
-    activeSourceFilter = normalizeSourceFilter(sourceFilterSelect.value);
-    persistActiveSourceFilter(activeSourceFilter);
-    renderSourceFilterOptions();
-    renderUserFilterOptions();
-    renderSessionAppFilterOptions();
-    renderSessionList();
-  });
-}
-
-if (sessionAppFilterSelect) {
-  sessionAppFilterSelect.addEventListener("change", () => {
-    activeSessionAppFilter = normalizeSessionAppFilter(sessionAppFilterSelect.value);
-    persistActiveSessionAppFilter(activeSessionAppFilter);
-    renderSourceFilterOptions();
-    renderSessionAppFilterOptions();
-    renderUserFilterOptions();
-    renderSessionList();
-  });
-}
-
-if (userFilterSelect) {
-  userFilterSelect.addEventListener("change", () => {
-    activeUserFilter = normalizeUserFilter(userFilterSelect.value);
-    persistActiveUserFilter(activeUserFilter);
-    renderSourceFilterOptions();
-    renderSessionAppFilterOptions();
-    renderUserFilterOptions();
-    renderSessionList();
-  });
-}
-
-refreshAppCatalog();
-
-function getSessionSortTime(session) {
-  const stamp = session?.updatedAt || session?.created || "";
-  const time = new Date(stamp).getTime();
-  return Number.isFinite(time) ? time : 0;
-}
-
-function getSessionPinSortRank(session) {
-  return session?.pinned === true ? 1 : 0;
-}
-
-function sortSessionsInPlace() {
-  sessions.sort((a, b) => (
-    getSessionPinSortRank(b) - getSessionPinSortRank(a)
-    || getSessionSortTime(b) - getSessionSortTime(a)
-  ));
-}
-
-function getArchivedSessionSortTime(session) {
-  const stamp = session?.archivedAt || session?.updatedAt || session?.created || "";
-  const time = new Date(stamp).getTime();
-  return Number.isFinite(time) ? time : 0;
-}
-
-function getActiveSessions() {
-  return sessions.filter((session) => !session.archived);
-}
-
-function getArchivedSessions() {
-  return sessions
-    .filter((session) => session.archived)
-    .slice()
-    .sort((a, b) => getArchivedSessionSortTime(b) - getArchivedSessionSortTime(a));
-}
-
-function getLatestSession() {
-  return sessions[0] || null;
-}
-
-function getLatestActiveSession() {
-  return sessions.find((session) => !session.archived) || null;
-}
-
-function getLatestSessionForCurrentFilters() {
-  return sessions.find((session) => matchesCurrentFilters(session)) || null;
-}
-
-function getLatestActiveSessionForCurrentFilters() {
-  return sessions.find(
-    (session) => !session.archived && matchesCurrentFilters(session),
-  ) || null;
-}
-
-function resolveRestoreTargetSession() {
-  if (pendingNavigationState?.sessionId) {
-    const requested = sessions.find(
-      (session) => session.id === pendingNavigationState.sessionId,
-    );
-    if (requested) return requested;
-  }
-  if (currentSessionId) {
-    const current = sessions.find((session) => session.id === currentSessionId);
-    if (current && matchesCurrentFilters(current)) return current;
-  }
-  return getLatestActiveSessionForCurrentFilters()
-    || getLatestSessionForCurrentFilters()
-    || getLatestActiveSession()
-    || getLatestSession();
-}
-
-function applyNavigationState(rawState) {
-  const next = normalizeNavigationState(rawState);
-  if (next.tab) {
-    switchTab(next.tab, { syncState: false });
-  }
-  pendingNavigationState = next.sessionId ? next : null;
-  if (next.sessionId) {
-    const target = sessions.find((session) => session.id === next.sessionId);
-    if (target) {
-      attachSession(target.id, target);
-      pendingNavigationState = null;
+function writeStoredTimestampValue(key, value) {
+  try {
+    const normalized = normalizeStoredTimestamp(value);
+    if (normalized) {
+      localStorage.setItem(key, normalized);
     } else {
-      dispatchAction({ action: "list" });
+      localStorage.removeItem(key);
     }
-    syncBrowserState({
-      sessionId: next.sessionId,
-      tab: next.tab || activeTab,
-    });
-    return;
+  } catch {}
+}
+
+function getSessionReviewedAtTime(value) {
+  const time = new Date(value || "").getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function getSessionReviewBaselineAt() {
+  return sessionReviewBaselineAt || "";
+}
+
+function getLocalSessionReviewedAt(sessionId) {
+  if (!sessionId || !sessionReviewMarkers || typeof sessionReviewMarkers !== "object") return "";
+  const normalized = normalizeStoredTimestamp(sessionReviewMarkers[sessionId]);
+  if (normalized) return normalized;
+  if (Object.prototype.hasOwnProperty.call(sessionReviewMarkers, sessionId)) {
+    const next = { ...sessionReviewMarkers };
+    delete next[sessionId];
+    sessionReviewMarkers = next;
+    writeStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, sessionReviewMarkers);
   }
-  syncBrowserState({ tab: next.tab || activeTab });
+  return "";
+}
+
+function setLocalSessionReviewedAt(sessionId, stamp) {
+  if (!sessionId) return "";
+  const normalized = normalizeStoredTimestamp(stamp);
+  const current = getLocalSessionReviewedAt(sessionId);
+  if (normalized) {
+    if (getSessionReviewedAtTime(normalized) <= getSessionReviewedAtTime(current)) {
+      return current;
+    }
+    sessionReviewMarkers = {
+      ...sessionReviewMarkers,
+      [sessionId]: normalized,
+    };
+    writeStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, sessionReviewMarkers);
+  } else if (Object.prototype.hasOwnProperty.call(sessionReviewMarkers, sessionId)) {
+    const next = { ...sessionReviewMarkers };
+    delete next[sessionId];
+    sessionReviewMarkers = next;
+    writeStoredJsonValue(SESSION_REVIEW_MARKERS_STORAGE_KEY, sessionReviewMarkers);
+  }
+
+  const existing = sessions.find((session) => session.id === sessionId);
+  if (existing) {
+    if (normalized) {
+      existing.localReviewedAt = normalized;
+    } else {
+      delete existing.localReviewedAt;
+    }
+  }
+
+  return normalized || "";
 }

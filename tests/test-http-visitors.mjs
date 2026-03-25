@@ -6,6 +6,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
 import { spawn } from 'child_process';
+import WebSocket from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(__dirname);
@@ -146,22 +147,37 @@ try {
   const port = randomPort();
   const server = await startServer({ home, port });
   try {
+    const createAppResponse = await request(port, 'POST', '/api/apps', {
+      name: 'Video Cut Demo',
+      systemPrompt: 'Use the local video-cut workflow when asked.',
+      welcomeMessage: '请上传一段原始视频，并说明要保留什么。',
+      tool: 'fake-codex',
+      skills: [],
+    }, {
+      Cookie: ownerCookie,
+    });
+    assert.equal(createAppResponse.status, 201, 'owner should be able to create a regular shareable app');
+    const videoCutAppId = createAppResponse.json?.app?.id;
+    assert.ok(videoCutAppId, 'created app should return an id');
+
     const createVisitorResponse = await request(port, 'POST', '/api/visitors', {
       name: 'Judge iPhone',
-      appId: 'app_video_cut',
+      appId: videoCutAppId,
+      language: 'zh-CN',
     }, {
       Cookie: ownerCookie,
     });
     assert.equal(createVisitorResponse.status, 201, 'owner should be able to create a visitor preset');
     assert.match(createVisitorResponse.json?.visitor?.id || '', /^visitor_[a-f0-9]+$/);
     assert.match(createVisitorResponse.json?.visitor?.shareToken || '', /^visit_[a-f0-9]+$/);
+    assert.equal(createVisitorResponse.json?.visitor?.language, 'zh-CN');
 
     const visitorListResponse = await request(port, 'GET', '/api/visitors', null, {
       Cookie: ownerCookie,
     });
     assert.equal(visitorListResponse.status, 200, 'owner should be able to list visitors');
     assert.equal(
-      (visitorListResponse.json?.visitors || []).some((visitor) => visitor.name === 'Judge iPhone' && visitor.appId === 'app_video_cut'),
+      (visitorListResponse.json?.visitors || []).some((visitor) => visitor.name === 'Judge iPhone' && visitor.appId === videoCutAppId),
       true,
       'new visitor should appear in the visitor list with the assigned app',
     );
@@ -177,17 +193,67 @@ try {
     });
     assert.equal(visitorAuth.status, 200, 'visitor auth should work after opening a visitor link');
     assert.equal(visitorAuth.json?.role, 'visitor');
-    assert.equal(visitorAuth.json?.appId, 'app_video_cut');
+    assert.equal(visitorAuth.json?.appId, videoCutAppId);
     assert.equal(visitorAuth.json?.visitorId, createVisitorResponse.json.visitor.id);
+    assert.equal(visitorAuth.json?.preferredLanguage, 'zh-CN');
 
-    const ownerAllUsers = await request(port, 'GET', '/api/sessions?includeVisitor=1&appId=app_video_cut', null, {
+    const mixedCookie = `${ownerCookie}; ${visitorCookie}`;
+    const mixedOwnerAuth = await request(port, 'GET', '/api/auth/me', null, {
+      Cookie: mixedCookie,
+    });
+    assert.equal(mixedOwnerAuth.status, 200, 'default mixed-cookie auth should preserve the owner session');
+    assert.equal(mixedOwnerAuth.json?.role, 'owner');
+
+    const mixedVisitorAuth = await request(port, 'GET', '/api/auth/me?visitor=1', null, {
+      Cookie: mixedCookie,
+    });
+    assert.equal(mixedVisitorAuth.status, 200, 'visitor-mode auth should prefer the visitor session when both cookies exist');
+    assert.equal(mixedVisitorAuth.json?.role, 'visitor');
+    assert.equal(mixedVisitorAuth.json?.visitorId, createVisitorResponse.json.visitor.id);
+
+    const mixedVisitorApps = await request(port, 'GET', '/api/apps?visitor=1', null, {
+      Cookie: mixedCookie,
+    });
+    assert.equal(mixedVisitorApps.status, 403, 'visitor-mode requests with mixed cookies should not inherit owner-only access');
+
+    const wsMessages = [];
+    const visitorSocket = await new Promise((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?visitor=1`, {
+        headers: { Cookie: mixedCookie },
+      });
+      socket.on('open', () => resolve(socket));
+      socket.on('error', reject);
+      socket.on('message', (data) => {
+        try {
+          wsMessages.push(JSON.parse(data.toString()));
+        } catch {}
+      });
+    });
+
+    const ownerSessionCreate = await request(port, 'POST', '/api/sessions', {
+      folder: repoRoot,
+      tool: 'fake-codex',
+      name: 'Owner-only broadcast check',
+    }, {
+      Cookie: ownerCookie,
+    });
+    assert.equal(ownerSessionCreate.status, 201, 'owner should still be able to create a normal session');
+    await sleep(250);
+    visitorSocket.close();
+    assert.equal(
+      wsMessages.some((message) => message.type === 'sessions_invalidated'),
+      false,
+      'visitor-mode websocket with mixed cookies should not subscribe as an owner client',
+    );
+
+    const ownerAllUsers = await request(port, 'GET', `/api/sessions?includeVisitor=1&appId=${videoCutAppId}`, null, {
       Cookie: ownerCookie,
     });
     assert.equal(ownerAllUsers.status, 200, 'owner should be able to list visitor sessions');
     const visitorSession = (ownerAllUsers.json?.sessions || []).find((session) => session.visitorId === createVisitorResponse.json.visitor.id);
     assert.ok(visitorSession, 'visitor session should appear in owner all-users view');
     assert.equal(visitorSession.visitorName, 'Judge iPhone', 'visitor session should preserve the visitor name for owner UI');
-    assert.equal(visitorSession.appId, 'app_video_cut', 'visitor session should stay inside the assigned app scope');
+    assert.equal(visitorSession.appId, videoCutAppId, 'visitor session should stay inside the assigned app scope');
 
     const deleteVisitorResponse = await request(port, 'DELETE', `/api/visitors/${createVisitorResponse.json.visitor.id}`, null, {
       Cookie: ownerCookie,

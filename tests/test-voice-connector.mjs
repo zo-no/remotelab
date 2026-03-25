@@ -41,9 +41,39 @@ assert.equal(loadedConfig.connectorId, 'living-room-speaker')
 assert.equal(loadedConfig.roomName, 'Living Room')
 assert.equal(loadedConfig.sessionTool, 'codex')
 assert.equal(loadedConfig.wake.mode, 'stdin')
-assert.match(loadedConfig.systemPrompt, /spoken aloud/i)
-assert.match(loadedConfig.systemPrompt, /conversational/i)
-assert.match(DEFAULT_SESSION_SYSTEM_PROMPT, /Match the user's language/i)
+assert.equal(loadedConfig.systemPrompt, '')
+assert.match(DEFAULT_SESSION_SYSTEM_PROMPT, /Keep connector-specific overrides minimal/i)
+
+await writeFile(tempConfigPath, `${JSON.stringify({
+  connectorId: 'living-room-speaker',
+  roomName: 'Living Room',
+  chatBaseUrl: 'http://127.0.0.1:7690',
+  sessionFolder: repoRoot,
+  systemPrompt: '',
+  wake: {
+    mode: 'stdin',
+    keyword: 'Hey Rowan',
+  },
+  tts: {
+    enabled: false,
+  },
+}, null, 2)}\n`, 'utf8')
+const explicitEmptyPromptConfig = await loadConfig(tempConfigPath)
+assert.equal(explicitEmptyPromptConfig.systemPrompt, '')
+
+await writeFile(tempConfigPath, `${JSON.stringify({
+  connectorId: 'living-room-speaker',
+  roomName: 'Living Room',
+  chatBaseUrl: 'http://127.0.0.1:7690',
+  sessionFolder: repoRoot,
+  wake: {
+    mode: 'stdin',
+    keyword: 'Hey Rowan',
+  },
+  tts: {
+    enabled: false,
+  },
+}, null, 2)}\n`, 'utf8')
 
 const jsonIngress = normalizeIngressEvent('{"eventId":"wake_1","wakeWord":"Hey Rowan","transcript":"今天天气怎么样？"}', {
   connectorId: 'desk-speaker',
@@ -64,6 +94,7 @@ assert.equal(plainIngress.connectorId, 'desk-speaker')
 assert.ok(plainIngress.eventId.startsWith('voice-'))
 
 assert.equal(buildExternalTriggerId({ connectorId: 'Living Room Speaker' }), 'voice:living-room-speaker')
+assert.equal(buildExternalTriggerId({ connectorId: 'Living Room Speaker', eventId: 'wake_1' }, { sessionMode: 'per-wake' }), 'voice:living-room-speaker:wake_1')
 
 const renderedPrompt = buildRemoteLabMessage({
   connectorId: 'living-room-speaker',
@@ -74,10 +105,7 @@ const renderedPrompt = buildRemoteLabMessage({
   transcript: 'Give me a quick status update.',
   metadata: { microphone: 'usb' },
 })
-assert.match(renderedPrompt, /Inbound voice interaction from a local hardware connector\./)
-assert.match(renderedPrompt, /Connector ID: living-room-speaker/)
-assert.match(renderedPrompt, /Transcript:\nGive me a quick status update\./)
-assert.match(renderedPrompt, /speak aloud through the speaker/i)
+assert.equal(renderedPrompt, 'Give me a quick status update.')
 
 assert.equal(normalizeSpokenReplyText('  <private>hidden</private>  Spoken reply.  '), 'Spoken reply.')
 
@@ -165,13 +193,16 @@ try {
 
   assert.equal(createPayload?.appId, 'voice')
   assert.equal(createPayload?.appName, 'Voice')
+  assert.equal(createPayload?.sourceId, 'voice')
+  assert.equal(createPayload?.sourceName, 'Voice')
+  assert.equal(createPayload?.systemPrompt, '')
   assert.equal(createPayload?.group, 'Voice')
   assert.equal(createPayload?.externalTriggerId, 'voice:living-room-speaker')
   assert.match(createPayload?.description || '', /Wake-word voice connector/i)
 
   assert.match(submitPayload?.requestId || '', /^voice:living-room-speaker:wake_1$/)
   assert.equal(submitPayload?.tool, 'codex')
-  assert.match(submitPayload?.text || '', /Transcript:\n你好，介绍一下你自己。/)
+  assert.equal(submitPayload?.text || '', '你好，介绍一下你自己。')
 
   assert.equal(reply.sessionId, 'sess_voice_1')
   assert.equal(reply.runId, 'run_voice_1')
@@ -183,5 +214,5 @@ try {
 
 console.log('ok - voice connector config defaults load correctly')
 console.log('ok - voice ingress normalization handles JSON and plain text')
-console.log('ok - voice prompts stay speech-first')
+console.log('ok - voice messages stay transcript-first')
 console.log('ok - RemoteLab roundtrip uses the voice app scope')

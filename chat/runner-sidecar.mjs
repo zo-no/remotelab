@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import { createToolInvocation, prependAttachmentPaths, resolveCommand, resolveCwd } from './process-runner.mjs';
+import { materializeFileAssetAttachments } from './file-assets.mjs';
 import {
   buildCodexContextMetricsPayload,
   readLatestCodexSessionMetrics,
 } from './codex-session-metrics.mjs';
+import { CHAT_PORT } from '../lib/config.mjs';
 import {
   appendRunSpoolRecord,
   getRun,
@@ -13,19 +17,32 @@ import {
   updateRun,
   writeRunResult,
 } from './runs.mjs';
-import { fullPath } from '../lib/tools.mjs';
+import { buildToolProcessEnv } from '../lib/user-shell-env.mjs';
+import { applyManagedRuntimeEnv } from './runtime-policy.mjs';
 
 const runId = process.argv[2];
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = join(__dirname, '..');
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function cleanEnv() {
-  const env = { ...process.env, PATH: fullPath };
+async function cleanEnv(toolId, manifest = {}, options = {}) {
+  const env = buildToolProcessEnv();
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
-  return env;
+  env.REMOTELAB_CHAT_BASE_URL = process.env.REMOTELAB_CHAT_BASE_URL || `http://127.0.0.1:${CHAT_PORT}`;
+  env.REMOTELAB_PROJECT_ROOT = process.env.REMOTELAB_PROJECT_ROOT || PROJECT_ROOT;
+  if (typeof manifest?.sessionId === 'string' && manifest.sessionId.trim()) {
+    env.REMOTELAB_SESSION_ID = manifest.sessionId.trim();
+  }
+  if (runId) {
+    env.REMOTELAB_RUN_ID = runId;
+  }
+  return applyManagedRuntimeEnv(toolId, env, {
+    runtimeFamily: typeof options.runtimeFamily === 'string' ? options.runtimeFamily : '',
+  });
 }
 
 function captureResume(run, parsed) {
@@ -83,8 +100,31 @@ async function main() {
     process.exit(1);
   }
 
-  const prompt = prependAttachmentPaths(manifest.prompt || '', manifest.options?.images || []);
-  const { command, args } = await createToolInvocation(manifest.tool, prompt, {
+  await updateRun(runId, (current) => ({
+    ...current,
+    state: 'running',
+    startedAt: current.startedAt || nowIso(),
+    runnerProcessId: process.pid,
+  }));
+
+  const materializedImages = await materializeFileAssetAttachments(manifest.options?.images || []);
+  if (materializedImages.some((attachment) => typeof attachment?.assetId === 'string' && typeof attachment?.savedPath === 'string')) {
+    await appendRunSpoolRecord(runId, {
+      ts: nowIso(),
+      stream: 'stdout',
+      line: JSON.stringify({
+        type: 'status',
+        content: 'Localized external file attachments for this run.',
+      }),
+      json: {
+        type: 'status',
+        content: 'Localized external file attachments for this run.',
+      },
+    });
+  }
+
+  const prompt = prependAttachmentPaths(manifest.prompt || '', materializedImages);
+  const { command, args, runtimeFamily } = await createToolInvocation(manifest.tool, prompt, {
     dangerouslySkipPermissions: true,
     claudeSessionId: manifest.options?.claudeSessionId,
     codexThreadId: manifest.options?.codexThreadId,
@@ -96,14 +136,11 @@ async function main() {
   const proc = spawn(await resolveCommand(command), args, {
     cwd: resolveCwd(manifest.folder),
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: cleanEnv(),
+    env: await cleanEnv(manifest.tool, manifest, { runtimeFamily }),
   });
 
   await updateRun(runId, (current) => ({
     ...current,
-    state: 'running',
-    startedAt: current.startedAt || nowIso(),
-    runnerProcessId: process.pid,
     toolProcessId: proc.pid,
   }));
 

@@ -234,6 +234,33 @@ This preserves a clean answer to three different questions:
 - what attempt just ran? → `Run`
 - what reusable workflow/policy framed it? → `App`
 
+### Session fork rule
+
+`Session fork` is a **new session creation operation**, not a special mode inside one session.
+
+Current shipped contract:
+
+- fork means **hard clone + hard isolation**
+- the child session copies the durable parent state that defines the conversation starting point
+- the child does **not** inherit live execution linkage such as `activeRunId`, `activeRun`, provider resume/thread ids, `externalTriggerId`, or `completionTargets`
+- future parent/child updates do not sync after creation
+
+Practical consequence:
+
+- same-session continuation may reuse provider-native resume state
+- true branching may not reuse that state, because sharing a provider-native thread would break branch isolation
+
+Current exactness boundary:
+
+- the shipped v1 cut is **head fork**: clone the current durable session state as it exists now
+- historical fork points that would require reconstructing an earlier pre-compaction live prompt state should be rejected rather than silently approximated
+
+So the mental model is:
+
+```text
+fork = create a fresh session from copied durable state, then continue independently
+```
+
 ---
 
 ## Derived Surfaces
@@ -241,13 +268,23 @@ This preserves a clean answer to three different questions:
 The following are important product surfaces, but they are not the core domain:
 
 - sidebar grouping
+- workflow lanes
+- workflow attention priority
 - progress summaries
+- task-like labels that do not have an independent lifecycle
 - “needs your decision” indicators
 - list filters
 - archive tabs
 - folder/cwd display labels
 
 They should be derived from canonical objects, not treated as new objects with independent authority.
+
+For the current workflow-organization baseline, also read `session-first-workflow-surfaces.md`.
+The short version is:
+
+- `Session` is the only durable work object today
+- `group`, `workflowState`, and `workflowPriority` are session metadata
+- list/progress-style organization is a projection over sessions, not a parallel task system
 
 Two practical consequences:
 

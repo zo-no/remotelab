@@ -36,6 +36,7 @@ Current examples:
 - `directional/provider-architecture.md`
 - `directional/ai-driven-interaction.md`
 - `directional/autonomous-execution.md`
+- `directional/single-source-transcript-architecture.md`
 
 ### `archive/`
 

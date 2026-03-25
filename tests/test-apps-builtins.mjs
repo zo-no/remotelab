@@ -8,6 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'url';
 const repoRoot = dirname(fileURLToPath(import.meta.url));
 const tempHome = mkdtempSync(join(tmpdir(), 'remotelab-apps-builtins-'));
 process.env.HOME = tempHome;
+process.env.CHAT_PORT = '7692';
+process.env.REMOTELAB_CONFIG_DIR = join(tempHome, 'instance-config');
 
 const appsModule = await import(pathToFileURL(join(repoRoot, 'chat', 'apps.mjs')).href);
 
@@ -16,7 +18,7 @@ const {
   CREATE_APP_APP_ID,
   DEFAULT_APP_ID,
   EMAIL_APP_ID,
-  VIDEO_CUT_APP_ID,
+  WELCOME_APP_ID,
   createApp,
   deleteApp,
   getApp,
@@ -30,19 +32,20 @@ try {
   const initial = await listApps();
   assert.deepEqual(
     initial.map((app) => app.id),
-    ['chat', 'email', 'app_basic_chat', 'app_create_app', 'app_video_cut'],
+    ['chat', 'email', 'app_welcome', 'app_basic_chat', 'app_create_app'],
     'built-in apps should include connector scopes plus shipped starter apps',
   );
   assert.equal(DEFAULT_APP_ID, 'chat');
   assert.equal(EMAIL_APP_ID, 'email');
+  assert.equal(WELCOME_APP_ID, 'app_welcome');
   assert.equal(BASIC_CHAT_APP_ID, 'app_basic_chat');
   assert.equal(CREATE_APP_APP_ID, 'app_create_app');
-  assert.equal(VIDEO_CUT_APP_ID, 'app_video_cut');
   assert.equal(isBuiltinAppId('Chat'), true);
   assert.equal(isBuiltinAppId('Email'), true);
+  assert.equal(isBuiltinAppId('app_welcome'), true);
   assert.equal(isBuiltinAppId('app_basic_chat'), true);
   assert.equal(isBuiltinAppId('app_create_app'), true);
-  assert.equal(isBuiltinAppId('app_video_cut'), true);
+  assert.equal(isBuiltinAppId('app_video_cut'), false);
   assert.equal(isBuiltinAppId('github'), false);
   assert.equal(isBuiltinAppId('custom-app'), false);
 
@@ -58,6 +61,20 @@ try {
   assert.equal(emailApp?.builtin, true);
   assert.equal(emailApp?.templateSelectable, false);
   assert.equal(emailApp?.showInSidebarWhenEmpty, false);
+
+  const welcomeApp = await getApp(WELCOME_APP_ID);
+  assert.equal(welcomeApp?.id, WELCOME_APP_ID);
+  assert.equal(welcomeApp?.builtin, true);
+  assert.equal(welcomeApp?.templateSelectable, true);
+  assert.equal(welcomeApp?.shareEnabled, false);
+  assert.equal(welcomeApp?.shareToken, undefined);
+  assert.match(welcomeApp?.systemPrompt || '', /raw materials|files, screenshots|PowerPoints/i);
+  assert.match(welcomeApp?.systemPrompt || '', /project mechanics|project structure|folders, notes/i);
+  assert.match(welcomeApp?.systemPrompt || '', /durable knowledge|repeat themselves/i);
+  assert.match(welcomeApp?.systemPrompt || '', /task_card|hidden <private>|mode, summary, goal/i);
+  assert.match(welcomeApp?.systemPrompt || '', /needsFromUser|rawMaterials|knownConclusions/i);
+  assert.match(welcomeApp?.welcomeMessage || '', /原始材料|Excel|PPT|项目方式/u);
+  assert.match(welcomeApp?.welcomeMessage || '', /记下关键背景|偏好|下一步/u);
 
   const basicChatApp = await getApp(BASIC_CHAT_APP_ID);
   assert.equal(basicChatApp?.id, BASIC_CHAT_APP_ID);
@@ -75,23 +92,17 @@ try {
   assert.equal(createAppStarter?.shareToken, undefined);
   assert.match(createAppStarter?.systemPrompt || '', /POST \/api\/apps|PATCH \/api\/apps/i);
   assert.match(createAppStarter?.systemPrompt || '', /share link|\/app\/\{shareToken\}|other people/i);
+  assert.match(createAppStarter?.systemPrompt || '', /http:\/\/127\.0\.0\.1:7692/);
+  assert.match(
+    createAppStarter?.systemPrompt || '',
+    new RegExp(`${join(tempHome, 'instance-config', 'auth.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+  );
   assert.match(createAppStarter?.welcomeMessage || '', /SOP|工作流|RemoteLab App/i);
   assert.match(createAppStarter?.welcomeMessage || '', /SOP|工作流/i);
   assert.match(createAppStarter?.welcomeMessage || '', /分享给别人的链接|分享方式|share/i);
 
-  const videoCutApp = await getApp(VIDEO_CUT_APP_ID);
-  assert.equal(videoCutApp?.id, VIDEO_CUT_APP_ID);
-  assert.equal(videoCutApp?.builtin, true);
-  assert.equal(videoCutApp?.templateSelectable, true);
-  assert.equal(videoCutApp?.tool, 'codex');
-  assert.equal(videoCutApp?.shareEnabled, true);
-  assert.match(videoCutApp?.systemPrompt || '', /Video Cut Review|video-cut workflow|~\/code\/video-cut/i);
-  assert.match(videoCutApp?.systemPrompt || '', /kept-content review|Never skip the kept-content review gate/i);
-  assert.match(videoCutApp?.welcomeMessage || '', /上传一段原始视频|uploaded source video/i);
-  assert.match(videoCutApp?.welcomeMessage || '', /Video Cut Review|video-cut 工作流/i);
-  assert.equal((await getAppByShareToken(videoCutApp?.shareToken))?.id, VIDEO_CUT_APP_ID);
-
   assert.equal(await getApp('feishu'), null);
+  assert.equal(await getApp('app_video_cut'), null, 'Video Cut should no longer ship as a built-in app');
 
   const custom = await createApp({
     name: 'Docs Portal',
@@ -108,7 +119,7 @@ try {
     welcomeMessage: '',
     skills: [],
   });
-  assert.equal(defaultToolApp.tool, 'codex', 'new apps should default to CodeX/codex');
+  assert.equal(defaultToolApp.tool, 'codex', 'new apps should default to CodeX');
 
   const afterCreate = await listApps();
   assert.equal(afterCreate.some((app) => app.id === custom.id), true);

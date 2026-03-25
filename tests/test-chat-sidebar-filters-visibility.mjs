@@ -7,7 +7,7 @@ import vm from 'vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(__dirname);
-const bootstrapSource = readFileSync(join(repoRoot, 'static', 'chat', 'bootstrap.js'), 'utf8');
+const bootstrapSource = readFileSync(join(repoRoot, 'static', 'chat', 'bootstrap.js'), 'utf8') + '\n' + readFileSync(join(repoRoot, 'static', 'chat', 'bootstrap-session-catalog.js'), 'utf8');
 
 function extractFunctionSource(source, functionName) {
   const marker = `function ${functionName}`;
@@ -43,10 +43,21 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Unable to extract ${functionName}`);
 }
 
+const isSidebarFilterControlVisibleSource = extractFunctionSource(
+  bootstrapSource,
+  'isSidebarFilterControlVisible',
+);
 const syncSidebarFiltersVisibilitySource = extractFunctionSource(
   bootstrapSource,
   'syncSidebarFiltersVisibility',
 );
+
+function createFilterControl(display = '') {
+  return {
+    hidden: false,
+    style: { display },
+  };
+}
 
 function createHarness({ activeTab = 'sessions', visitorMode = false } = {}) {
   const state = { toggles: [] };
@@ -54,6 +65,9 @@ function createHarness({ activeTab = 'sessions', visitorMode = false } = {}) {
     console,
     activeTab,
     visitorMode,
+    sourceFilterSelect: createFilterControl(''),
+    sessionAppFilterSelect: createFilterControl(''),
+    userFilterSelect: createFilterControl(''),
     sidebarFilters: {
       classList: {
         toggle(className, force) {
@@ -64,9 +78,9 @@ function createHarness({ activeTab = 'sessions', visitorMode = false } = {}) {
   };
   context.globalThis = context;
   vm.runInNewContext(
-    `${syncSidebarFiltersVisibilitySource}\nglobalThis.syncSidebarFiltersVisibility = syncSidebarFiltersVisibility;`,
+    `${isSidebarFilterControlVisibleSource}\n${syncSidebarFiltersVisibilitySource}\nglobalThis.syncSidebarFiltersVisibility = syncSidebarFiltersVisibility;`,
     context,
-    { filename: 'static/chat/bootstrap.js' },
+    { filename: 'static/chat/bootstrap-session-catalog.js' },
   );
   return { context, state };
 }
@@ -93,6 +107,17 @@ assert.deepEqual(
   visitorHarness.state.toggles,
   [{ className: 'hidden', force: true }],
   'visitor mode should always hide owner-only sidebar filters',
+);
+
+const emptyControlsHarness = createHarness({ activeTab: 'sessions' });
+emptyControlsHarness.context.sourceFilterSelect.style.display = 'none';
+emptyControlsHarness.context.sessionAppFilterSelect.style.display = 'none';
+emptyControlsHarness.context.userFilterSelect.style.display = 'none';
+emptyControlsHarness.context.syncSidebarFiltersVisibility();
+assert.deepEqual(
+  emptyControlsHarness.state.toggles,
+  [{ className: 'hidden', force: true }],
+  'sessions tab should hide the sidebar filters container when every individual filter control is hidden',
 );
 
 console.log('test-chat-sidebar-filters-visibility: ok');

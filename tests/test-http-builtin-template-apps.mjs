@@ -158,6 +158,38 @@ try {
   const port = randomPort();
   const server = await startServer({ home, port });
   try {
+    const welcomeSession = await request(port, 'POST', '/api/sessions', {
+      folder: repoRoot,
+      tool: 'fake-codex',
+      appId: 'app_welcome',
+      sourceId: 'chat',
+      sourceName: 'Chat',
+    }, {
+      Cookie: ownerCookie,
+    });
+    assert.equal(welcomeSession.status, 201, 'owner should be able to create a session from the built-in Welcome template');
+    assert.equal(welcomeSession.json?.session?.appId, 'app_welcome');
+    assert.equal(welcomeSession.json?.session?.appName, 'Welcome');
+    assert.match(
+      welcomeSession.json?.session?.systemPrompt || '',
+      /raw materials|project mechanics|durable knowledge/i,
+      'Welcome sessions should include task-intake and memory guidance',
+    );
+
+    const welcomeEvents = await request(port, 'GET', `/api/sessions/${welcomeSession.json.session.id}/events`, null, {
+      Cookie: ownerCookie,
+    });
+    assert.equal(welcomeEvents.status, 200, 'built-in Welcome session events should load');
+    const welcomeStarterEvent = (welcomeEvents.json.events || []).find((event) => event.type === 'message' && event.role === 'assistant');
+    assert.ok(welcomeStarterEvent, 'built-in Welcome session should get a starter welcome message');
+    const welcomeStarterContent = await resolveEventContent(
+      port,
+      welcomeSession.json.session.id,
+      welcomeStarterEvent,
+      { Cookie: ownerCookie },
+    );
+    assert.match(welcomeStarterContent, /原始材料|Excel|PPT|重复操作/u);
+
     const createAppSession = await request(port, 'POST', '/api/sessions', {
       folder: repoRoot,
       tool: 'fake-codex',
@@ -185,60 +217,78 @@ try {
     );
     assert.match(welcomeContent, /SOP \/ 工作流|创建什么 App|app specification/i);
 
+    const videoCutAppCreate = await request(port, 'POST', '/api/apps', {
+      name: 'Video Cut Review',
+      systemPrompt: 'Use the local video-cut workflow under ~/code/video-cut and do a kept-content review before render.',
+      welcomeMessage: '请上传一段原始视频，并说明你要保留什么。',
+      tool: 'fake-codex',
+      skills: [],
+    }, {
+      Cookie: ownerCookie,
+    });
+    assert.equal(videoCutAppCreate.status, 201, 'owner should be able to create a regular Video Cut app');
+    const videoCutAppId = videoCutAppCreate.json?.app?.id;
+    const videoCutShareToken = videoCutAppCreate.json?.app?.shareToken;
+    assert.ok(videoCutAppId, 'custom Video Cut app should return an id');
+    assert.ok(videoCutShareToken, 'custom Video Cut app should return a share token');
+
     const videoCutOwnerSession = await request(port, 'POST', '/api/sessions', {
       folder: repoRoot,
       tool: 'fake-codex',
-      appId: 'app_video_cut',
+      appId: videoCutAppId,
       sourceId: 'chat',
       sourceName: 'Chat',
     }, {
       Cookie: ownerCookie,
     });
-    assert.equal(videoCutOwnerSession.status, 201, 'owner should be able to create a session from the built-in Video Cut template');
-    assert.equal(videoCutOwnerSession.json?.session?.appId, 'app_video_cut');
+    assert.equal(videoCutOwnerSession.status, 201, 'owner should be able to create a session from a regular Video Cut app');
+    assert.equal(videoCutOwnerSession.json?.session?.appId, videoCutAppId);
     assert.match(
       videoCutOwnerSession.json?.session?.systemPrompt || '',
       /Video Cut Review|video-cut workflow|~\/code\/video-cut/i,
-      'built-in Video Cut sessions should include explicit local workflow guidance',
+      'custom Video Cut sessions should include explicit local workflow guidance',
     );
 
     const appsResponse = await request(port, 'GET', '/api/apps', null, {
       Cookie: ownerCookie,
     });
     assert.equal(appsResponse.status, 200, 'owner should be able to load the apps catalog');
+    const welcomeApp = (appsResponse.json?.apps || []).find((app) => app.id === 'app_welcome');
+    assert.equal(welcomeApp?.shareEnabled, false, 'Welcome should stay internal-only');
+    assert.equal(typeof welcomeApp?.shareToken, 'undefined', 'Welcome should not expose a public share token');
     const basicChatApp = (appsResponse.json?.apps || []).find((app) => app.id === 'app_basic_chat');
     assert.equal(basicChatApp?.shareEnabled, false, 'Basic Chat should stay internal-only');
     assert.equal(typeof basicChatApp?.shareToken, 'undefined', 'Basic Chat should not expose a public share token');
     const createAppStarter = (appsResponse.json?.apps || []).find((app) => app.id === 'app_create_app');
     assert.equal(createAppStarter?.shareEnabled, false, 'Create App should stay internal-only');
     assert.equal(typeof createAppStarter?.shareToken, 'undefined', 'Create App should not expose a public share token');
-    const videoCutApp = (appsResponse.json?.apps || []).find((app) => app.id === 'app_video_cut');
-    assert.ok(videoCutApp?.shareToken, 'built-in Video Cut app should expose a share token');
+    const videoCutApp = (appsResponse.json?.apps || []).find((app) => app.id === videoCutAppId);
+    assert.equal(videoCutApp?.shareToken, videoCutShareToken, 'custom Video Cut app should expose a share token');
 
-    const publicVisit = await request(port, 'GET', `/app/${videoCutApp.shareToken}`);
-    assert.equal(publicVisit.status, 302, 'built-in Video Cut app share link should bootstrap a visitor session');
+    const publicVisit = await request(port, 'GET', `/app/${videoCutShareToken}`);
+    assert.equal(publicVisit.status, 302, 'custom Video Cut app share link should bootstrap a visitor session');
     assert.equal(publicVisit.headers.location, '/?visitor=1');
-    assert.ok(publicVisit.headers['set-cookie']?.length, 'built-in Video Cut app visit should set a visitor cookie');
+    assert.ok(publicVisit.headers['set-cookie']?.length, 'custom Video Cut app visit should set a visitor cookie');
 
-    const visitorCookie = findCookie(publicVisit.headers, 'session_token').split(';', 1)[0];
+    const visitorCookie = findCookie(publicVisit.headers, 'visitor_session_token').split(';', 1)[0];
     const visitorBrowserCookie = findCookie(publicVisit.headers, 'visitor_browser_id').split(';', 1)[0];
-    assert.ok(visitorCookie, 'built-in Video Cut app visit should set a visitor auth session cookie');
-    assert.ok(visitorBrowserCookie, 'built-in Video Cut app visit should set a stable browser identity cookie');
+    assert.ok(visitorCookie, 'custom Video Cut app visit should set a visitor auth session cookie');
+    assert.ok(visitorBrowserCookie, 'custom Video Cut app visit should set a stable browser identity cookie');
 
     const visitorAuth = await request(port, 'GET', '/api/auth/me', null, {
       Cookie: visitorCookie,
     });
-    assert.equal(visitorAuth.status, 200, 'visitor auth session should be usable after built-in app bootstrap');
+    assert.equal(visitorAuth.status, 200, 'visitor auth session should be usable after custom app bootstrap');
     assert.equal(visitorAuth.json?.role, 'visitor');
-    assert.equal(visitorAuth.json?.appId, 'app_video_cut');
+    assert.equal(visitorAuth.json?.appId, videoCutAppId);
     const firstVisitorId = visitorAuth.json?.visitorId;
     const firstVisitorSessionId = visitorAuth.json?.sessionId;
 
-    const repeatVisit = await request(port, 'GET', `/app/${videoCutApp.shareToken}`, null, {
+    const repeatVisit = await request(port, 'GET', `/app/${videoCutShareToken}`, null, {
       Cookie: visitorBrowserCookie,
     });
     assert.equal(repeatVisit.status, 302, 'reopening the same app link in the same browser should still redirect into visitor mode');
-    const repeatVisitorCookie = findCookie(repeatVisit.headers, 'session_token').split(';', 1)[0];
+    const repeatVisitorCookie = findCookie(repeatVisit.headers, 'visitor_session_token').split(';', 1)[0];
     const repeatVisitorAuth = await request(port, 'GET', '/api/auth/me', null, {
       Cookie: repeatVisitorCookie,
     });
@@ -246,9 +296,9 @@ try {
     assert.equal(repeatVisitorAuth.json?.visitorId, firstVisitorId, 'the same browser should keep the same visitor identity for one app link');
     assert.equal(repeatVisitorAuth.json?.sessionId, firstVisitorSessionId, 'the same browser should reuse the existing visitor session for one app link');
 
-    const secondBrowserVisit = await request(port, 'GET', `/app/${videoCutApp.shareToken}`);
+    const secondBrowserVisit = await request(port, 'GET', `/app/${videoCutShareToken}`);
     assert.equal(secondBrowserVisit.status, 302, 'opening the same app link from another browser should still bootstrap visitor mode');
-    const secondBrowserVisitorCookie = findCookie(secondBrowserVisit.headers, 'session_token').split(';', 1)[0];
+    const secondBrowserVisitorCookie = findCookie(secondBrowserVisit.headers, 'visitor_session_token').split(';', 1)[0];
     const secondBrowserAuth = await request(port, 'GET', '/api/auth/me', null, {
       Cookie: secondBrowserVisitorCookie,
     });
@@ -256,11 +306,11 @@ try {
     assert.notEqual(secondBrowserAuth.json?.visitorId, firstVisitorId, 'different browsers should map to different visitor identities for one app link');
     assert.notEqual(secondBrowserAuth.json?.sessionId, firstVisitorSessionId, 'different browsers should get different visitor sessions for one app link');
 
-    const ownerAllUsers = await request(port, 'GET', '/api/sessions?includeVisitor=1&appId=app_video_cut', null, {
+    const ownerAllUsers = await request(port, 'GET', `/api/sessions?includeVisitor=1&appId=${videoCutAppId}`, null, {
       Cookie: ownerCookie,
     });
-    assert.equal(ownerAllUsers.status, 200, 'owner should be able to list built-in Video Cut visitor sessions');
-    const visitorSessions = (ownerAllUsers.json?.sessions || []).filter((session) => session.visitorId && session.appId === 'app_video_cut');
+    assert.equal(ownerAllUsers.status, 200, 'owner should be able to list custom Video Cut visitor sessions');
+    const visitorSessions = (ownerAllUsers.json?.sessions || []).filter((session) => session.visitorId && session.appId === videoCutAppId);
     assert.equal(visitorSessions.length, 2, 'reopening the same app link in one browser should not create extra visitor sessions');
     assert.equal(
       visitorSessions.filter((session) => session.visitorId === firstVisitorId).length,

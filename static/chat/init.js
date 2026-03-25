@@ -7,7 +7,7 @@ function applyVisitorMode() {
   document.body.classList.add("visitor-mode");
   // Hide sidebar toggle, new session button, and management UI
   if (menuBtn) menuBtn.style.display = "none";
-  if (newAppBtn) newAppBtn.style.display = "none";
+  if (sortSessionListBtn) sortSessionListBtn.style.display = "none";
   if (newSessionBtn) newSessionBtn.style.display = "none";
   // Hide tool/model selectors and context management (visitors use defaults)
   if (inlineToolSelect) inlineToolSelect.style.display = "none";
@@ -24,6 +24,14 @@ function applyVisitorMode() {
   }
   syncForkButton();
   syncShareButton();
+}
+
+function applyShareSnapshotMode(snapshot) {
+  shareSnapshotMode = true;
+  shareSnapshotPayload = snapshot;
+  applyVisitorMode();
+  document.body.classList.add("share-snapshot-mode");
+  if (statusText) statusText.textContent = "read-only snapshot";
 }
 
 // ---- Init ----
@@ -45,6 +53,19 @@ async function resolveInitialAuthInfo() {
 }
 
 async function initApp() {
+  const shareSnapshot =
+    typeof getBootstrapShareSnapshot === "function"
+      ? getBootstrapShareSnapshot()
+      : null;
+  if (shareSnapshot) {
+    applyShareSnapshotMode(shareSnapshot);
+    syncAddToolModal();
+    syncForkButton();
+    syncShareButton();
+    await bootstrapShareSnapshotView();
+    return;
+  }
+
   const authInfo = await resolveInitialAuthInfo();
   if (authInfo?.role === "visitor" && authInfo.sessionId) {
     visitorSessionId = authInfo.sessionId;

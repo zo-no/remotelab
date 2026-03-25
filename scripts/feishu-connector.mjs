@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { appendFile, mkdir, readFile, rename, writeFile } from 'fs/promises';
+import { readFileSync, rmSync } from 'fs';
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'fs/promises';
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { setTimeout as delay } from 'timers/promises';
@@ -8,14 +9,20 @@ import { pathToFileURL } from 'url';
 import * as Lark from '@larksuiteoapi/node-sdk';
 
 import { AUTH_FILE, CHAT_PORT } from '../lib/config.mjs';
+import {
+  normalizeExternalRuntimeSelectionMode,
+  resolveExternalRuntimeSelection,
+} from '../lib/external-runtime-selection.mjs';
 import { selectAssistantReplyEvent, stripHiddenBlocks } from '../lib/reply-selection.mjs';
+import { loadUiRuntimeSelection } from '../lib/runtime-selection.mjs';
 
 const DEFAULT_CONFIG_PATH = join(homedir(), '.config', 'remotelab', 'feishu-connector', 'config.json');
 const DEFAULT_ALLOWED_SENDERS_FILENAME = 'allowed-senders.json';
 const DEFAULT_ACCESS_STATE_FILENAME = 'access-state.json';
 const DEFAULT_CHAT_BASE_URL = `http://127.0.0.1:${CHAT_PORT}`;
 const DEFAULT_SESSION_TOOL = 'codex';
-const DEFAULT_SESSION_SYSTEM_PROMPT = [
+const DEFAULT_RUNTIME_SELECTION_MODE = 'ui';
+const LEGACY_DEFAULT_SESSION_SYSTEM_PROMPT = [
   'You are replying as a Feishu bot powered by RemoteLab on the user\'s own machine.',
   'For each assistant turn, output exactly the plain-text message to send back to Feishu.',
   'Keep replies concise, helpful, and natural.',
@@ -26,9 +33,18 @@ const DEFAULT_SESSION_SYSTEM_PROMPT = [
   'If you are unsure whether to reply, choose silence and output an empty string. An empty string means no Feishu message should be sent.',
   'Do not mention hidden connector, session, or run internals unless the user explicitly asks.',
 ].join('\n');
+const DEFAULT_SESSION_SYSTEM_PROMPT = [
+  'You are interacting through a Feishu or Lark bot on the user\'s own machine.',
+  'Keep connector-specific overrides minimal and only describe constraints not already owned by RemoteLab backend prompt logic.',
+].join('\n');
 const RUN_POLL_INTERVAL_MS = 1500;
 const RUN_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_FEISHU_TEXT_LENGTH = 5000;
+const MAX_INBOUND_LOG_PREVIEW_LENGTH = 240;
+const DEFAULT_PROCESSING_REACTION_EMOJI_TYPE = 'THINKING';
+const CONNECTOR_PID_FILENAME = 'connector.pid';
+const FEISHU_EMOJI_ALIAS_PATTERN = /\[(?:[\u3400-\u9FFF]{1,4})\]/gu;
+const UNICODE_EMOJI_PATTERN = /(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0E|\uFE0F)?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0E|\uFE0F)?)*)/gu;
 const REMOTELAB_SESSION_APP_ID = 'feishu';
 const APPROVE_CURRENT_CHAT_COMMANDS = new Set([
   '授权本群',
@@ -109,11 +125,18 @@ Config shape:
     "loggerLevel": "info",
     "chatBaseUrl": "${DEFAULT_CHAT_BASE_URL}",
     "sessionFolder": "${homedir()}",
+    "runtimeSelectionMode": "${DEFAULT_RUNTIME_SELECTION_MODE}",
     "sessionTool": "${DEFAULT_SESSION_TOOL}",
     "model": "",
     "effort": "",
     "thinking": false,
     "systemPrompt": "${DEFAULT_SESSION_SYSTEM_PROMPT.replace(/"/g, '\\"')}",
+    "processingReaction": {
+      "enabled": false,
+      "emojiType": "${DEFAULT_PROCESSING_REACTION_EMOJI_TYPE}",
+      "removeOnCompletion": false
+    },
+    "silentConfirmationText": "",
     "intakePolicy": {
       "mode": "allow_all",
       "accessStatePath": "~/.config/remotelab/feishu-connector/${DEFAULT_ACCESS_STATE_FILENAME}",
@@ -319,9 +342,46 @@ function normalizeBoolean(value, fallback = false) {
   return fallback;
 }
 
+function normalizeReactionEmojiType(value, fallback = DEFAULT_PROCESSING_REACTION_EMOJI_TYPE) {
+  const normalized = trimString(value).replace(/[^A-Za-z0-9_]/g, '').toUpperCase();
+  return normalized || fallback;
+}
+
+function normalizeProcessingReactionConfig(value) {
+  if (value === true) {
+    return {
+      enabled: true,
+      emojiType: DEFAULT_PROCESSING_REACTION_EMOJI_TYPE,
+      removeOnCompletion: false,
+    };
+  }
+  if (value === false) {
+    return {
+      enabled: false,
+      emojiType: DEFAULT_PROCESSING_REACTION_EMOJI_TYPE,
+      removeOnCompletion: false,
+    };
+  }
+  if (typeof value === 'string') {
+    return {
+      enabled: true,
+      emojiType: normalizeReactionEmojiType(value),
+      removeOnCompletion: false,
+    };
+  }
+  return {
+    enabled: normalizeBoolean(value?.enabled, false),
+    emojiType: normalizeReactionEmojiType(value?.emojiType),
+    removeOnCompletion: normalizeBoolean(value?.removeOnCompletion, false),
+  };
+}
+
 function normalizeSystemPrompt(value) {
   const normalized = trimString(value);
-  return normalized || DEFAULT_SESSION_SYSTEM_PROMPT;
+  if (!normalized || normalized === DEFAULT_SESSION_SYSTEM_PROMPT || normalized === LEGACY_DEFAULT_SESSION_SYSTEM_PROMPT) {
+    return '';
+  }
+  return normalized;
 }
 
 async function loadConfig(pathname) {
@@ -347,12 +407,79 @@ async function loadConfig(pathname) {
     storeRawEvents: parsed?.storeRawEvents === true,
     chatBaseUrl: normalizeBaseUrl(parsed?.chatBaseUrl || DEFAULT_CHAT_BASE_URL),
     sessionFolder: trimString(parsed?.sessionFolder) || homedir(),
+    runtimeSelectionMode: normalizeExternalRuntimeSelectionMode(parsed?.runtimeSelectionMode, DEFAULT_RUNTIME_SELECTION_MODE),
     sessionTool: trimString(parsed?.sessionTool) || DEFAULT_SESSION_TOOL,
     model: trimString(parsed?.model),
     effort: trimString(parsed?.effort),
     thinking: normalizeBoolean(parsed?.thinking, false),
     systemPrompt: normalizeSystemPrompt(parsed?.systemPrompt),
+    processingReaction: normalizeProcessingReactionConfig(parsed?.processingReaction),
+    silentConfirmationText: normalizeReplyText(parsed?.silentConfirmationText),
   };
+}
+
+function parsePid(value) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function claimConnectorPidLock(storageDir, processId = process.pid) {
+  const pidPath = join(storageDir, CONNECTOR_PID_FILENAME);
+  const pidValue = `${processId}\n`;
+  await mkdir(storageDir, { recursive: true });
+  try {
+    await writeFile(pidPath, pidValue, { flag: 'wx' });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') {
+      throw error;
+    }
+    const existingPid = parsePid(await readFile(pidPath, 'utf8').catch(() => ''));
+    if (existingPid && existingPid !== processId && isProcessAlive(existingPid)) {
+      throw new Error(`Feishu connector already running (pid ${existingPid})`);
+    }
+    await rm(pidPath, { force: true });
+    await writeFile(pidPath, pidValue, { flag: 'wx' });
+  }
+  return { pidPath, processId };
+}
+
+function releaseConnectorPidLock(lock) {
+  const pidPath = trimString(lock?.pidPath);
+  if (!pidPath) {
+    return;
+  }
+  const processId = parsePid(lock?.processId);
+  if (!processId) {
+    return;
+  }
+  const currentPid = parsePid((() => {
+    try {
+      return readFileSync(pidPath, 'utf8');
+    } catch {
+      return '';
+    }
+  })());
+  if (currentPid !== processId) {
+    return;
+  }
+  try {
+    rmSync(pidPath, { force: true });
+  } catch {}
 }
 
 function parseTextPreview(rawContent) {
@@ -367,12 +494,150 @@ function parseTextPreview(rawContent) {
   return '';
 }
 
+function parseMessageContent(rawContent) {
+  const content = trimString(rawContent);
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object') {
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+function truncateLogPreview(value, maxLength = MAX_INBOUND_LOG_PREVIEW_LENGTH) {
+  const normalized = trimString(value).replace(/\s+/g, ' ');
+  if (!normalized) return '';
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function collectStructuredText(value, fragments, seen, depth = 0) {
+  if (depth > 5 || fragments.length >= 8 || value === null || value === undefined) {
+    return;
+  }
+  if (typeof value === 'string') {
+    const normalized = trimString(value);
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      fragments.push(normalized);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStructuredText(item, fragments, seen, depth + 1);
+      if (fragments.length >= 8) return;
+    }
+    return;
+  }
+  if (typeof value !== 'object') return;
+  for (const key of ['title', 'text', 'name', 'label', 'content']) {
+    if (!(key in value)) continue;
+    collectStructuredText(value[key], fragments, seen, depth + 1);
+    if (fragments.length >= 8) return;
+  }
+}
+
+function extractStructuredTextPreview(value) {
+  const fragments = [];
+  collectStructuredText(value, fragments, new Set());
+  return truncateLogPreview(fragments.join(' '));
+}
+
+function contentKeyPreview(parsedContent) {
+  if (!parsedContent || Array.isArray(parsedContent) || typeof parsedContent !== 'object') {
+    return [];
+  }
+  return Object.keys(parsedContent).filter(Boolean).slice(0, 6);
+}
+
+function summarizeMessageContent(messageType, rawContent) {
+  const normalizedType = trimString(messageType).toLowerCase();
+  const parsedContent = parseMessageContent(rawContent);
+  let textPreview = '';
+
+  if (normalizedType === 'text') {
+    textPreview = parseTextPreview(rawContent) || trimString(rawContent);
+  } else if (normalizedType === 'post') {
+    textPreview = extractStructuredTextPreview(parsedContent);
+  } else if (normalizedType === 'file') {
+    textPreview = trimString(parsedContent?.file_name || parsedContent?.name);
+  } else if (normalizedType === 'share_chat') {
+    textPreview = trimString(parsedContent?.chat_name || parsedContent?.name || parsedContent?.chat_id);
+  } else if (normalizedType === 'share_user') {
+    textPreview = trimString(parsedContent?.user_name || parsedContent?.name || parsedContent?.user_id);
+  } else if (normalizedType === 'location') {
+    textPreview = trimString(parsedContent?.name || parsedContent?.title || parsedContent?.address);
+  } else if (normalizedType === 'interactive') {
+    textPreview = extractStructuredTextPreview(parsedContent);
+  }
+
+  const contentSummary = (() => {
+    switch (normalizedType) {
+      case 'text':
+        return textPreview ? `Text message: ${truncateLogPreview(textPreview)}` : 'Text message';
+      case 'image':
+        return 'Image attachment';
+      case 'file':
+        return textPreview ? `File attachment: ${truncateLogPreview(textPreview)}` : 'File attachment';
+      case 'audio':
+        return 'Audio attachment';
+      case 'media':
+        return 'Media attachment';
+      case 'sticker':
+        return 'Sticker message';
+      case 'post':
+        return textPreview ? `Rich text post: ${truncateLogPreview(textPreview)}` : 'Rich text post';
+      case 'share_chat':
+        return textPreview ? `Shared chat: ${truncateLogPreview(textPreview)}` : 'Shared chat';
+      case 'share_user':
+        return textPreview ? `Shared contact: ${truncateLogPreview(textPreview)}` : 'Shared contact';
+      case 'location':
+        return textPreview ? `Location message: ${truncateLogPreview(textPreview)}` : 'Location message';
+      case 'interactive':
+        return textPreview ? `Interactive card: ${truncateLogPreview(textPreview)}` : 'Interactive card';
+      default: {
+        const typeLabel = normalizedType || 'unknown';
+        const keys = contentKeyPreview(parsedContent);
+        return keys.length
+          ? `Unsupported message (${typeLabel}; keys=${keys.join(',')})`
+          : `Unsupported message (${typeLabel})`;
+      }
+    }
+  })();
+
+  return {
+    textPreview,
+    contentSummary,
+    contentKeys: contentKeyPreview(parsedContent),
+  };
+}
+
+function summarizeEventForLog(summary) {
+  return {
+    eventId: summary?.eventId || '',
+    eventType: summary?.eventType || '',
+    chatId: summary?.chatId || '',
+    chatType: summary?.chatType || '',
+    messageId: summary?.messageId || '',
+    messageType: summary?.messageType || '',
+    threadId: summary?.threadId || '',
+    senderOpenId: summary?.sender?.openId || '',
+    mentionCount: Array.isArray(summary?.mentions) ? summary.mentions.length : 0,
+    textPreview: truncateLogPreview(summary?.textPreview),
+    contentSummary: truncateLogPreview(summary?.contentSummary),
+  };
+}
+
 function summarizeEvent(data) {
   const sender = data?.sender || {};
   const senderId = sender?.sender_id || {};
   const message = data?.message || {};
   const mentions = Array.isArray(message.mentions) ? message.mentions : [];
   const rawContent = typeof message.content === 'string' ? message.content : '';
+  const normalizedContent = summarizeMessageContent(message.message_type || '', rawContent);
   return {
     eventId: data?.event_id || '',
     eventType: data?.event_type || '',
@@ -401,12 +666,17 @@ function summarizeEvent(data) {
       unionId: mention?.id?.union_id || '',
       tenantKey: mention?.tenant_key || '',
     })),
-    textPreview: parseTextPreview(rawContent),
+    textPreview: normalizedContent.textPreview,
+    contentSummary: normalizedContent.contentSummary,
+    contentKeys: normalizedContent.contentKeys,
     rawContent,
   };
 }
 
 function summarizeLegacyMessageEvent(data) {
+  const messageType = data?.msg_type || data?.message_type || '';
+  const rawContent = typeof data?.text === 'string' ? data.text : '';
+  const normalizedContent = summarizeMessageContent(messageType, rawContent);
   return {
     eventId: data?.uuid || data?.event_id || '',
     eventType: 'message',
@@ -426,10 +696,12 @@ function summarizeLegacyMessageEvent(data) {
     rootId: '',
     parentId: '',
     threadId: '',
-    messageType: data?.msg_type || data?.message_type || '',
+    messageType,
     mentions: [],
-    textPreview: typeof data?.text_without_at_bot === 'string' ? data.text_without_at_bot : '',
-    rawContent: typeof data?.text === 'string' ? data.text : '',
+    textPreview: typeof data?.text_without_at_bot === 'string' ? data.text_without_at_bot : normalizedContent.textPreview,
+    contentSummary: normalizedContent.contentSummary,
+    contentKeys: normalizedContent.contentKeys,
+    rawContent,
   };
 }
 
@@ -663,7 +935,7 @@ function senderIdentity(summary) {
     lastSeenMessageId: summary?.messageId || '',
     lastSeenChatId: summary?.chatId || '',
     lastSeenChatType: summary?.chatType || '',
-    lastTextPreview: summary?.textPreview || '',
+    lastTextPreview: summary?.textPreview || summary?.contentSummary || '',
     mentionKeys: Array.isArray(summary?.mentions) ? summary.mentions.map((mention) => mention.key).filter(Boolean) : [],
   };
 }
@@ -720,7 +992,7 @@ async function recordConnectorEvent(runtime, sourceLabel, summary, raw, allowed)
     raw: runtime.config.storeRawEvents ? raw : undefined,
   };
   await appendJsonl(runtime.storagePaths.eventsLogPath, record);
-  console.log(`[feishu-connector] inbound event ${sourceLabel} (${allowed ? 'allowed' : 'blocked'})`, JSON.stringify(summary));
+  console.log(`[feishu-connector] inbound event ${sourceLabel} (${allowed ? 'allowed' : 'blocked'})`, JSON.stringify(summarizeEventForLog(summary)));
   return allowed;
 }
 
@@ -759,17 +1031,12 @@ function buildReplyUuid(summary) {
 }
 
 function buildSessionName(summary) {
-  const chatType = trimString(summary.chatType) || 'chat';
-  if (chatType === 'p2p') return 'Feishu DM';
-  return `Feishu ${chatType}`;
+  return trimString(summary.chatName);
 }
 
 function buildSessionDescription(summary) {
-  const parts = ['Inbound Feishu conversation'];
-  if (summary.chatType) parts.push(`type=${summary.chatType}`);
-  if (summary.chatId) parts.push(`chat=${summary.chatId}`);
-  if (summary.sender?.openId) parts.push(`sender=${summary.sender.openId}`);
-  return parts.join(' | ');
+  const chatType = trimString(summary?.chatType);
+  return chatType ? `Inbound Feishu ${chatType} chat` : 'Inbound Feishu chat';
 }
 
 function mentionDisplayName(mention) {
@@ -790,50 +1057,55 @@ function renderMentionPreview(text, mentions) {
   return rendered;
 }
 
-function buildMentionPrompt(summary, rawMessage) {
-  const mentions = Array.isArray(summary?.mentions) ? summary.mentions : [];
-  if (!mentions.length) return [];
-  return [
-    '',
-    'Original mention-token message:',
-    rawMessage || '[non-text or empty message]',
-    '',
-    'Mention map:',
-    ...mentions.map((mention) => {
-      const details = [
-        `${trimString(mention?.key) || '(unknown token)'} => @${mentionDisplayName(mention)}`,
-        trimString(mention?.openId) ? `open_id=${trimString(mention.openId)}` : '',
-        trimString(mention?.userId) ? `user_id=${trimString(mention.userId)}` : '',
-        trimString(mention?.unionId) ? `union_id=${trimString(mention.unionId)}` : '',
-      ].filter(Boolean);
-      return `- ${details.join(' | ')}`;
-    }),
-    '',
-    'If you want to mention someone in your reply, include their exact mention token (for example @_user_1). The connector will convert it into a real Feishu @ mention.',
-  ];
-}
-
 function buildRemoteLabMessage(summary) {
   const rawMessage = trimString(summary.textPreview);
   const renderedMessage = renderMentionPreview(rawMessage, summary.mentions);
-  const hasMentions = Array.isArray(summary?.mentions) && summary.mentions.length > 0;
-  return [
-    'Inbound Feishu message.',
-    `Chat type: ${summary.chatType || 'unknown'}`,
-    summary.chatId ? `Chat ID: ${summary.chatId}` : '',
-    summary.messageId ? `Message ID: ${summary.messageId}` : '',
-    summary.threadId ? `Thread ID: ${summary.threadId}` : '',
-    summary.sender?.openId ? `Sender open_id: ${summary.sender.openId}` : '',
-    summary.sender?.userId ? `Sender user_id: ${summary.sender.userId}` : '',
-    summary.sender?.unionId ? `Sender union_id: ${summary.sender.unionId}` : '',
-    summary.tenantKey ? `Tenant key: ${summary.tenantKey}` : '',
-    '',
-    hasMentions ? 'User message (rendered mentions):' : 'User message:',
-    (hasMentions ? renderedMessage : rawMessage) || '[non-text or empty message]',
-    ...buildMentionPrompt(summary, rawMessage),
-    '',
-    'Write the exact plain-text Feishu reply to send back. If you should stay silent, output an empty string.',
-  ].filter(Boolean).join('\n');
+  const displayMessage = renderedMessage || rawMessage || trimString(summary.contentSummary) || '[non-text or empty message]';
+  const senderName = trimString(summary?.sender?.name || summary?.sender?.displayName);
+  const senderPrefix = summary?.chatType === 'group' && senderName ? `${senderName}: ` : '';
+  return `${senderPrefix}${displayMessage}`;
+}
+
+function buildSessionSourceContext(summary) {
+  const context = {
+    connector: 'feishu',
+    chatType: trimString(summary?.chatType),
+    chatId: trimString(summary?.chatId),
+  };
+  const chatName = trimString(summary?.chatName);
+  if (chatName) context.chatName = chatName;
+  return context;
+}
+
+function buildMessageSourceContext(summary) {
+  const context = {
+    connector: 'feishu',
+    messageId: trimString(summary?.messageId),
+    chatType: trimString(summary?.chatType),
+  };
+  const senderName = trimString(summary?.sender?.name || summary?.sender?.displayName);
+  if (senderName) {
+    context.sender = { name: senderName };
+  }
+  const mentions = (Array.isArray(summary?.mentions) ? summary.mentions : [])
+    .map((mention) => {
+      const name = mentionDisplayName(mention);
+      const token = trimString(mention?.key);
+      if (!name && !token) return null;
+      return {
+        ...(name ? { name } : {}),
+        ...(token ? { token } : {}),
+      };
+    })
+    .filter(Boolean);
+  if (mentions.length > 0) {
+    context.mentions = mentions;
+  }
+  const contentSummary = trimString(summary?.contentSummary);
+  if (contentSummary) {
+    context.contentSummary = contentSummary;
+  }
+  return context;
 }
 
 async function readOwnerToken() {
@@ -908,10 +1180,24 @@ async function loadAssistantReply(requester, sessionId, runId, requestId) {
 }
 
 function normalizeReplyText(text) {
-  const normalized = stripHiddenBlocks(String(text || '').replace(/\r\n/g, '\n')).trim();
+  const normalized = stripOutboundEmojiArtifacts(stripHiddenBlocks(String(text || '').replace(/\r\n/g, '\n'))).trim();
   if (!normalized) return '';
   if (normalized.length <= MAX_FEISHU_TEXT_LENGTH) return normalized;
   return `${normalized.slice(0, MAX_FEISHU_TEXT_LENGTH - 16).trimEnd()}\n\n[truncated]`;
+}
+
+function stripOutboundEmojiArtifacts(text) {
+  return String(text || '')
+    .replace(UNICODE_EMOJI_PATTERN, ' ')
+    .replace(FEISHU_EMOJI_ALIAS_PATTERN, ' ')
+    .replace(/[\u200D\uFE0E\uFE0F]/g, '')
+    .replace(/\s+([,.;:!?，。！？；：、])/g, '$1')
+    .replace(/([([{（【])\s+/g, '$1')
+    .replace(/\s+([)\]}）】])/g, '$1')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n');
 }
 
 function isMainModule() {
@@ -920,7 +1206,7 @@ function isMainModule() {
 }
 
 function buildFailureReply(summary, reason = '') {
-  const message = trimString(summary?.textPreview || summary?.rawContent);
+  const message = trimString(summary?.textPreview || summary?.contentSummary || summary?.rawContent);
   const prefersChinese = containsCjk(message) || containsCjk(reason);
   if (prefersChinese) {
     return '我收到了你的消息，但这次生成回复失败了。你可以稍后再发一次。';
@@ -1034,17 +1320,134 @@ async function requestRemoteLab(runtime, path, options = {}) {
   return result;
 }
 
-async function createOrReuseSession(runtime, summary) {
+async function loadRemoteLabSession(runtime, sessionId) {
+  const result = await requestRemoteLab(runtime, `/api/sessions/${sessionId}`);
+  if (!result.response.ok || !result.json?.session) {
+    throw new Error(result.json?.error || result.text || `Failed to load session ${sessionId}`);
+  }
+  return result.json.session;
+}
+
+function getRemoteLabSessionQueueCount(session) {
+  return Number.isInteger(session?.activity?.queue?.count) ? session.activity.queue.count : 0;
+}
+
+function isRemoteLabSessionBusy(session) {
+  return trimString(session?.activity?.run?.state).toLowerCase() === 'running'
+    || trimString(session?.activity?.compact?.state).toLowerCase() === 'pending'
+    || getRemoteLabSessionQueueCount(session) > 0;
+}
+
+async function waitForSessionReady(runtime, sessionId, initialSession = null) {
+  const deadline = Date.now() + RUN_POLL_TIMEOUT_MS;
+  let session = initialSession
+    && initialSession.id === sessionId
+    && initialSession.activity
+    ? initialSession
+    : null;
+  while (Date.now() < deadline) {
+    if (!session) {
+      session = await loadRemoteLabSession(runtime, sessionId);
+    }
+    if (!isRemoteLabSessionBusy(session)) {
+      return session;
+    }
+    await delay(RUN_POLL_INTERVAL_MS);
+    session = null;
+  }
+  throw new Error(`session ${sessionId} remained busy after ${RUN_POLL_TIMEOUT_MS}ms`);
+}
+
+async function loadRemoteLabEvents(runtime, sessionId) {
+  const result = await requestRemoteLab(runtime, `/api/sessions/${sessionId}/events?filter=all`);
+  if (!result.response.ok || !Array.isArray(result.json?.events)) {
+    throw new Error(result.json?.error || result.text || `Failed to load session events for ${sessionId}`);
+  }
+  return result.json.events;
+}
+
+function sourceContextReferencesRequest(sourceContext, requestId, messageId) {
+  if (!sourceContext || typeof sourceContext !== 'object' || Array.isArray(sourceContext)) {
+    return false;
+  }
+
+  const normalizedRequestId = trimString(requestId);
+  const normalizedMessageId = trimString(messageId);
+  if (normalizedRequestId && trimString(sourceContext.requestId) === normalizedRequestId) {
+    return true;
+  }
+  if (normalizedMessageId && trimString(sourceContext.messageId) === normalizedMessageId) {
+    return true;
+  }
+
+  if (!Array.isArray(sourceContext.queuedMessages)) {
+    return false;
+  }
+
+  return sourceContext.queuedMessages.some((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    if (normalizedRequestId && trimString(entry.requestId) === normalizedRequestId) {
+      return true;
+    }
+    return sourceContextReferencesRequest(entry.sourceContext, normalizedRequestId, normalizedMessageId);
+  });
+}
+
+function findQueuedRequestRunId(events, { requestId, messageId, sinceSeq = 0 } = {}) {
+  const normalizedRequestId = trimString(requestId);
+  const normalizedMessageId = trimString(messageId);
+
+  for (const event of Array.isArray(events) ? events : []) {
+    if (!event || event.type !== 'message' || event.role !== 'user') {
+      continue;
+    }
+    if (Number.isInteger(sinceSeq) && Number.isInteger(event.seq) && event.seq <= sinceSeq) {
+      continue;
+    }
+
+    const runId = trimString(event.runId);
+    if (!runId) {
+      continue;
+    }
+    if (normalizedRequestId && trimString(event.requestId) === normalizedRequestId) {
+      return runId;
+    }
+    if (sourceContextReferencesRequest(event.sourceContext, normalizedRequestId, normalizedMessageId)) {
+      return runId;
+    }
+  }
+
+  return '';
+}
+
+async function waitForQueuedRequestRun(runtime, sessionId, match = {}) {
+  const deadline = Date.now() + RUN_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const events = await loadRemoteLabEvents(runtime, sessionId);
+    const runId = findQueuedRequestRunId(events, match);
+    if (runId) {
+      return runId;
+    }
+    await delay(RUN_POLL_INTERVAL_MS);
+  }
+  throw new Error(`queued request timed out after ${RUN_POLL_TIMEOUT_MS}ms`);
+}
+
+async function createOrReuseSession(runtime, summary, runtimeSelection) {
+  const sourceName = runtime.config.region === 'lark-global' ? 'Lark' : 'Feishu';
   const payload = {
     folder: runtime.config.sessionFolder,
-    tool: runtime.config.sessionTool,
+    tool: runtimeSelection.tool,
     name: buildSessionName(summary),
     appId: REMOTELAB_SESSION_APP_ID,
-    appName: runtime.config.region === 'lark-global' ? 'Lark' : 'Feishu',
+    appName: sourceName,
+    sourceId: 'feishu',
+    sourceName,
     group: 'Feishu',
     description: buildSessionDescription(summary),
     systemPrompt: runtime.config.systemPrompt,
     externalTriggerId: buildExternalTriggerId(summary),
+    sourceContext: buildSessionSourceContext(summary),
   };
   const result = await requestRemoteLab(runtime, '/api/sessions', {
     method: 'POST',
@@ -1056,28 +1459,33 @@ async function createOrReuseSession(runtime, summary) {
   return result.json.session;
 }
 
-async function submitRemoteLabMessage(runtime, sessionId, summary) {
+async function submitRemoteLabMessage(runtime, sessionId, summary, runtimeSelection) {
   const payload = {
     requestId: buildRequestId(summary),
     text: buildRemoteLabMessage(summary),
-    tool: runtime.config.sessionTool,
-    thinking: runtime.config.thinking === true,
+    tool: runtimeSelection.tool,
+    sourceContext: buildMessageSourceContext(summary),
   };
-  if (runtime.config.model) payload.model = runtime.config.model;
-  if (runtime.config.effort) payload.effort = runtime.config.effort;
+  if (runtimeSelection.thinking) payload.thinking = true;
+  if (runtimeSelection.model) payload.model = runtimeSelection.model;
+  if (runtimeSelection.effort) payload.effort = runtimeSelection.effort;
 
   const result = await requestRemoteLab(runtime, `/api/sessions/${sessionId}/messages`, {
     method: 'POST',
     body: payload,
   });
-  if (![200, 202].includes(result.response.status) || !result.json?.run?.id) {
+  const queued = result.json?.queued === true;
+  const duplicate = result.json?.duplicate === true;
+  const runId = trimString(result.json?.run?.id);
+  if (![200, 202].includes(result.response.status) || (!runId && !queued && !duplicate)) {
     throw new Error(result.json?.error || result.text || `Failed to submit session message (${result.response.status})`);
   }
 
   return {
     requestId: payload.requestId,
-    runId: result.json.run.id,
-    duplicate: result.json?.duplicate === true,
+    runId: runId || null,
+    duplicate,
+    queued,
   };
 }
 
@@ -1100,22 +1508,60 @@ async function waitForRunCompletion(runtime, runId) {
   throw new Error(`run timed out after ${RUN_POLL_TIMEOUT_MS}ms`);
 }
 
+async function resolveFeishuRuntimeSelection(runtime) {
+  const uiSelection = await loadUiRuntimeSelection();
+  return resolveExternalRuntimeSelection({
+    uiSelection,
+    mode: runtime?.config?.runtimeSelectionMode || DEFAULT_RUNTIME_SELECTION_MODE,
+    fallback: {
+      tool: runtime?.config?.sessionTool || DEFAULT_SESSION_TOOL,
+      model: runtime?.config?.model || '',
+      effort: runtime?.config?.effort || '',
+      thinking: runtime?.config?.thinking === true,
+    },
+    defaultTool: DEFAULT_SESSION_TOOL,
+  });
+}
+
 async function generateRemoteLabReply(runtime, summary) {
-  const session = await createOrReuseSession(runtime, summary);
-  const submission = await submitRemoteLabMessage(runtime, session.id, summary);
-  await waitForRunCompletion(runtime, submission.runId);
+  const runtimeSelection = await resolveFeishuRuntimeSelection(runtime);
+  const session = await createOrReuseSession(runtime, summary, runtimeSelection);
+  const readySession = await waitForSessionReady(runtime, session.id, session);
+  const baselineSeq = Number.isInteger(readySession?.latestSeq) ? readySession.latestSeq : 0;
+  const submission = await submitRemoteLabMessage(runtime, session.id, summary, runtimeSelection);
+  let runId = submission.runId;
+  if (!runId && submission.queued) {
+    runId = await waitForQueuedRequestRun(runtime, session.id, {
+      requestId: submission.requestId,
+      messageId: summary.messageId,
+      sinceSeq: baselineSeq,
+    });
+  }
+  if (!runId && submission.duplicate) {
+    return {
+      sessionId: session.id,
+      runId: '',
+      requestId: submission.requestId,
+      duplicate: true,
+      queued: submission.queued,
+      replyText: '',
+      silent: true,
+    };
+  }
+  await waitForRunCompletion(runtime, runId);
   const replyEvent = await loadAssistantReply(
     (path) => requestRemoteLab(runtime, path),
     session.id,
-    submission.runId,
+    runId,
     submission.requestId,
   );
   const replyText = normalizeReplyText(replyEvent?.content);
   return {
     sessionId: session.id,
-    runId: submission.runId,
+    runId,
     requestId: submission.requestId,
     duplicate: submission.duplicate,
+    queued: submission.queued,
     replyText,
     silent: !replyText,
   };
@@ -1135,14 +1581,79 @@ function escapeFeishuMentionValue(value) {
 
 function compileFeishuReplyText(text, mentions) {
   let compiled = normalizeReplyText(text);
-  for (const mention of Array.isArray(mentions) ? mentions : []) {
-    const token = trimString(mention?.key);
-    const targetId = resolveMentionTargetId(mention);
-    if (!token || !targetId) continue;
+  const normalizedMentions = (Array.isArray(mentions) ? mentions : [])
+    .map((mention) => ({
+      mention,
+      token: trimString(mention?.key),
+      targetId: resolveMentionTargetId(mention),
+      displayName: mentionDisplayName(mention),
+    }))
+    .filter((entry) => entry.targetId && (entry.token || entry.displayName));
+  for (const { mention, token, targetId } of normalizedMentions.sort((left, right) => right.token.length - left.token.length)) {
+    if (!token) continue;
     const tag = `<at user_id="${escapeFeishuMentionValue(targetId)}">${escapeFeishuMentionValue(mentionDisplayName(mention))}</at>`;
     compiled = compiled.split(token).join(tag);
   }
+  for (const { mention, displayName, targetId } of normalizedMentions.sort((left, right) => right.displayName.length - left.displayName.length)) {
+    if (!displayName) continue;
+    const alias = `@${displayName}`;
+    const tag = `<at user_id="${escapeFeishuMentionValue(targetId)}">${escapeFeishuMentionValue(mentionDisplayName(mention))}</at>`;
+    compiled = compiled.split(alias).join(tag);
+  }
   return compiled;
+}
+
+function isProcessingReactionEnabled(runtime) {
+  return runtime?.config?.processingReaction?.enabled === true;
+}
+
+async function addProcessingReaction(runtime, summary) {
+  if (!isProcessingReactionEnabled(runtime)) {
+    return null;
+  }
+  const messageId = trimString(summary?.messageId);
+  if (!messageId) {
+    return null;
+  }
+  const emojiType = normalizeReactionEmojiType(runtime?.config?.processingReaction?.emojiType);
+  const response = await runtime.appClient.im.v1.messageReaction.create({
+    path: {
+      message_id: messageId,
+    },
+    data: {
+      reaction_type: {
+        emoji_type: emojiType,
+      },
+    },
+  });
+  if ((response.code !== undefined && response.code !== 0) || !response.data?.reaction_id) {
+    throw new Error(response.msg || 'Failed to add Feishu processing reaction');
+  }
+  return {
+    reactionId: response.data.reaction_id,
+    emojiType: response.data?.reaction_type?.emoji_type || emojiType,
+  };
+}
+
+async function removeProcessingReaction(runtime, summary, reaction) {
+  if (runtime?.config?.processingReaction?.removeOnCompletion === false) {
+    return false;
+  }
+  const messageId = trimString(summary?.messageId);
+  const reactionId = trimString(reaction?.reactionId);
+  if (!messageId || !reactionId) {
+    return false;
+  }
+  const response = await runtime.appClient.im.v1.messageReaction.delete({
+    path: {
+      message_id: messageId,
+      reaction_id: reactionId,
+    },
+  });
+  if (response.code !== undefined && response.code !== 0) {
+    throw new Error(response.msg || 'Failed to remove Feishu processing reaction');
+  }
+  return true;
 }
 
 async function sendFeishuText(runtime, summary, text) {
@@ -1340,6 +1851,8 @@ async function handleMessage(runtime, summary, sourceLabel, helpers = {}) {
   const markHandled = helpers.markMessageHandled || markMessageHandled;
   const generateReply = helpers.generateRemoteLabReply || generateRemoteLabReply;
   const sendText = helpers.sendFeishuText || sendFeishuText;
+  const addReaction = helpers.addProcessingReaction || addProcessingReaction;
+  const removeReaction = helpers.removeProcessingReaction || removeProcessingReaction;
 
   if (!isProcessableMessage(summary)) {
     return;
@@ -1352,18 +1865,20 @@ async function handleMessage(runtime, summary, sourceLabel, helpers = {}) {
   }
 
   runtime.processingMessageIds.add(summary.messageId);
+  let processingReaction = null;
   try {
     const messageType = trimString(summary.messageType).toLowerCase();
     if (messageType && messageType !== 'text') {
-      const replyText = buildFailureReply({ ...summary, textPreview: summary.textPreview || summary.rawContent }, 'unsupported_message_type');
-      const reply = await sendText(runtime, summary, replyText);
       await markHandled(runtime.storagePaths.handledMessagesPath, summary.messageId, {
-        status: 'unsupported_message_type',
+        status: 'silent_no_reply',
         sourceLabel,
         chatId: summary.chatId,
         requestId: buildRequestId(summary),
-        responseMessageId: reply.message_id || '',
+        reason: 'unsupported_message_type',
+        messageType,
+        contentSummary: summary.contentSummary || '',
       });
+      console.log(`[feishu-connector] no reply sent for ${summary.messageId} (unsupported message type: ${messageType})`);
       return;
     }
 
@@ -1383,9 +1898,36 @@ async function handleMessage(runtime, summary, sourceLabel, helpers = {}) {
       }
     }
 
+    try {
+      processingReaction = await addReaction(runtime, summary);
+    } catch (reactionError) {
+      console.warn(`[feishu-connector] failed to add processing reaction for ${summary.messageId}: ${reactionError?.message || reactionError}`);
+    }
+
     const generated = await generateReply(runtime, summary);
     const replyText = normalizeReplyText(generated.replyText);
     if (!replyText) {
+      const confirmationText = generated.duplicate === true
+        ? ''
+        : normalizeReplyText(runtime?.config?.silentConfirmationText);
+      if (confirmationText) {
+        const reply = await sendText(runtime, summary, confirmationText);
+        await markHandled(runtime.storagePaths.handledMessagesPath, summary.messageId, {
+          status: 'confirmation_sent',
+          sourceLabel,
+          chatId: summary.chatId,
+          sessionId: generated.sessionId,
+          runId: generated.runId,
+          requestId: generated.requestId,
+          duplicate: generated.duplicate,
+          reason: 'empty_assistant_reply',
+          confirmationText,
+          responseMessageId: reply.message_id || '',
+          repliedAt: nowIso(),
+        });
+        console.log(`[feishu-connector] sent confirmation for ${summary.messageId} with ${reply.message_id}`);
+        return;
+      }
       await markHandled(runtime.storagePaths.handledMessagesPath, summary.messageId, {
         status: 'silent_no_reply',
         sourceLabel,
@@ -1394,9 +1936,9 @@ async function handleMessage(runtime, summary, sourceLabel, helpers = {}) {
         runId: generated.runId,
         requestId: generated.requestId,
         duplicate: generated.duplicate,
-        reason: 'empty_assistant_reply',
+        reason: generated.duplicate === true ? 'duplicate_request' : 'empty_assistant_reply',
       });
-      console.log(`[feishu-connector] no reply sent for ${summary.messageId} (empty assistant reply)`);
+      console.log(`[feishu-connector] no reply sent for ${summary.messageId} (${generated.duplicate === true ? 'duplicate request' : 'empty assistant reply'})`);
       return;
     }
     const reply = await sendText(runtime, summary, replyText);
@@ -1429,6 +1971,13 @@ async function handleMessage(runtime, summary, sourceLabel, helpers = {}) {
       console.error(`[feishu-connector] fallback send failed for ${summary.messageId}:`, sendError?.stack || sendError);
     }
   } finally {
+    if (processingReaction) {
+      try {
+        await removeReaction(runtime, summary, processingReaction);
+      } catch (reactionError) {
+        console.warn(`[feishu-connector] failed to remove processing reaction for ${summary.messageId}: ${reactionError?.message || reactionError}`);
+      }
+    }
     runtime.processingMessageIds.delete(summary.messageId);
   }
 }
@@ -1438,11 +1987,14 @@ export {
   buildApprovedChatReply,
   buildChatAccessStatusReply,
   buildRemoteLabMessage,
+  buildSessionDescription,
+  claimConnectorPidLock,
   compileFeishuReplyText,
   createRuntimeContext,
   ensureAuthCookie,
   ensureAllowedSendersFile,
   extractLocalCommand,
+  addProcessingReaction,
   generateRemoteLabReply,
   grantSenderAccess,
   handleChatMemberUserAdded,
@@ -1451,16 +2003,24 @@ export {
   loadPersistedAccessState,
   loadConfig,
   normalizeAllowedSenders,
+  normalizeProcessingReactionConfig,
   normalizeReplyText,
   queueAccessStateFlush,
+  releaseConnectorPidLock,
+  removeProcessingReaction,
   snapshotAccessState,
   summarizeChatMemberUserAddedEvent,
+  summarizeEvent,
   upsertApprovedChat,
 };
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const config = await loadConfig(options.configPath);
+  const connectorPidLock = await claimConnectorPidLock(config.storageDir);
+  process.on('exit', () => {
+    releaseConnectorPidLock(connectorPidLock);
+  });
   const accessState = await loadPersistedAccessState(config.intakePolicy);
   const storagePaths = {
     eventsLogPath: join(config.storageDir, 'events.jsonl'),
@@ -1538,7 +2098,9 @@ async function main() {
   console.log(`[feishu-connector] handled messages: ${storagePaths.handledMessagesPath}`);
   console.log(`[feishu-connector] RemoteLab base URL: ${config.chatBaseUrl}`);
   console.log(`[feishu-connector] session folder: ${config.sessionFolder}`);
-  console.log(`[feishu-connector] session tool: ${config.sessionTool}`);
+  console.log(
+    `[feishu-connector] runtime selection: mode=${config.runtimeSelectionMode} fallbackTool=${config.sessionTool} fallbackModel=${config.model || '(default)'} fallbackEffort=${config.effort || '(default)'} fallbackThinking=${config.thinking ? 'on' : 'off'}`,
+  );
 
   if (options.replayLast) {
     const summary = await loadLatestReplayableSummary(storagePaths.eventsLogPath);

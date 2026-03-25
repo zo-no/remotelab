@@ -11,10 +11,26 @@ import {
   normalizeSessionWorkflowPriority,
   normalizeSessionWorkflowState,
 } from './session-workflow-state.mjs';
+import { normalizeSessionAgreements } from './session-agreements.mjs';
+import { normalizeSessionTaskCard } from './session-task-card.mjs';
 
 let sessionsMetaCache = null;
 let sessionsMetaCacheMtimeMs = null;
 const runSessionsMetaMutation = createSerialTaskQueue();
+
+function normalizeStoredTimestamp(value) {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return '';
+  const time = Date.parse(trimmed);
+  return Number.isFinite(time) ? new Date(time).toISOString() : '';
+}
+
+function normalizeStoredSidebarOrder(value) {
+  const parsed = typeof value === 'number'
+    ? value
+    : parseInt(String(value || '').trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+}
 
 function normalizeStoredSessionMeta(meta) {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
@@ -53,6 +69,58 @@ function normalizeStoredSessionMeta(meta) {
       }
     } else {
       delete normalized.workflowPriority;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'lastReviewedAt')) {
+    const nextLastReviewedAt = normalizeStoredTimestamp(normalized.lastReviewedAt);
+    if (nextLastReviewedAt) {
+      if (normalized.lastReviewedAt !== nextLastReviewedAt) {
+        normalized.lastReviewedAt = nextLastReviewedAt;
+        changed = true;
+      }
+    } else {
+      delete normalized.lastReviewedAt;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'sidebarOrder')) {
+    const nextSidebarOrder = normalizeStoredSidebarOrder(normalized.sidebarOrder);
+    if (nextSidebarOrder) {
+      if (normalized.sidebarOrder !== nextSidebarOrder) {
+        normalized.sidebarOrder = nextSidebarOrder;
+        changed = true;
+      }
+    } else {
+      delete normalized.sidebarOrder;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'activeAgreements')) {
+    const nextActiveAgreements = normalizeSessionAgreements(normalized.activeAgreements);
+    if (nextActiveAgreements.length > 0) {
+      if (JSON.stringify(normalized.activeAgreements) !== JSON.stringify(nextActiveAgreements)) {
+        normalized.activeAgreements = nextActiveAgreements;
+        changed = true;
+      }
+    } else {
+      delete normalized.activeAgreements;
+      changed = true;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'taskCard')) {
+    const nextTaskCard = normalizeSessionTaskCard(normalized.taskCard);
+    if (nextTaskCard) {
+      if (JSON.stringify(normalized.taskCard) !== JSON.stringify(nextTaskCard)) {
+        normalized.taskCard = nextTaskCard;
+        changed = true;
+      }
+    } else {
+      delete normalized.taskCard;
       changed = true;
     }
   }

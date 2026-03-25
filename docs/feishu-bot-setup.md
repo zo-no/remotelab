@@ -33,6 +33,7 @@ This rollout stays intentionally narrow at first:
 - same-tenant rollout first, not cross-tenant distribution
 - private chat first, group support later
 - persistent connection / long connection, not public webhook mode
+- V0 reply handling is text-first; non-text Feishu payloads such as images, files, and rich posts are logged and marked handled, but ignored without reply
 
 ## One-round input handoff
 
@@ -75,16 +76,34 @@ Prefer one Feishu-console visit that covers app creation, permissions, event sub
 - Start with same-tenant private chat; do not start with cross-tenant distribution.
 - If the console warns `No connection detected`, let the AI bring the connector online first, then return and save persistent connection mode again.
 - If outbound later fails with Feishu error `99991672`, enable the exact IM send permission named in the error message.
+- If you want the bot to add a quick “I’m looking” reaction before the real reply lands, also enable `发送、删除消息表情回复 (im:message.reactions:write_only)`.
 
 ## AI execution contract
 
 - ensure the RemoteLab chat server is running at `http://127.0.0.1:7690`
 - front-load all missing context and expected return payloads so the human can finish the console work in as few interruptions as possible
 - create `~/.config/remotelab/feishu-connector/config.json`
-- use `npm run feishu:connect:instance` to start the connector
+- use `npm run feishu:ops -- restart` to start or restart the connector without spawning a duplicate local instance when `launchd` is already managing it
 - use `npm run feishu:check -- --watch 15` and the connector logs to validate inbound and outbound behavior
 - keep the rollout inside this conversation; when a console fix is required, pause with a precise `[HUMAN]` instruction
 - if V0 succeeds, optionally suggest widening availability or switching from `allow_all` to `whitelist`
+
+## Fast operator commands
+
+Use the built-in ops wrapper when you need a short, repeatable troubleshooting loop instead of ad-hoc shell steps.
+
+```bash
+npm run feishu:ops -- status
+npm run feishu:ops -- restart
+npm run feishu:ops -- backfill --count 2 --tool micro-agent --model gpt-5.4 --effort low
+```
+
+Notes:
+
+- `status` shows the active runtime, whether the connector process is up, the latest inbound event, and recent text messages that were recorded as `silent_no_reply`
+- `restart` prefers the installed `launchd` agent when present and otherwise falls back to the local instance script
+- `backfill` creates a fresh reply session and drafts a catch-up reply for recent silent text messages; add `--dry-run` to inspect the target and prompt without sending
+- if `backfill` fails with `Bot/User can NOT be out of the chat`, the bot is no longer in that chat, so the draft exists but Feishu will refuse delivery until the bot is added back
 
 ## Config contract
 
@@ -96,6 +115,12 @@ Prefer one Feishu-console visit that covers app creation, permissions, event sub
   "loggerLevel": "info",
   "chatBaseUrl": "http://127.0.0.1:7690",
   "sessionTool": "codex",
+  "processingReaction": {
+    "enabled": true,
+    "emojiType": "THINKING",
+    "removeOnCompletion": false
+  },
+  "silentConfirmationText": "",
   "intakePolicy": {
     "mode": "allow_all"
   }
@@ -107,6 +132,11 @@ Notes:
 - use `feishu-cn` for `open.feishu.cn`
 - use `lark-global` for `open.larksuite.com`
 - omit `sessionFolder` to use the operator's home directory by default
+- `processingReaction` lets the bot add a quick reaction on the user's message before the real reply lands; by default it uses `THINKING` and keeps it attached as a lightweight ack marker
+- `emojiType` must be one of Feishu's reaction emoji types such as `THINKING`, `WRONGED`, `FINGERHEART`, `GLANCE`, or `SMILE`; if you specifically want the built-in `委屈`-style reaction, use `WRONGED` rather than `HURT`
+- `silentConfirmationText` lets the connector send a tiny text acknowledgement when the assistant would otherwise stay silent; this is useful for Feishu-style emoticon tokens like `[委屈]`
+- set `removeOnCompletion` to `true` only if you want the reaction to be temporary and disappear after the reply lands
+- the connector forwards mostly the rendered user message plus mention-token hints, not a large blob of transport metadata
 - `allow_all` is the simplest V0 mode; move to `whitelist` after the first validation if needed
 
 ## Success state

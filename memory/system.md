@@ -75,6 +75,13 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - In RemoteLab, this presents as a "silent" or "no response" Codex session because the process exits before emitting JSON events; Claude does not have this constraint, so the mismatch looks path-specific.
 - If the product intentionally launches agents from `~` or other non-repo roots, pass `--skip-git-repo-check` in the Codex adapter (or explicitly trust that directory in Codex config).
 
+### Codex Reply-Style Steering Is Most Reliable Via `developer_instructions` (2026-03-18)
+- In current ChatGPT-authenticated `codex exec` runs, Codex's official `developer_instructions` config path reliably changes reply style, including suppressing default heading/list-heavy answers in favor of connected prose.
+- On the same setup, the documented top-level `instructions` and `model_instructions_file` controls did not materially change trivial `codex exec` outputs in smoke tests, even though the open-source code and schema suggest they should affect base instructions.
+- For manager-controlled style shaping in wrappers like RemoteLab, prefer passing `-c developer_instructions=...` on each Codex invocation over relying on prompt prefixes alone.
+- RemoteLab now benefits from a lightweight default Codex developer instruction that frames Codex as a runtime under manager-owned workflow/style policy, while still allowing explicit per-run override or opt-out for niche cases.
+- To keep manager policy canonical, RemoteLab-managed Codex runs should prefer a dedicated `CODEX_HOME` that shares auth but omits user-global `config.toml` personality/style settings and other local Codex-specific drift.
+
 ### KYC / Account Registration Requests (2026-03-06)
 - If a user asks for a "public address" or advice on what address/location to enter for account opening, treat it as potential misrepresentation/compliance evasion.
 - Do not help source placeholder/fake addresses or craft deceptive explanations.
@@ -142,7 +149,7 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - Refresh restore, sidebar tab restore, and notification-open behavior should not each pick their own session separately; drive all three from the same `session`/`tab` deep-link contract plus one persisted local fallback.
 - Good precedence is: explicit notification/URL target first, then last locally active session, then most recently updated session.
 - Push notifications should carry the target session URL in their payload, and existing app windows should receive an in-page message to switch sessions without a forced reload. Fresh windows can fall back to `openWindow(url)`.
-- To make "latest session" meaningful, persist a session-level recency field like `updatedAt` and sort session listings/fallback selection by it.
+- To make "latest session" meaningful, sort by real session activity rather than every metadata write. Archive/unarchive should not bump the active-list recency signal; keep archive ordering on its own `archivedAt` path.
 
 ### Open Local Config Should Fail Per Record, Not Per File (2026-03-06)
 - Once provider/tool extensibility relies on user-editable local JSON, a single bad record must be skipped with a clear log instead of breaking the entire picker/API response.
@@ -159,6 +166,14 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - A one-time `/?visitor=1` redirect is only a bootstrap hint. After the frontend cleans that query param, refreshes still carry the visitor cookie but no longer carry the URL marker.
 - If the UI only checks the URL to decide visitor mode, a refresh silently falls back into owner-style initialization and immediately calls owner-only APIs.
 - Reliable pattern: derive mode from authenticated role before any owner-only requests, but do not force that through a blocking extra round-trip. If the HTML render already knows the auth session, inline a small bootstrap payload (for example owner vs visitor plus visitor session IDs) and let the frontend use `/api/auth/me` only as a fallback or non-HTML API surface.
+
+### Visitor Mode Must Propagate Across Bootstrap (2026-03-12)
+- Visitor-mode requests should carry an explicit signal (currently `?visitor=1`) across initial page loads, API fetches, and WebSocket upgrades when owner and visitor cookies can coexist.
+- Frontend test harnesses may load `static/chat/session-http.js` or other modules without `bootstrap.js`; any visitor-flag helpers introduced in `bootstrap.js` need a local fallback to avoid undefined globals during tests.
+
+### Owner Session Cookies Should Use PWA-Compatible Defaults (2026-03-12)
+- For owner login persistence in installed PWAs, prefer standard web-cookie defaults: `HttpOnly`, `Secure` when HTTPS, `SameSite=Lax`, and both `Max-Age` plus `Expires`.
+- `SameSite=Strict` can break app-launch or external-entry flows; a light refresh on authenticated entry points keeps server-side expiry aligned without forcing refresh on every request.
 
 ### Hidden Markdown Blocks Work Best As Parser Extensions (2026-03-06)
 - For `marked`, custom block + inline extensions are a clean way to consume tags like `<private>...</private>` and `<hide>...</hide>` so the UI hides them while the raw message text stays intact for history and model context.
@@ -177,13 +192,32 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - If an external connector should reuse the operator's current tool/model/reasoning choice, the browser must sync that selection to server-readable state; backend workers cannot see `localStorage`.
 - Treat the synced selection as the live runtime preference for connector-triggered sessions, and let connector-specific pinned overrides win only when they are explicitly configured.
 
+### Composer Drafts Must Exclude In-Flight Sends (2026-03-17)
+- Durable draft storage should represent only editable local composer text, not an outbound request that is already being sent.
+- When a send starts, clear the persisted draft immediately and keep the temporary "sending" copy only in memory for the active page.
+- Otherwise a reload can resurrect text that the server already accepted, making the composer look stuck in a duplicate sending state.
+
+### Composer Sending Must Yield To Canonical Session Activity (2026-03-17)
+- Treat the local composer `sending` state as a very short pre-ack phase only, not a peer to the backend session activity model.
+- Once the backend session activity shows the message has been accepted into real work — for example a new run starts, the run phase reaches `accepted`, or the follow-up queue count increases — clear the local sending lock immediately.
+- Otherwise the UI can show contradictory states like `running` in the header while the composer still looks frozen in `sending`.
+
 ### Connector App Scopes Should Be Real Apps, Not Chat Aliases (2026-03-12)
 - If an integration like Email creates sessions with its own `appId`, ship a real built-in app entry for that scope so the UI can present it consistently instead of feeling like an unnamed Chat fallback.
 - Mark connector built-ins as non-template apps, and hide them from the sidebar when they have zero sessions; otherwise they clutter owner-facing app/template controls while still failing to model the connector cleanly.
 
+### Domain Workflow Apps Should Stay User-Created (2026-03-14)
+- Reserve built-in apps for product-structural roles such as the owner chat surface, app-creation helpers, or connector scopes that need a stable first-class identity in the UI.
+- Do not hardcode niche business workflows like video cutting as shipped built-ins; model them as normal shareable apps so they remain optional, editable, and unspecial in app ordering and product copy.
+
 ### Post-Run Integrations Should Live Outside `chat/` (2026-03-11)
 - Business-specific side effects triggered by finished runs, such as outbound email delivery, should not live under the core `chat/` domain modules even when the chat server invokes them.
 - A cleaner split is: `chat/` owns sessions, runs, and event history; integration modules under `lib/` or connector-specific areas consume those primitives and perform provider-specific delivery work.
+
+### Connector HTTP Sends Must Respect Proxy Reality (2026-03-19)
+- Do not assume Node's built-in `fetch` will successfully inherit the operator's shell proxy setup on every machine; in real local-first deployments it can fail with `fetch failed` / `UND_ERR_CONNECT_TIMEOUT` while `curl` to the same URL succeeds.
+- For connector-owned outbound delivery paths, prefer a transport that explicitly respects proxy environment variables, or keep a proxy-aware `curl` fallback so completion-side effects do not silently die after the model already produced a valid reply.
+- Treat this as delivery-layer logic, not model/output selection logic: if the final assistant reply exists in history but the user never receives it, inspect the transport first.
 
 ### Deferred Event Bodies Must Stay User-Triggered (2026-03-10)
 - If thinking/tool bodies are deferred behind `GET /api/sessions/:sessionId/events/:seq/body`, the frontend should only fetch them when the user explicitly expands the corresponding UI block.
@@ -279,9 +313,13 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 ### Public Mobile Shells Need Fingerprinted Assets And Non-Storable HTML (2026-03-10)
 - Cloudflare or the mobile browser may cache public JS/CSS/service-worker assets more aggressively than the origin's informal intent, even when local testing seems fine.
 - Do not rely on unversioned asset URLs plus `no-cache` HTML for operator-facing app shells. Serve HTML with `private, no-store, max-age=0, must-revalidate`, and fingerprint linked assets (`/chat.js?v=<build>`, `/manifest.json?v=<build>`, etc.).
+- If a legacy or compatibility loader fans out into multiple split frontend scripts, it must resolve one coherent `assetVersion` first (from inline build info or `/api/build-info`) and append that version to every downstream asset, including prerequisite scripts like `marked.min.js`, `session-state-model.js`, and icon/bootstrap helpers.
+- Otherwise a stale cached HTML shell or loader can mix old and new split assets during rollout and surface boot-time `ReferenceError` failures that are hard to reproduce locally.
 - Treat `sw.js` specially: use a versioned registration URL and send `no-store` so stale service workers do not survive a rollout window.
 - If the service worker is only needed for PWA installability or push, keep it fetch-passive: do not add asset-cache logic, clear Cache Storage on install/activate, and register with `updateViaCache: 'none'` so old worker-managed caches stop surviving browser rollout edges.
 - Exposing a tiny build marker in the UI and an `X-...-Build` response header makes stale-client reports much faster to confirm from mobile and `curl`.
+- Fingerprinted assets are still not enough if the shipped server reads HTML or JS directly from the live working tree; that leaks half-edited source into the production surface before any restart or test gate happens.
+- The safer self-hosted pattern is: keep a small active-release pointer, snapshot the shipped runtime into an immutable release directory, restart only after a release-gate test suite passes, and auto-rollback to the previous release if the post-restart health check fails.
 
 ### App-Centric Chat Still Needs Separate Policy And Run Layers (2026-03-08)
 - When generic chat and shared apps start converging, the clean model is: machine-owning agent kernel + auth principal + app policy + session/run instance, with optional environment leases.
@@ -393,6 +431,12 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - In RemoteLab's invalidation-only realtime model, a `session_invalidated` event should refresh only the affected session (`/api/sessions/:id`, plus `/events` when that session is open), not the entire owner session list.
 - Reserve whole-list refreshes like `sessions_invalidated` for collection-shape changes such as create, archive, or unarchive; rename/group/tool/status changes can be reconciled with a per-session refresh and local sidebar rerender.
 - Coalesce repeated per-session invalidations client-side so active runs do not fan out into bursts of overlapping sidebar requests.
+- For collection-shape actions with noticeable latency, such as archive/unarchive, optimistic sidebar hide/show on click makes the UI feel immediate as long as the client can roll back cleanly if the HTTP mutation fails.
+
+### Owner Bootstrap Can Restore The Current Session Before The Sidebar List (2026-03-17)
+- If the owner client already knows `currentSessionId` from navigation state or local storage, start the current-session refresh immediately instead of waiting for `/api/sessions` to finish; the main pane can render independently of the sidebar collection.
+- Keep the later restore pass for final selection/fallback logic, but let the known session content race ahead in the common case so the first meaningful paint is the active conversation rather than the full list.
+- When session metadata can arrive before `/api/tools`, latch the session's selected tool locally first and only trigger model loading after the tool catalog exists; otherwise startup parallelism can silently leave the runtime controls on the wrong tool.
 
 ### Usage Metrics Should Normalize To Context Window Size (2026-03-10)
 - Provider usage fields are not directly comparable: Claude-style runtimes split cached prompt tokens into separate fields, while Codex-style runtimes report full prompt size in `input_tokens` and expose cached tokens only as a subset annotation.
@@ -407,6 +451,10 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - In RemoteLab, the chat input control row naturally grows over time as tool/model/thinking/status/resume/compact actions are added.
 - On mobile, wrapping or clipping these controls is worse than horizontal scrolling because the right-side actions become unreachable precisely when they matter most.
 - A robust pattern is: keep the row single-line, split it into left/right flex groups with `min-width: max-content`, and make the parent row `overflow-x: auto` with touch scrolling enabled.
+
+### Composer Pending State Should Clear On HTTP Acceptance (2026-03-17)
+- The first-class acceptance signal is `POST /messages` success with the returned `requestId`; clear the composer pending state immediately on that response.
+- Session/event reconciliation should remain a fallback, not the only clear path, because running-session refresh optimizations can skip the exact event fetch that would otherwise clear `Sending...`.
 
 ### Android Long Screenshots Need A Full-Document Capture Surface (2026-03-12)
 - Android's native long-screenshot flow is unreliable when a web app behaves like an app shell with `body`/viewport locked and the real conversation scroll trapped inside an inner `overflow-y: auto` panel.
@@ -441,3 +489,11 @@ Universal learnings and patterns that apply to all RemoteLab deployments, regard
 - In RemoteLab-style remote UIs, local absolute file links are fundamentally a desktop operator workflow; mobile users can understand that they are unsupported.
 - Prefer rewriting these links client-side to `vscode://file/...` for desktop-capable browsers, and degrade on mobile/visitor surfaces by disabling the link with a clear tooltip.
 - Avoid adding server routes that execute `code --goto` on the host just to make phone-originated clicks work; that adds auth and execution surface area for a scenario the product does not need to support.
+
+### Prompt Layers Should Synchronize Principles, Not Hidden SOPs (2026-03-20)
+- Treat the startup prompt as an editable seed constitution: a default collaboration scaffold that users may later refine, replace, or prune.
+- Keep continuity/handoff separate from scope and task. Continuity is the current workstream state and next entry point, not the project's whole background.
+- Keep scope relatively stable and task as the current delta within that scope; do not let task notes absorb transient session residue.
+- Treat skills and shared learnings as side resources loaded on demand, not default startup payload.
+- Make multi-session routing a first-class principle: bounded work should prefer bounded context, so independently completable goals often deserve separate sessions.
+- Turn-level reminders should reinforce judgment priorities and invariants, not narrate every action as a long hidden checklist.

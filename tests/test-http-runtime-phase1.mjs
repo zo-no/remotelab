@@ -167,6 +167,31 @@ async function stopServer(server) {
   await waitFor(() => server.child.exitCode !== null, 'server shutdown');
 }
 
+function runNodeCli(args, env = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        ...env,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
+  });
+}
+
 async function createSession(port, { name = 'Phase1', group = 'Tests', description = 'HTTP runtime' } = {}) {
   const res = await request(port, 'POST', '/api/sessions', {
     folder: repoRoot,
@@ -218,6 +243,12 @@ async function waitForRunState(port, runId, expectedState) {
     if (res.json.run.state !== expectedState) return false;
     return res.json.run;
   }, `run ${runId} ${expectedState}`);
+}
+
+function readRunManifest(home, runId) {
+  return JSON.parse(
+    readFileSync(join(home, '.config', 'remotelab', 'chat-runs', runId, 'manifest.json'), 'utf8'),
+  );
 }
 
 async function getEvents(port, sessionId) {
@@ -555,34 +586,67 @@ async function phase10EventIndexContract() {
   const port = randomPort();
   const server = await startServer({ home, port });
   try {
-    const session = await createSession(port, { name: 'Event index', group: 'Tests', description: 'Full history + lazy bodies' });
+    const session = await createSession(port, { name: 'Event index', group: 'Tests', description: 'Display timeline + lazy hidden blocks' });
     const submit = await submitMessage(port, session.id, 'req-index-contract');
     await waitForRunTerminal(port, submit.json.run.id);
 
-    const events = await request(port, 'GET', `/api/sessions/${session.id}/events?afterSeq=0&limit=1`);
+    const events = await request(port, 'GET', `/api/sessions/${session.id}/events?filter=visible&afterSeq=0&limit=1`);
     assert.equal(events.status, 200, 'event history should load successfully');
     assert.ok(Array.isArray(events.json.events), 'event history should return an events array');
-    assert.ok(events.json.events.length > 1, 'event history should ignore limit pagination and return the full event index');
+    assert.equal(events.json.filter, 'visible', 'visible timeline requests should advertise the active event filter');
+    assert.ok(events.json.events.length >= 3, 'event history should ignore limit pagination and return the full display timeline');
+    assert.equal(
+      events.json.events.some((event) => event.type === 'tool_use' || event.type === 'tool_result'),
+      false,
+      'main display timeline should not inline hidden tool events',
+    );
 
-    const toolUse = events.json.events.find((event) => event.type === 'tool_use');
-    assert.ok(toolUse, 'tool use event should be present in the event index');
-    assert.equal(toolUse.toolInput, '', 'tool input body should be deferred from the event index');
-    assert.equal(toolUse.bodyAvailable, true, 'tool input should advertise a lazy body');
-    assert.equal(toolUse.bodyLoaded, false, 'tool input should stay unloaded in the event index');
+    const userMessage = events.json.events.find((event) => event.type === 'message' && event.role === 'user');
+    assert.ok(userMessage, 'display timeline should still expose the user message');
+    assert.equal(userMessage.content, 'Run the fake tool', 'user message content should stay inline for the visible timeline');
+    assert.equal(userMessage.bodyAvailable, undefined, 'visible user messages should not advertise a lazy body');
 
-    const toolResult = events.json.events.find((event) => event.type === 'tool_result');
-    assert.ok(toolResult, 'tool result event should be present in the event index');
-    assert.equal(toolResult.output, '', 'tool result body should be deferred from the event index');
-    assert.equal(toolResult.bodyAvailable, true, 'tool result should advertise a lazy body');
-    assert.equal(toolResult.bodyLoaded, false, 'tool result should stay unloaded in the event index');
+    const assistantMessage = events.json.events.find((event) => event.type === 'message' && event.role === 'assistant');
+    assert.ok(assistantMessage, 'display timeline should expose the assistant summary message');
+    assert.equal(assistantMessage.content, 'finished from fake codex', 'assistant summary should stay inline for the visible timeline');
+    assert.equal(assistantMessage.bodyAvailable, undefined, 'visible assistant messages should not advertise a lazy body');
+
+    const collapsedBlock = events.json.events.find((event) => event.type === 'thinking_block' && event.state === 'completed');
+    assert.ok(collapsedBlock, 'display timeline should expose a completed thought block for hidden work');
+    assert.ok(collapsedBlock.blockStartSeq >= 1, 'collapsed block should expose a starting sequence');
+    assert.ok(collapsedBlock.blockEndSeq >= collapsedBlock.blockStartSeq, 'collapsed block should expose an ending sequence');
+
+    const block = await request(
+      port,
+      'GET',
+      `/api/sessions/${session.id}/events/blocks/${collapsedBlock.blockStartSeq}-${collapsedBlock.blockEndSeq}`,
+    );
+    assert.equal(block.status, 200, 'collapsed event block should load on demand');
+    assert.ok(Array.isArray(block.json.events), 'collapsed event block should return hidden events');
+
+    const toolUse = block.json.events.find((event) => event.type === 'tool_use');
+    assert.ok(toolUse, 'collapsed event block should include tool use');
+    assert.equal(toolUse.toolInput, 'echo fake', 'collapsed event block should inline the full tool input');
+
+    const toolResult = block.json.events.find((event) => event.type === 'tool_result');
+    assert.ok(toolResult, 'collapsed event block should include tool result');
+    assert.equal(toolResult.output, 'fake', 'collapsed event block should inline the full tool result');
 
     const toolUseBody = await request(port, 'GET', `/api/sessions/${session.id}/events/${toolUse.seq}/body`);
-    assert.equal(toolUseBody.status, 200, 'tool use body should load on demand');
-    assert.equal(toolUseBody.json.body.value, 'echo fake', 'tool use body should preserve the full inline payload');
+    assert.equal(toolUseBody.status, 200, 'legacy tool use body route should still load on demand');
+    assert.equal(toolUseBody.json.body.value, 'echo fake', 'legacy tool use body route should preserve the full inline payload');
 
-    const toolResultBody = await request(port, 'GET', `/api/sessions/${session.id}/events/${toolResult.seq}/body`);
-    assert.equal(toolResultBody.status, 200, 'tool result body should load on demand');
-    assert.equal(toolResultBody.json.body.value, 'fake', 'tool result body should preserve the full inline payload');
+    const fullEvents = await request(port, 'GET', `/api/sessions/${session.id}/events?filter=all`);
+    assert.equal(fullEvents.status, 200, 'raw event index should still be available through the explicit all filter');
+    assert.equal(fullEvents.json.filter, 'all', 'raw event index responses should advertise the active event filter');
+    assert.ok(
+      fullEvents.json.events.some((event) => event.type === 'tool_use'),
+      'raw event index should still expose tool use events when explicitly requested',
+    );
+    assert.ok(
+      fullEvents.json.events.some((event) => event.type === 'tool_result'),
+      'raw event index should still expose tool result events when explicitly requested',
+    );
 
     console.log('phase10-event-index-contract: ok');
   } finally {
@@ -658,12 +722,16 @@ async function phase12QueuedMessageRouteContract() {
     assert.equal(queued.json.session?.activity?.run?.state, 'running', 'session activity should expose the active run state');
     assert.equal(queued.json.session?.activity?.queue?.state, 'queued', 'session activity should expose the queued follow-up state');
     assert.equal(queued.json.session?.activity?.queue?.count, 1, 'session activity should expose the queued follow-up count');
+    assert.equal(Array.isArray(queued.json.session?.queuedMessages), true, 'queued follow-up responses should include queued message details for the attached session view');
+    assert.equal(queued.json.session?.queuedMessages?.[0]?.requestId, 'req-queued-second', 'queued follow-up responses should preserve the original queued request id');
 
     const duplicateQueued = await submitMessage(port, session.id, 'req-queued-second', 'Duplicate queued follow-up');
     assert.equal(duplicateQueued.status, 200, 'duplicate queued follow-up should return idempotent 200');
     assert.equal(duplicateQueued.json.duplicate, true, 'duplicate queued follow-up should report duplicate');
     assert.equal(duplicateQueued.json.queued, true, 'duplicate queued follow-up should still report queued');
     assert.equal(duplicateQueued.json.run, null, 'duplicate queued follow-up should not create a new run');
+    assert.equal(Array.isArray(duplicateQueued.json.session?.queuedMessages), true, 'duplicate queued follow-up responses should still include queued message details while the queue entry exists');
+    assert.equal(duplicateQueued.json.session?.queuedMessages?.[0]?.requestId, 'req-queued-second', 'duplicate queued follow-up responses should keep the queued request id stable');
 
     await waitForRunTerminal(port, first.json.run.id);
     await waitFor(async () => {
@@ -674,6 +742,272 @@ async function phase12QueuedMessageRouteContract() {
     }, 'queued follow-up should finish draining before cleanup', 12000);
 
     console.log('phase12-queued-message-route-contract: ok');
+  } finally {
+    await stopServer(server);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+async function phase13DelegateSession() {
+  const { home } = setupTempHome();
+  const port = randomPort();
+  const server = await startServer({ home, port, delayMs: 1200 });
+  try {
+    const session = await createSession(port, {
+      name: 'Delegate parent',
+      group: 'Tests',
+      description: 'Delegate route contract',
+    });
+    const submit = await submitMessage(port, session.id, 'req-delegate-parent', 'Please investigate the workflow design problem before delegating');
+    await waitForRunTerminal(port, submit.json.run.id);
+
+    const delegate = await request(port, 'POST', `/api/sessions/${session.id}/delegate`, {
+      task: 'Figure out a lightweight child-session strategy for parallel work.',
+    });
+    assert.equal(delegate.status, 201, 'delegate should create a child session');
+    assert.ok(delegate.json.session?.id, 'delegate should return the child session');
+    assert.ok(delegate.json.run?.id, 'delegate should start the child session immediately');
+    assert.notEqual(delegate.json.session.id, session.id, 'delegate should create a distinct child session id');
+    assert.equal(delegate.json.session.delegatedFromSessionId, undefined, 'delegate should not persist parent-child metadata on the child session');
+    assert.equal(delegate.json.session.rootSessionId, undefined, 'delegate should not persist lineage metadata on the child session');
+    assert.equal(delegate.json.session.delegatedAt, undefined, 'delegate should not persist delegated timestamps on the child session');
+
+    const childRun = await waitForRunTerminal(port, delegate.json.run.id);
+    assert.equal(childRun.state, 'completed', 'delegated child run should complete');
+
+    const manifest = readRunManifest(home, delegate.json.run.id);
+    assert.match(manifest.prompt || '', /Figure out a lightweight child-session strategy for parallel work\./, 'delegated prompt should include the requested child task');
+    assert.match(manifest.prompt || '', new RegExp(`Parent session id: ${session.id}`), 'delegated prompt should include the parent session id');
+    assert.doesNotMatch(manifest.prompt || '', /## Delegated task/, 'delegated prompt should not impose a heavy sectioned handoff format');
+    assert.doesNotMatch(manifest.prompt || '', /## Source session reference/, 'delegated prompt should not include extra source-session formatting blocks');
+    assert.doesNotMatch(manifest.prompt || '', /Please investigate the workflow design problem before delegating/, 'delegated prompt should omit the latest parent user message by default');
+    assert.doesNotMatch(manifest.prompt || '', /finished from fake codex/, 'delegated prompt should omit the latest parent assistant result by default');
+    assert.doesNotMatch(manifest.prompt || '', /echo fake/, 'delegated prompt should omit intermediate tool details from the parent');
+
+    const parentEvents = await getEvents(port, session.id);
+    const delegateNotice = parentEvents.events.find((event) => event.type === 'message' && event.role === 'assistant' && event.messageKind === 'session_delegate_notice');
+    assert.ok(delegateNotice, 'delegation should append a visible handoff note to the parent session');
+    assert.match(delegateNotice.content || '', /Spawned a parallel session/, 'handoff note should describe the spawn');
+    assert.match(delegateNotice.content || '', new RegExp(`session=${delegate.json.session.id}`), 'handoff note should include a direct session link');
+    assert.match(delegateNotice.content || '', /Figure out a lightweight child-session strategy for parallel work\./, 'handoff note should include the delegated task');
+
+    const running = await createSession(port, {
+      name: 'Delegate busy',
+      group: 'Tests',
+      description: 'Delegate while running',
+    });
+    const runningSubmit = await submitMessage(port, running.id, 'req-delegate-busy', 'slow run for delegate rejection');
+    await waitForRunState(port, runningSubmit.json.run.id, 'running');
+    const runningDelegate = await request(port, 'POST', `/api/sessions/${running.id}/delegate`, {
+      task: 'Spawn a child anyway',
+    });
+    assert.equal(runningDelegate.status, 201, 'delegate should work even when the source session is currently running');
+    assert.ok(runningDelegate.json.session?.id, 'running-source delegation should still create a child session');
+    assert.ok(runningDelegate.json.run?.id, 'running-source delegation should still create a child run');
+
+    console.log('phase13-delegate-session: ok');
+  } finally {
+    await stopServer(server);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+async function phase14SessionSpawnCli() {
+  const { home } = setupTempHome();
+  const port = randomPort();
+  const server = await startServer({ home, port, delayMs: 1200 });
+  try {
+    const session = await createSession(port, {
+      name: 'CLI parent',
+      group: 'Tests',
+      description: 'CLI helper contract',
+    });
+
+    const cli = await runNodeCli(
+      ['cli.js', 'session-spawn', '--task', 'Return a focused child-session result.', '--wait', '--json'],
+      {
+        HOME: home,
+        REMOTELAB_SESSION_ID: session.id,
+        REMOTELAB_CHAT_BASE_URL: `http://127.0.0.1:${port}`,
+      },
+    );
+    assert.equal(cli.code, 0, `session-spawn CLI should exit cleanly: ${cli.stderr}`);
+    const payload = JSON.parse(cli.stdout);
+    assert.equal(payload.sourceSessionId, session.id, 'CLI should default to REMOTELAB_SESSION_ID');
+    assert.equal(payload.task, 'Return a focused child-session result.', 'CLI should echo the delegated task');
+    assert.equal(typeof payload.sessionId, 'string', 'CLI should return the child session id');
+    assert.equal(typeof payload.runId, 'string', 'CLI should return the child run id');
+    assert.match(payload.sessionUrl || '', new RegExp(`session=${payload.sessionId}`), 'CLI should return a direct session URL');
+    assert.equal(payload.state, 'completed', 'CLI --wait should return the terminal child state');
+    assert.equal(payload.reply, 'finished from fake codex', 'CLI --wait should return the child assistant reply');
+
+    const parentEvents = await getEvents(port, session.id);
+    const delegateNotice = parentEvents.events.find((event) => event.type === 'message' && event.role === 'assistant' && event.messageKind === 'session_delegate_notice');
+    assert.ok(delegateNotice, 'CLI helper should still append a visible handoff note to the source session');
+
+    console.log('phase14-session-spawn-cli: ok');
+  } finally {
+    await stopServer(server);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+async function phase14bSessionSpawnCliInternalFinalOnly() {
+  const { home } = setupTempHome();
+  const port = randomPort();
+  const server = await startServer({ home, port, delayMs: 1200 });
+  try {
+    const session = await createSession(port, {
+      name: 'CLI internal parent',
+      group: 'Tests',
+      description: 'Hidden final-only child contract',
+    });
+
+    const cli = await runNodeCli(
+      ['cli.js', 'session-spawn', '--task', 'Return a focused child-session result.', '--internal', '--final-only', '--json'],
+      {
+        HOME: home,
+        REMOTELAB_SESSION_ID: session.id,
+        REMOTELAB_CHAT_BASE_URL: `http://127.0.0.1:${port}`,
+      },
+    );
+    assert.equal(cli.code, 0, `internal final-only session-spawn CLI should exit cleanly: ${cli.stderr}`);
+    const payload = JSON.parse(cli.stdout);
+    assert.deepEqual(payload, {
+      state: 'completed',
+      reply: 'finished from fake codex',
+    }, 'internal final-only CLI should return only the terminal child reply payload');
+
+    const parentEvents = await getEvents(port, session.id);
+    const delegateNotice = parentEvents.events.find((event) => event.type === 'message' && event.role === 'assistant' && event.messageKind === 'session_delegate_notice');
+    assert.equal(delegateNotice, undefined, 'internal final-only helper should not append a visible handoff note to the source session');
+
+    const listed = await request(port, 'GET', '/api/sessions');
+    assert.equal(listed.status, 200, 'session listing should still succeed');
+    assert.deepEqual((listed.json.sessions || []).map((entry) => entry.id), [session.id], 'hidden child session should stay out of the visible session list');
+
+    console.log('phase14b-session-spawn-cli-internal-final-only: ok');
+  } finally {
+    await stopServer(server);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+async function phase15NoDuplicateDuringReadHammer() {
+  const { home } = setupTempHome();
+  const port = randomPort();
+  const server = await startServer({ home, port, delayMs: 1200 });
+  try {
+    const session = await createSession(port, {
+      name: 'Read hammer',
+      group: 'Tests',
+      description: 'Repeated read requests should not duplicate transcript output',
+    });
+
+    const submit = await submitMessage(port, session.id, 'req-read-hammer', 'Hammer the read paths while the fake run is active');
+    await waitForRunState(port, submit.json.run.id, 'running');
+
+    for (let round = 0; round < 6; round += 1) {
+      const batch = [];
+      for (let index = 0; index < 6; index += 1) {
+        batch.push(request(port, 'GET', `/api/sessions/${session.id}`));
+        batch.push(request(port, 'GET', `/api/sessions/${session.id}?view=sidebar`));
+        batch.push(request(port, 'GET', `/api/sessions/${session.id}/events`));
+        batch.push(request(port, 'GET', `/api/runs/${submit.json.run.id}`));
+      }
+      const responses = await Promise.all(batch);
+      for (const response of responses) {
+        assert.equal(response.status, 200, 'repeated read hammer requests should succeed');
+      }
+      await sleep(60);
+    }
+
+    await waitForRunTerminal(port, submit.json.run.id);
+    await waitFor(async () => {
+      const detail = await request(port, 'GET', `/api/sessions/${session.id}`);
+      if (detail.status !== 200) return false;
+      return detail.json.session?.activity?.run?.state === 'idle';
+    }, 'session should settle after the read hammer', 12000);
+
+    const fullEvents = await request(port, 'GET', `/api/sessions/${session.id}/events?filter=all`);
+    assert.equal(fullEvents.status, 200, 'full event list should load after the read hammer');
+
+    const assistantMessages = (fullEvents.json?.events || []).filter(
+      (event) => event.type === 'message' && event.role === 'assistant' && event.content === 'finished from fake codex',
+    );
+    assert.equal(assistantMessages.length, 1, 'final assistant message should be committed exactly once');
+
+    const toolResults = (fullEvents.json?.events || []).filter(
+      (event) => event.type === 'tool_result' && event.output === 'fake',
+    );
+    assert.equal(toolResults.length, 1, 'tool result should be committed exactly once');
+
+    console.log('phase15-no-duplicate-during-read-hammer: ok');
+  } finally {
+    await stopServer(server);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+async function phase16StaleMissingRunnerReconciliation() {
+  const { home, configDir } = setupTempHome();
+  const port = randomPort();
+  let server = await startServer({ home, port });
+  try {
+    const session = await createSession(port, {
+      name: 'Stale missing runner',
+      group: 'Tests',
+      description: 'Missing detached runner should reconcile to terminal state',
+    });
+    const submit = await submitMessage(port, session.id, 'req-stale-missing-runner');
+    const finishedRun = await waitForRunTerminal(port, submit.json.run.id);
+    assert.equal(finishedRun.state, 'completed', 'initial run should complete');
+
+    await stopServer(server);
+    server = null;
+
+    const sessionsPath = join(configDir, 'chat-sessions.json');
+    const runDir = join(configDir, 'chat-runs', submit.json.run.id);
+    const runStatusPath = join(runDir, 'status.json');
+    const runResultPath = join(runDir, 'result.json');
+    const sessions = JSON.parse(readFileSync(sessionsPath, 'utf8'));
+    const sessionRecord = sessions.find((entry) => entry.id === session.id);
+    assert.ok(sessionRecord, 'session record should exist');
+    sessionRecord.activeRunId = submit.json.run.id;
+    writeFileSync(sessionsPath, JSON.stringify(sessions, null, 2), 'utf8');
+
+    const status = JSON.parse(readFileSync(runStatusPath, 'utf8'));
+    status.state = 'running';
+    status.completedAt = null;
+    status.finalizedAt = null;
+    status.result = null;
+    status.failureReason = null;
+    status.cancelRequested = true;
+    status.cancelRequestedAt = new Date().toISOString();
+    status.runnerProcessId = 999991;
+    status.toolProcessId = 999992;
+    writeFileSync(runStatusPath, JSON.stringify(status, null, 2), 'utf8');
+    rmSync(runResultPath, { force: true });
+
+    server = await startServer({ home, port });
+
+    const recoveredRun = await waitFor(async () => {
+      const res = await request(port, 'GET', `/api/runs/${submit.json.run.id}`);
+      if (res.status !== 200) return false;
+      if (res.json.run.state !== 'cancelled') return false;
+      return res.json.run;
+    }, 'stale missing-runner run should reconcile to cancelled');
+    assert.equal(recoveredRun.cancelRequested, true, 'recovered run should remain marked cancelled');
+    assert.ok(recoveredRun.completedAt, 'recovered run should gain completedAt');
+
+    const detail = await request(port, 'GET', `/api/sessions/${session.id}`);
+    assert.equal(detail.status, 200, 'session detail should load after stale missing-runner reconciliation');
+    assert.equal(detail.json.session.activity?.run?.state, 'idle', 'session should no longer appear running');
+
+    const retry = await submitMessage(port, session.id, 'req-stale-missing-runner-retry', 'retry after stale missing runner');
+    const retriedRun = await waitForRunTerminal(port, retry.json.run.id);
+    assert.equal(retriedRun.state, 'completed', 'session should accept a new run after stale missing-runner reconciliation');
+    console.log('phase16-stale-missing-runner-reconciliation: ok');
   } finally {
     await stopServer(server);
     rmSync(home, { recursive: true, force: true });
@@ -695,6 +1029,11 @@ const phases = {
   phase10: phase10EventIndexContract,
   phase11: phase11ForkSession,
   phase12: phase12QueuedMessageRouteContract,
+  phase13: phase13DelegateSession,
+  phase14: phase14SessionSpawnCli,
+  phase14b: phase14bSessionSpawnCliInternalFinalOnly,
+  phase15: phase15NoDuplicateDuringReadHammer,
+  phase16: phase16StaleMissingRunnerReconciliation,
 };
 
 if (phase === 'all') {

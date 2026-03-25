@@ -100,7 +100,7 @@ function readBody(request) {
 function summarizePayload(payload) {
   return {
     sender: payload.sender || payload?.session?.envelope?.mailFrom?.address || '',
-    recipient: payload?.session?.recipient || payload?.recipients?.[0] || '',
+    recipient: payload?.envelope?.rcptTo || payload?.session?.recipient || payload?.recipients?.[0] || '',
     subject: payload?.subject || payload?.headers?.subject || '',
     messageId: payload?.messageId || payload?.message_id || '',
   };
@@ -196,6 +196,7 @@ async function handleCloudflareWebhook(request, response) {
     text: payload.text,
     html: payload.html,
     provider: 'cloudflare_email_worker',
+    envelope: payload.envelope,
   });
   recordExternalMailValidation(mailboxItem, {
     ip: clientIp,

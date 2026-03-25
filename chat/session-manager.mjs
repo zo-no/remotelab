@@ -1,10 +1,14 @@
+import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { watch } from 'fs';
-import { writeFile } from 'fs/promises';
-import { extname, join } from 'path';
-import { CHAT_IMAGES_DIR } from '../lib/config.mjs';
+import { readFile, writeFile } from 'fs/promises';
+import { homedir } from 'os';
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'path';
+import { createInterface } from 'readline';
+import { CHAT_IMAGES_DIR, MEMORY_DIR } from '../lib/config.mjs';
 import { getToolDefinitionAsync } from '../lib/tools.mjs';
-import { createToolInvocation } from './process-runner.mjs';
+import { buildToolProcessEnv } from '../lib/user-shell-env.mjs';
+import { createToolInvocation, resolveCommand, resolveCwd } from './process-runner.mjs';
 import {
   appendEvent,
   appendEvents,
@@ -18,19 +22,26 @@ import {
   setForkContext,
   setContextHead,
 } from './history.mjs';
-import { messageEvent, statusEvent } from './normalizer.mjs';
+import { managerContextEvent, messageEvent, statusEvent } from './normalizer.mjs';
 import {
-  triggerSessionBoardLayoutSuggestion,
   triggerSessionLabelSuggestion,
   triggerSessionWorkflowStateSuggestion,
 } from './summarizer.mjs';
+import { buildSourceRuntimePrompt } from './source-runtime-prompts.mjs';
 import { sendCompletionPush } from './push.mjs';
 import { buildSystemContext } from './system-prompt.mjs';
+import { MANAGER_TURN_POLICY_REMINDER } from './runtime-policy.mjs';
+import {
+  buildSessionAgreementsPromptBlock,
+  normalizeSessionAgreements,
+} from './session-agreements.mjs';
 import {
   buildTemplateFreshnessNotice,
   buildSessionContinuationContextFromBody,
   prepareSessionContinuationBody,
 } from './session-continuation.mjs';
+import { buildSessionDisplayEvents } from './session-display-events.mjs';
+import { buildTurnRoutingHint } from './session-routing.mjs';
 import { broadcastOwners, getClientsMatching } from './ws-clients.mjs';
 import {
   buildTemporarySessionName,
@@ -44,6 +55,10 @@ import {
   normalizeSessionWorkflowState,
 } from './session-workflow-state.mjs';
 import {
+  formatAttachmentContextLine,
+  stripEventAttachmentSavedPaths,
+} from './attachment-utils.mjs';
+import {
   createRun,
   findRunByRequest,
   getRun,
@@ -52,12 +67,13 @@ import {
   isTerminalRunState,
   listRunIds,
   materializeRunSpoolLine,
-  readRunSpoolDelta,
   readRunSpoolRecords,
   requestRunCancel,
   runDir,
   updateRun,
+  writeRunResult,
 } from './runs.mjs';
+import { readLatestCodexSessionMetrics } from './codex-session-metrics.mjs';
 import { spawnDetachedRunner } from './runner-supervisor.mjs';
 import {
   buildSessionActivity,
@@ -73,22 +89,23 @@ import {
   mutateSessionMeta,
   withSessionsMetaMutation,
 } from './session-meta-store.mjs';
-import {
-  getBoardPlacement,
-  loadBoardLayout,
-  replaceBoardLayout,
-  summarizeBoardLayout,
-} from './session-board-layout.mjs';
 import { dispatchSessionEmailCompletionTargets, sanitizeEmailCompletionTargets } from '../lib/agent-mail-completion-targets.mjs';
 import {
   DEFAULT_APP_ID,
+  WELCOME_APP_ID,
   createApp,
   getApp,
   getBuiltinApp,
   normalizeAppId,
   resolveEffectiveAppId,
 } from './apps.mjs';
-import { ensureDir } from './fs-utils.mjs';
+import { publishLocalFileAssetFromPath } from './file-assets.mjs';
+import { ensureDir, pathExists, statOrNull } from './fs-utils.mjs';
+import {
+  buildTaskCardPromptBlock,
+  normalizeSessionTaskCard,
+  parseTaskCardFromAssistantContent,
+} from './session-task-card.mjs';
 
 const MIME_EXTENSIONS = {
   'application/json': '.json',
@@ -125,7 +142,27 @@ const VISITOR_TURN_GUARDRAIL = [
 ].join('\n');
 
 const INTERNAL_SESSION_ROLE_CONTEXT_COMPACTOR = 'context_compactor';
+const INTERNAL_SESSION_ROLE_AGENT_DELEGATE = 'agent_delegate';
 const AUTO_COMPACT_MARKER_TEXT = 'Older messages above this marker are no longer in the model\'s live context. They remain visible in the transcript, but only the compressed handoff and newer messages below are loaded for continued work.';
+const REPLY_SELF_REPAIR_INTERNAL_OPERATION = 'reply_self_repair';
+const REPLY_SELF_CHECK_REVIEWING_STATUS = 'Assistant self-check: reviewing the latest reply for early stop…';
+const REPLY_SELF_CHECK_ACCEPT_STATUS = 'Assistant self-check: kept the latest reply as-is.';
+const REPLY_SELF_CHECK_DEFAULT_REASON = 'the latest reply left avoidable unfinished work';
+const VOICE_TRANSCRIPT_REWRITE_BOOTSTRAP_FILE = join(MEMORY_DIR, 'bootstrap.md');
+const VOICE_TRANSCRIPT_REWRITE_PROJECTS_FILE = join(MEMORY_DIR, 'projects.md');
+const VOICE_TRANSCRIPT_REWRITE_RECENT_HISTORY_WINDOW = 24;
+const VOICE_TRANSCRIPT_REWRITE_RECENT_MESSAGE_LIMIT = 8;
+const VOICE_TRANSCRIPT_REWRITE_SESSION_SUMMARY_MAX_CHARS = 1600;
+const VOICE_TRANSCRIPT_REWRITE_RECENT_DISCUSSION_MAX_CHARS = 2400;
+const DEFAULT_VOICE_TRANSCRIPT_REWRITE_LANGUAGE_HINT = 'Match the speaker\'s natural language mix. Chinese messages may naturally include English technical/product terms, repository names, commands, file paths, and identifiers when the surrounding context supports them.';
+const VOICE_TRANSCRIPT_REWRITE_DEVELOPER_INSTRUCTIONS = [
+  'You are a hidden transcript cleanup worker inside RemoteLab.',
+  'Do not use tools, do not ask follow-up questions, and do not mention internal process.',
+  'Fix likely transcription mistakes, likely English technical-term substitutions, and light fluency issues, but never answer the user or continue the conversation.',
+  'When project or session context strongly supports the intended term, normalize to that term instead of preserving an obviously wrong ASR variant.',
+  'Return only the final cleaned transcript text.',
+].join(' ');
+
 const CONTEXT_COMPACTOR_SYSTEM_PROMPT = [
   'You are RemoteLab\'s hidden context compactor for a user-facing session.',
   'Your job is to condense older session context into a compact continuation package.',
@@ -134,9 +171,20 @@ const CONTEXT_COMPACTOR_SYSTEM_PROMPT = [
   'Be explicit about what is no longer in live context and what the next worker should rely on.',
 ].join('\n');
 
+const TURN_ACTIVATION_CARD = wrapPrivatePromptBlock([
+  'Turn activation — keep these principles active for this reply:',
+  '- Finish clear, low-risk work to a meaningful stopping point instead of pausing early for permission.',
+  '- Pause only for real ambiguity, missing required user input, or a meaningfully destructive / irreversible action.',
+  '- Default to concise, state-first updates: current execution state, then whether the user is needed now or the work can stay parked; avoid implementation noise unless the user asks for it.',
+  '- Treat multi-goal routing as a first-order judgment: bounded work deserves bounded context, so split independently completable work instead of flattening it into one thread.',
+].join('\n'));
+
 const DEFAULT_AUTO_COMPACT_CONTEXT_WINDOW_PERCENT = 100;
 const FOLLOW_UP_FLUSH_DELAY_MS = 1500;
 const MAX_RECENT_FOLLOW_UP_REQUEST_IDS = 100;
+const OBSERVED_RUN_POLL_INTERVAL_MS = 250;
+const RESULT_FILE_MAX_ATTACHMENTS = 4;
+const RESULT_FILE_COMMAND_OUTPUT_FLAGS = new Set(['-o', '--output', '--out', '--export']);
 
 function parsePositiveIntOrInfinity(value) {
   const trimmed = typeof value === 'string' ? value.trim() : '';
@@ -144,6 +192,13 @@ function parsePositiveIntOrInfinity(value) {
   if (/^(inf|infinity)$/i.test(trimmed)) return Number.POSITIVE_INFINITY;
   const parsed = parseInt(trimmed, 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normalizeSessionSidebarOrder(value) {
+  const parsed = typeof value === 'number'
+    ? value
+    : parseInt(String(value || '').trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function getConfiguredAutoCompactContextTokens() {
@@ -177,6 +232,22 @@ function getAutoCompactContextTokens(run) {
   );
 }
 
+async function refreshCodexContextMetrics(run) {
+  if (!run?.id || !run?.codexThreadId) return null;
+  const metrics = await readLatestCodexSessionMetrics(run.codexThreadId);
+  if (!Number.isInteger(metrics?.contextTokens)) return null;
+
+  await updateRun(run.id, (current) => ({
+    ...current,
+    contextInputTokens: metrics.contextTokens,
+    ...(Number.isInteger(metrics.contextWindowTokens)
+      ? { contextWindowTokens: metrics.contextWindowTokens }
+      : {}),
+  }));
+
+  return metrics;
+}
+
 function getAutoCompactStatusText(run) {
   const configured = getConfiguredAutoCompactContextTokens();
   const contextTokens = getRunLiveContextTokens(run);
@@ -194,9 +265,67 @@ function getAutoCompactStatusText(run) {
 
 const liveSessions = new Map();
 const observedRuns = new Map();
+const runSyncPromises = new Map();
+const MAX_SESSION_SOURCE_CONTEXT_BYTES = 16 * 1024;
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function normalizeSourceContext(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized || serialized === '{}' || Buffer.byteLength(serialized, 'utf8') > MAX_SESSION_SOURCE_CONTEXT_BYTES) {
+      return null;
+    }
+    return JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+}
+
+function isRecordedProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+async function synthesizeDetachedRunTermination(runId, run) {
+  const hasRecordedProcess = Number.isInteger(run?.runnerProcessId) || Number.isInteger(run?.toolProcessId);
+  if (!hasRecordedProcess || isTerminalRunState(run?.state)) {
+    return null;
+  }
+  const runnerAlive = isRecordedProcessAlive(run?.runnerProcessId);
+  const toolAlive = isRecordedProcessAlive(run?.toolProcessId);
+  if (runnerAlive || toolAlive) {
+    return null;
+  }
+
+  const completedAt = nowIso();
+  const cancelled = run?.cancelRequested === true;
+  const error = cancelled ? null : 'Detached runner disappeared before writing a result';
+  const result = {
+    completedAt,
+    exitCode: 1,
+    signal: null,
+    cancelled,
+    ...(error ? { error } : {}),
+  };
+
+  await writeRunResult(runId, result);
+  return await updateRun(runId, (current) => ({
+    ...current,
+    state: cancelled ? 'cancelled' : 'failed',
+    completedAt,
+    result,
+    failureReason: error,
+  })) || run;
 }
 
 function deriveRunStateFromResult(run, result) {
@@ -278,6 +407,40 @@ function buildForkSessionName(session) {
   return `fork - ${sourceName || 'session'}`;
 }
 
+function buildDelegatedSessionName(session, task) {
+  const taskLabel = buildTemporarySessionName(task, 48);
+  if (taskLabel) {
+    return `delegate - ${taskLabel}`;
+  }
+  const sourceName = typeof session?.name === 'string' ? session.name.trim() : '';
+  return `delegate - ${sourceName || 'session'}`;
+}
+
+function buildSessionNavigationHref(sessionId) {
+  const normalized = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!normalized) return '/?tab=sessions';
+  return `/?session=${encodeURIComponent(normalized)}&tab=sessions`;
+}
+
+function buildDelegationNoticeMessage(task, childSession) {
+  const normalizedTask = clipCompactionSection(task, 240)
+    .replace(/\s+/g, ' ')
+    .trim();
+  const childName = typeof childSession?.name === 'string'
+    ? childSession.name.trim()
+    : 'new session';
+  const childId = typeof childSession?.id === 'string' ? childSession.id.trim() : '';
+  const link = childId ? `[${childName}](${buildSessionNavigationHref(childId)})` : childName;
+  return [
+    'Spawned a parallel session for this work.',
+    '',
+    normalizedTask ? `- Task: ${normalizedTask}` : '',
+    `- Session: ${link}`,
+    '',
+    'This new session is independent and can continue on its own.',
+  ].filter(Boolean).join('\n');
+}
+
 function normalizeSessionAppName(value) {
   if (typeof value !== 'string') return '';
   return value.trim().replace(/\s+/g, ' ');
@@ -354,6 +517,248 @@ function sanitizeOriginalAttachmentName(value) {
   return basename.replace(/\s+/g, ' ').slice(0, 255);
 }
 
+function trimString(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function expandHomePath(value) {
+  const trimmed = trimString(value);
+  if (!trimmed) return '';
+  if (trimmed === '~') return homedir();
+  if (trimmed.startsWith('~/')) return resolve(homedir(), trimmed.slice(2));
+  return trimmed;
+}
+
+function pushUnique(values, candidate) {
+  const normalized = trimString(candidate);
+  if (!normalized || values.includes(normalized)) return false;
+  values.push(normalized);
+  return true;
+}
+
+function normalizeResultFilePathCandidate(value) {
+  let candidate = trimString(value);
+  if (!candidate) return '';
+  candidate = candidate.replace(/^file:\/\//i, '');
+  candidate = candidate.replace(/^[<('"`]+/, '').replace(/[>)'"`,;]+$/, '');
+  return candidate.trim();
+}
+
+function looksLikeResultFilePath(value) {
+  const candidate = normalizeResultFilePathCandidate(value);
+  if (!candidate || candidate.length > 4096) return false;
+  if (/^(https?:|data:|blob:)/i.test(candidate)) return false;
+  if (candidate.startsWith('/api/')) return false;
+  if (/[\r\n]/.test(candidate)) return false;
+  if (/[\\/]/.test(candidate) || candidate.startsWith('~/')) return true;
+  return /\.[a-z0-9]{1,8}$/i.test(candidate);
+}
+
+function tokenizeShellCommandLike(command) {
+  const tokens = [];
+  const source = typeof command === 'string' ? command : '';
+  const pattern = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`([^`]*)`|(\S+)/g;
+  for (const match of source.matchAll(pattern)) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? match[4] ?? '');
+  }
+  return tokens.filter(Boolean);
+}
+
+function normalizeSearchRootCandidate(value, fallbackRoot = '') {
+  const trimmed = expandHomePath(value);
+  if (!trimmed) return '';
+  const resolvedPath = isAbsolute(trimmed)
+    ? resolve(trimmed)
+    : (fallbackRoot ? resolve(fallbackRoot, trimmed) : '');
+  if (!resolvedPath) return '';
+  return extname(resolvedPath) ? dirname(resolvedPath) : resolvedPath;
+}
+
+function extractSearchRootsFromText(text, fallbackRoot = '') {
+  const roots = [];
+  const source = typeof text === 'string' ? text : '';
+  const matches = source.match(/(?:~\/|\/Users\/|\/home\/)[^\s"'`<>()]+/g) || [];
+  for (const match of matches) {
+    pushUnique(roots, normalizeSearchRootCandidate(match, fallbackRoot));
+  }
+  return roots;
+}
+
+function extractSearchRootsFromCommand(command, fallbackRoot = '') {
+  const roots = [];
+  const tokens = tokenizeShellCommandLike(command);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === 'cd' && tokens[index + 1]) {
+      pushUnique(roots, normalizeSearchRootCandidate(tokens[index + 1], fallbackRoot));
+      index += 1;
+      continue;
+    }
+    if (/^(?:~\/|\/Users\/|\/home\/)/.test(token)) {
+      pushUnique(roots, normalizeSearchRootCandidate(token, fallbackRoot));
+      continue;
+    }
+    if (/^[.]{1,2}\//.test(token) || token.includes('/')) {
+      pushUnique(roots, normalizeSearchRootCandidate(token, fallbackRoot));
+    }
+  }
+  return roots;
+}
+
+function collectResultFileSearchRoots(manifest, command = '') {
+  const roots = [];
+  for (const root of extractSearchRootsFromCommand(command, trimString(manifest?.folder))) {
+    pushUnique(roots, root);
+  }
+  for (const root of extractSearchRootsFromText(manifest?.prompt || '', trimString(manifest?.folder))) {
+    pushUnique(roots, root);
+  }
+  if (trimString(manifest?.folder)) {
+    pushUnique(roots, resolve(trimString(manifest.folder)));
+  }
+  return roots;
+}
+
+function extractResultFileCandidatesFromOutput(output = '') {
+  const candidates = [];
+  for (const rawLine of String(output || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const arrowMatch = line.match(/(?:→|->)\s*(.+)$/);
+    if (arrowMatch?.[1]) {
+      pushUnique(candidates, normalizeResultFilePathCandidate(arrowMatch[1]));
+      continue;
+    }
+    const toMatch = line.match(/\b(?:saved|written|exported|rendered|generated|output)\b.*?\bto\b\s+(.+)$/i);
+    if (toMatch?.[1]) {
+      pushUnique(candidates, normalizeResultFilePathCandidate(toMatch[1]));
+    }
+  }
+  return candidates.filter(looksLikeResultFilePath);
+}
+
+function extractCommandOutputPathCandidates(command = '') {
+  const candidates = [];
+  const tokens = tokenizeShellCommandLike(command);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (RESULT_FILE_COMMAND_OUTPUT_FLAGS.has(token) && tokens[index + 1]) {
+      pushUnique(candidates, normalizeResultFilePathCandidate(tokens[index + 1]));
+      index += 1;
+      continue;
+    }
+    const eqMatch = token.match(/^--(?:output|out|export)=(.+)$/);
+    if (eqMatch?.[1]) {
+      pushUnique(candidates, normalizeResultFilePathCandidate(eqMatch[1]));
+    }
+  }
+  return candidates.filter(looksLikeResultFilePath);
+}
+
+function isPathWithinRoot(filePath, root) {
+  const normalizedFile = resolve(filePath);
+  const normalizedRoot = resolve(root);
+  return normalizedFile === normalizedRoot || normalizedFile.startsWith(`${normalizedRoot}/`);
+}
+
+async function resolveExistingResultFilePath(candidate, searchRoots = [], minimumMtimeMs = 0) {
+  const normalized = normalizeResultFilePathCandidate(candidate);
+  if (!looksLikeResultFilePath(normalized)) return null;
+
+  const attempts = [];
+  const expanded = expandHomePath(normalized);
+  if (expanded && isAbsolute(expanded)) {
+    pushUnique(attempts, resolve(expanded));
+  } else {
+    for (const root of searchRoots) {
+      pushUnique(attempts, resolve(root, normalized));
+    }
+  }
+
+  const allowedRoots = [
+    ...searchRoots.map((root) => resolve(root)),
+    homedir(),
+  ];
+
+  for (const attempt of attempts) {
+    if (!allowedRoots.some((root) => isPathWithinRoot(attempt, root))) {
+      continue;
+    }
+    const stats = await statOrNull(attempt);
+    if (!stats?.isFile()) continue;
+    if (minimumMtimeMs > 0 && Number.isFinite(stats.mtimeMs) && stats.mtimeMs + 1000 < minimumMtimeMs) {
+      continue;
+    }
+    if (!Number.isFinite(stats.size) || stats.size <= 0) continue;
+    return attempt;
+  }
+  return null;
+}
+
+async function collectGeneratedResultFilesFromRun(run, manifest, normalizedEvents = []) {
+  const minimumMtimeMs = Date.parse(run?.startedAt || run?.createdAt || '') || 0;
+  const filesByPath = new Map();
+  let activeCommand = '';
+
+  for (const event of normalizedEvents || []) {
+    if (event?.type === 'tool_use' && event.toolName === 'bash') {
+      activeCommand = trimString(event.toolInput);
+      continue;
+    }
+    if (event?.type !== 'tool_result' || event.toolName !== 'bash') {
+      continue;
+    }
+    if (Number.isInteger(event.exitCode) && event.exitCode !== 0) {
+      activeCommand = '';
+      continue;
+    }
+
+    const searchRoots = collectResultFileSearchRoots(manifest, activeCommand);
+    const candidates = [
+      ...extractResultFileCandidatesFromOutput(event.output || ''),
+      ...extractCommandOutputPathCandidates(activeCommand),
+    ];
+    activeCommand = '';
+
+    for (const candidate of candidates) {
+      const localPath = await resolveExistingResultFilePath(candidate, searchRoots, minimumMtimeMs);
+      if (!localPath || filesByPath.has(localPath)) continue;
+      const originalName = sanitizeOriginalAttachmentName(candidate) || basename(localPath);
+      filesByPath.set(localPath, {
+        localPath,
+        originalName,
+        mimeType: resolveAttachmentMimeType('', originalName || basename(localPath)),
+      });
+      if (filesByPath.size >= RESULT_FILE_MAX_ATTACHMENTS) {
+        return [...filesByPath.values()];
+      }
+    }
+  }
+
+  return [...filesByPath.values()];
+}
+
+function normalizePublishedResultAssetAttachments(assets = []) {
+  return (assets || [])
+    .map((asset) => {
+      const assetId = trimString(asset?.assetId || asset?.id);
+      if (!assetId) return null;
+      const originalName = sanitizeOriginalAttachmentName(asset?.originalName || '');
+      return {
+        assetId,
+        ...(originalName ? { originalName } : {}),
+        mimeType: resolveAttachmentMimeType(asset?.mimeType, originalName),
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildResultAssetReadyMessage(attachments = []) {
+  return attachments.length === 1
+    ? 'Generated file ready to download.'
+    : 'Generated files ready to download.';
+}
+
 function resolveAttachmentMimeType(mimeType, originalName = '') {
   const normalizedMimeType = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
   if (normalizedMimeType) {
@@ -375,23 +780,19 @@ function resolveAttachmentExtension(mimeType, originalName = '') {
   return '.bin';
 }
 
-function getAttachmentDisplayName(attachment) {
-  const originalName = sanitizeOriginalAttachmentName(attachment?.originalName || '');
-  if (originalName) return originalName;
-  return typeof attachment?.filename === 'string' ? attachment.filename : '';
-}
-
 function sanitizeQueuedFollowUpAttachments(images) {
   return (images || [])
     .map((image) => {
       const filename = typeof image?.filename === 'string' ? image.filename.trim() : '';
       const savedPath = typeof image?.savedPath === 'string' ? image.savedPath.trim() : '';
+      const assetId = typeof image?.assetId === 'string' ? image.assetId.trim() : '';
       const originalName = sanitizeOriginalAttachmentName(image?.originalName || '');
       const mimeType = resolveAttachmentMimeType(image?.mimeType, originalName || filename);
-      if (!filename || !savedPath) return null;
+      if (!savedPath && !assetId) return null;
       return {
-        filename,
-        savedPath,
+        ...(filename ? { filename } : {}),
+        ...(savedPath ? { savedPath } : {}),
+        ...(assetId ? { assetId } : {}),
         ...(originalName ? { originalName } : {}),
         mimeType,
       };
@@ -405,7 +806,28 @@ function sanitizeQueuedFollowUpOptions(options = {}) {
   if (typeof options.model === 'string' && options.model.trim()) next.model = options.model.trim();
   if (typeof options.effort === 'string' && options.effort.trim()) next.effort = options.effort.trim();
   if (options.thinking === true) next.thinking = true;
+  const sourceContext = normalizeSourceContext(options.sourceContext);
+  if (sourceContext) next.sourceContext = sourceContext;
   return next;
+}
+
+function buildQueuedFollowUpSourceContext(queue = []) {
+  if (!Array.isArray(queue) || queue.length === 0) return null;
+  if (queue.length === 1) {
+    return normalizeSourceContext(queue[0]?.sourceContext);
+  }
+  const queuedMessages = queue
+    .map((entry) => {
+      const sourceContext = normalizeSourceContext(entry?.sourceContext);
+      if (!sourceContext) return null;
+      const requestId = typeof entry?.requestId === 'string' ? entry.requestId.trim() : '';
+      return {
+        ...(requestId ? { requestId } : {}),
+        sourceContext,
+      };
+    })
+    .filter(Boolean);
+  return queuedMessages.length > 0 ? { queuedMessages } : null;
 }
 
 function serializeQueuedFollowUp(entry) {
@@ -414,9 +836,10 @@ function serializeQueuedFollowUp(entry) {
     text: typeof entry?.text === 'string' ? entry.text : '',
     queuedAt: typeof entry?.queuedAt === 'string' ? entry.queuedAt : '',
     images: (entry?.images || []).map((image) => ({
-      filename: image.filename,
-      originalName: image.originalName,
-      mimeType: image.mimeType,
+      ...(image?.filename ? { filename: image.filename } : {}),
+      ...(image?.assetId ? { assetId: image.assetId } : {}),
+      ...(image?.originalName ? { originalName: image.originalName } : {}),
+      ...(image?.mimeType ? { mimeType: image.mimeType } : {}),
     })),
   };
 }
@@ -459,10 +882,8 @@ function formatQueuedFollowUpTextEntry(entry, index) {
       lines.push(text);
     }
   }
-  const attachmentNames = (entry?.images || []).map((image) => getAttachmentDisplayName(image)).filter(Boolean);
-  if (attachmentNames.length > 0) {
-    lines.push(`[Attached files: ${attachmentNames.join(', ')}]`);
-  }
+  const attachmentLine = formatAttachmentContextLine(entry?.images);
+  if (attachmentLine) lines.push(attachmentLine);
   return lines.join('\n');
 }
 
@@ -553,6 +974,7 @@ async function flushQueuedFollowUps(sessionId) {
     const dispatchText = buildQueuedFollowUpDispatchText(queue);
     const transcriptText = buildQueuedFollowUpTranscriptText(queue);
     const dispatchOptions = resolveQueuedFollowUpDispatchOptions(queue, rawSession);
+    const queuedSourceContext = buildQueuedFollowUpSourceContext(queue);
 
     await submitHttpMessage(sessionId, dispatchText, [], {
       requestId: createInternalRequestId('queued_batch'),
@@ -560,6 +982,7 @@ async function flushQueuedFollowUps(sessionId) {
       model: dispatchOptions.model,
       effort: dispatchOptions.effort,
       thinking: dispatchOptions.thinking,
+      ...(queuedSourceContext ? { sourceContext: queuedSourceContext } : {}),
       preSavedAttachments: queue.flatMap((entry) => sanitizeQueuedFollowUpAttachments(entry.images)),
       recordedUserText: transcriptText,
       queueIfBusy: false,
@@ -656,6 +1079,12 @@ function shouldExposeSession(meta) {
   return !isInternalSession(meta);
 }
 
+function isTaskCardEnabledForSession(meta) {
+  if (!meta || isInternalSession(meta)) return false;
+  if (normalizeSessionTaskCard(meta.taskCard)) return true;
+  return resolveEffectiveAppId(meta.appId) === WELCOME_APP_ID;
+}
+
 function ensureLiveSession(sessionId) {
   let live = liveSessions.get(sessionId);
   if (!live) {
@@ -670,6 +1099,9 @@ function stopObservedRun(runId) {
   if (!observed) return;
   if (observed.timer) {
     clearTimeout(observed.timer);
+  }
+  if (observed.poller) {
+    clearInterval(observed.poller);
   }
   try {
     observed.watcher?.close();
@@ -724,7 +1156,13 @@ function observeDetachedRun(sessionId, runId) {
       console.error(`[runs] observer error for ${runId}: ${error.message}`);
       stopObservedRun(runId);
     });
-    observedRuns.set(runId, { sessionId, watcher, timer: null });
+    const poller = setInterval(() => {
+      scheduleObservedRunSync(runId, 0);
+    }, OBSERVED_RUN_POLL_INTERVAL_MS);
+    if (typeof poller.unref === 'function') {
+      poller.unref();
+    }
+    observedRuns.set(runId, { sessionId, watcher, timer: null, poller });
     scheduleObservedRunSync(runId, 0);
     return true;
   } catch (error) {
@@ -733,7 +1171,240 @@ function observeDetachedRun(sessionId, runId) {
   }
 }
 
-async function saveAttachments(images) {
+function parseRecordTimestamp(record) {
+  const parsed = Date.parse(record?.ts || '');
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isUserMessageEvent(event) {
+  return event?.type === 'message' && event.role === 'user';
+}
+
+function dropActiveRunGeneratedHistoryEvents(history = [], activeRunId = '') {
+  if (!activeRunId) return Array.isArray(history) ? history : [];
+  return (Array.isArray(history) ? history : []).filter((event) => {
+    if (event?.runId !== activeRunId) return true;
+    return isUserMessageEvent(event);
+  });
+}
+
+function withSyntheticSeqs(events = [], baseSeq = 0) {
+  let nextSeq = Number.isInteger(baseSeq) && baseSeq > 0 ? baseSeq : 0;
+  return (Array.isArray(events) ? events : []).map((event) => {
+    nextSeq += 1;
+    return {
+      ...event,
+      seq: nextSeq,
+    };
+  });
+}
+
+async function collectNormalizedRunEvents(run, manifest) {
+  const runtimeInvocation = await createToolInvocation(manifest.tool, '', {
+    model: manifest.options?.model,
+    effort: manifest.options?.effort,
+    thinking: manifest.options?.thinking,
+  });
+  const { adapter } = runtimeInvocation;
+  const spoolRecords = await readRunSpoolRecords(run.id);
+  const normalizedEvents = [];
+  let stdoutLineCount = 0;
+  let lastRecordTimestamp = null;
+
+  for (const record of spoolRecords) {
+    if (record?.stream !== 'stdout') continue;
+    const line = await materializeRunSpoolLine(run.id, record);
+    if (!line) continue;
+    stdoutLineCount += 1;
+    const stableTimestamp = parseRecordTimestamp(record);
+    if (Number.isInteger(stableTimestamp)) {
+      lastRecordTimestamp = stableTimestamp;
+    }
+    const parsedEvents = adapter.parseLine(line).map((event) => ({
+      ...event,
+      ...(Number.isInteger(stableTimestamp) ? { timestamp: stableTimestamp } : {}),
+    }));
+    normalizedEvents.push(...normalizeRunEvents(run, parsedEvents));
+  }
+
+  const flushedEvents = adapter.flush().map((event) => ({
+    ...event,
+    ...(Number.isInteger(lastRecordTimestamp) ? { timestamp: lastRecordTimestamp } : {}),
+  }));
+  normalizedEvents.push(...normalizeRunEvents(run, flushedEvents));
+
+  const preview = spoolRecords
+    .filter((record) => ['stdout', 'stderr', 'error'].includes(record.stream))
+    .map((record) => {
+      if (record?.json && typeof record.json === 'object') {
+        try {
+          return clipFailurePreview(JSON.stringify(record.json));
+        } catch {}
+      }
+      return typeof record?.line === 'string' ? clipFailurePreview(record.line) : '';
+    })
+    .filter(Boolean)
+    .slice(-3)
+    .join(' | ');
+
+  return {
+    runtimeInvocation,
+    normalizedEvents,
+    stdoutLineCount,
+    preview,
+  };
+}
+
+async function buildSessionTimelineEvents(sessionId, options = {}) {
+  const includeBodies = options.includeBodies !== false;
+  const history = await loadHistory(sessionId, { includeBodies });
+  const sessionMeta = options.sessionMeta || await findSessionMeta(sessionId);
+  const activeRunId = typeof sessionMeta?.activeRunId === 'string' ? sessionMeta.activeRunId.trim() : '';
+  if (!activeRunId) {
+    return history;
+  }
+
+  const run = await getRun(activeRunId);
+  if (!run || run.finalizedAt) {
+    return history;
+  }
+
+  const manifest = await getRunManifest(activeRunId);
+  if (!manifest) {
+    return history;
+  }
+
+  const projected = await collectNormalizedRunEvents(run, manifest);
+  if (projected.normalizedEvents.length === 0) {
+    return dropActiveRunGeneratedHistoryEvents(history, activeRunId);
+  }
+
+  const committedLatestSeq = history.reduce(
+    (maxSeq, event) => (Number.isInteger(event?.seq) && event.seq > maxSeq ? event.seq : maxSeq),
+    0,
+  );
+
+  return [
+    ...dropActiveRunGeneratedHistoryEvents(history, activeRunId),
+    ...withSyntheticSeqs(projected.normalizedEvents, committedLatestSeq),
+  ];
+}
+
+async function syncDetachedRunUnlocked(sessionId, runId) {
+  let run = await getRun(runId);
+  if (!run) {
+    stopObservedRun(runId);
+    return null;
+  }
+  const manifest = await getRunManifest(runId);
+  if (!manifest) return run;
+
+  let historyChanged = false;
+  let sessionChanged = false;
+
+  const projection = await collectNormalizedRunEvents(run, manifest);
+  const normalizedEvents = projection.normalizedEvents;
+  const latestUsage = [...normalizedEvents].reverse().find((event) => event.type === 'usage');
+  const contextInputTokens = Number.isInteger(latestUsage?.contextTokens)
+    ? latestUsage.contextTokens
+    : null;
+  const contextWindowTokens = Number.isInteger(latestUsage?.contextWindowTokens)
+    ? latestUsage.contextWindowTokens
+    : null;
+
+  run = await updateRun(runId, (current) => ({
+    ...current,
+    normalizedLineCount: projection.stdoutLineCount,
+    normalizedEventCount: normalizedEvents.length,
+    lastNormalizedAt: nowIso(),
+    ...(Number.isInteger(contextInputTokens) ? { contextInputTokens } : {}),
+    ...(Number.isInteger(contextWindowTokens) ? { contextWindowTokens } : {}),
+  })) || run;
+
+  if (run.claudeSessionId || run.codexThreadId) {
+    sessionChanged = await persistResumeIds(sessionId, run.claudeSessionId, run.codexThreadId) || sessionChanged;
+  }
+
+  const isStructuredRuntime = projection.runtimeInvocation.isClaudeFamily || projection.runtimeInvocation.isCodexFamily;
+  let result = await getRunResult(runId);
+  if (!result && !isTerminalRunState(run.state)) {
+    const reconciled = await synthesizeDetachedRunTermination(runId, run);
+    if (reconciled) {
+      run = reconciled;
+      result = await getRunResult(runId);
+    }
+  }
+  const inferredState = deriveRunStateFromResult(run, result);
+  const completedAt = typeof result?.completedAt === 'string' && result.completedAt
+    ? result.completedAt
+    : null;
+  const zeroStructuredOutputReason = (
+    isStructuredRuntime
+    && inferredState === 'completed'
+    && normalizedEvents.length === 0
+  )
+    ? await deriveStructuredRuntimeFailureReason(runId, projection.preview)
+    : null;
+
+  if (zeroStructuredOutputReason) {
+    run = await updateRun(runId, (current) => ({
+      ...current,
+      state: 'failed',
+      completedAt,
+      result,
+      failureReason: zeroStructuredOutputReason,
+    })) || run;
+  }
+
+  if (!isTerminalRunState(run.state)) {
+    if (inferredState && completedAt) {
+      run = await updateRun(runId, (current) => ({
+        ...current,
+        state: inferredState,
+        completedAt,
+        result,
+        failureReason: inferredState === 'failed'
+          ? deriveRunFailureReasonFromResult(current, result)
+          : null,
+      })) || run;
+    }
+  }
+
+  if (isTerminalRunState(run.state) && !run.finalizedAt) {
+    const finalized = await finalizeDetachedRun(sessionId, run, manifest, normalizedEvents);
+    historyChanged = historyChanged || finalized.historyChanged;
+    sessionChanged = sessionChanged || finalized.sessionChanged;
+    run = await getRun(runId) || run;
+  }
+
+  if (historyChanged || sessionChanged) {
+    broadcastSessionInvalidation(sessionId);
+  }
+  if (isTerminalRunState(run.state)) {
+    stopObservedRun(runId);
+  }
+  return run;
+}
+
+export async function resolveSavedAttachments(images) {
+  const resolved = await Promise.all((images || []).map(async (image) => {
+    const filename = typeof image?.filename === 'string' ? image.filename.trim() : '';
+    if (!filename || !/^[a-zA-Z0-9_-]+\.[a-z0-9]+$/.test(filename)) return null;
+    const savedPath = join(CHAT_IMAGES_DIR, filename);
+    if (!await pathExists(savedPath)) return null;
+    const originalName = sanitizeOriginalAttachmentName(image?.originalName || '');
+    const mimeType = resolveAttachmentMimeType(image?.mimeType, originalName || filename);
+    return {
+      filename,
+      savedPath,
+      ...(originalName ? { originalName } : {}),
+      mimeType,
+    };
+  }));
+  return resolved.filter(Boolean);
+}
+
+export async function saveAttachments(images) {
   if (!images || images.length === 0) return [];
   await ensureDir(CHAT_IMAGES_DIR);
   return Promise.all(images.map(async (img) => {
@@ -835,12 +1506,18 @@ function getSessionPinSortRank(meta) {
   return meta?.pinned === true ? 1 : 0;
 }
 
-async function enrichSessionMeta(meta) {
+function normalizeSessionReviewedAt(value) {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return '';
+  const time = Date.parse(trimmed);
+  return Number.isFinite(time) ? new Date(time).toISOString() : '';
+}
+
+async function enrichSessionMeta(meta, _options = {}) {
   const live = liveSessions.get(meta.id);
   const snapshot = await getHistorySnapshot(meta.id);
   const queuedCount = getFollowUpQueueCount(meta);
   const runActivity = await resolveSessionRunActivity(meta);
-  const boardPlacement = await getBoardPlacement(meta.id);
   const { followUpQueue, recentFollowUpRequestIds, activeRunId, activeRun, ...rest } = meta;
   const sourceId = resolveSessionSourceId(meta);
   return {
@@ -861,13 +1538,12 @@ async function enrichSessionMeta(meta) {
       run: runActivity.run,
       queuedCount,
     }),
-    ...(boardPlacement ? { board: boardPlacement } : {}),
   };
 }
 
 async function enrichSessionMetaForClient(meta, options = {}) {
   if (!meta) return null;
-  const session = await enrichSessionMeta(meta);
+  const session = await enrichSessionMeta(meta, options);
   if (options.includeQueuedMessages) {
     session.queuedMessages = getFollowUpQueue(meta).map(serializeQueuedFollowUp);
   }
@@ -1151,11 +1827,533 @@ function clipCompactionSection(value, maxChars = 12000) {
   return `${text.slice(0, headChars).trimEnd()}\n[... truncated by RemoteLab ...]\n${text.slice(-tailChars).trimStart()}`;
 }
 
+function buildDelegationHandoff({
+  source,
+  task,
+}) {
+  const normalizedTask = clipCompactionSection(task, 4000);
+  const sourceId = typeof source?.id === 'string' ? source.id.trim() : '';
+  const lines = [normalizedTask || '(no delegated task provided)'];
+  if (sourceId) {
+    lines.push('', `Parent session id: ${sourceId}`);
+  }
+  return lines.join('\n');
+}
+
 function extractTaggedBlock(content, tagName) {
   const text = typeof content === 'string' ? content : '';
   if (!text || !tagName) return '';
   const match = text.match(new RegExp(`<${tagName}>([\\s\\S]*?)<\/${tagName}>`, 'i'));
   return (match ? match[1] : '').trim();
+}
+
+function parseJsonObjectText(modelText) {
+  const text = typeof modelText === 'string' ? modelText.trim() : '';
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+  }
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+  try {
+    return JSON.parse(jsonMatch[0]);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeReplySelfCheckSetting(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return 'all';
+  if (['0', 'false', 'off', 'disabled', 'disable', 'none'].includes(normalized)) {
+    return 'off';
+  }
+  if (['1', 'true', 'on', 'enabled', 'enable', 'all'].includes(normalized)) {
+    return 'all';
+  }
+  return normalized;
+}
+
+async function shouldRunReplySelfCheck(session, run, manifest) {
+  if (!session?.id || !run?.id) return false;
+  if (manifest?.internalOperation) return false;
+  if (session.archived || isInternalSession(session)) return false;
+  if (run.state !== 'completed') return false;
+  const setting = normalizeReplySelfCheckSetting(process.env.REMOTELAB_REPLY_SELF_CHECK);
+  if (setting === 'off') return false;
+  if (setting === 'all') return true;
+  const toolDefinition = await getToolDefinitionAsync(run.tool || session.tool || '');
+  if (!toolDefinition) return false;
+  if (setting === 'micro-agent') {
+    return toolDefinition.id === 'micro-agent' || toolDefinition.toolProfile === 'micro-agent';
+  }
+  const enabledTools = new Set(setting.split(',').map((entry) => entry.trim()).filter(Boolean));
+  return enabledTools.has(toolDefinition.id || '') || enabledTools.has(toolDefinition.toolProfile || '');
+}
+
+function normalizeReplySelfCheckText(value) {
+  return String(value ?? '').replace(/\r\n/g, '\n').trim();
+}
+
+function clipReplySelfCheckText(value, maxChars = 5000) {
+  const text = normalizeReplySelfCheckText(value);
+  if (!text) return '';
+  if (text.length <= maxChars) return text;
+  const headChars = Math.max(1, Math.floor(maxChars * 0.6));
+  const tailChars = Math.max(1, maxChars - headChars);
+  return `${text.slice(0, headChars).trimEnd()}\n[... truncated by RemoteLab ...]\n${text.slice(-tailChars).trimStart()}`;
+}
+
+function formatReplySelfCheckDisplayEvent(event) {
+  if (!event || typeof event !== 'object') return '';
+  if (event.type === 'message' && event.role === 'assistant') {
+    return normalizeReplySelfCheckText(event.content || '');
+  }
+  if (event.type === 'thinking_block') {
+    const label = normalizeReplySelfCheckText(event.label || 'Thought');
+    return label ? `[Displayed thought block: ${label}]` : '[Displayed thought block]';
+  }
+  if (event.type === 'status') {
+    const content = normalizeReplySelfCheckText(event.content || '');
+    return content ? `[Displayed status: ${content}]` : '';
+  }
+  return '';
+}
+
+function buildReplySelfCheckDisplayedAssistantTurn(history = []) {
+  const displayEvents = buildSessionDisplayEvents(history, { sessionRunning: false });
+  const parts = [];
+  for (const event of displayEvents) {
+    if (event?.type === 'message' && event.role === 'user') continue;
+    const text = formatReplySelfCheckDisplayEvent(event);
+    if (text) {
+      parts.push(text);
+    }
+  }
+  return parts.join('\n\n').trim();
+}
+
+async function loadReplySelfCheckTurnContext(sessionId, runId) {
+  const history = await loadHistory(sessionId, { includeBodies: true });
+  const runHistory = [];
+  let userMessage = null;
+  let latestAssistantMessage = null;
+
+  for (const event of history) {
+    if (runId && event?.runId !== runId) continue;
+    runHistory.push(event);
+    if (event?.type === 'message' && event.role === 'user') {
+      userMessage = event;
+      continue;
+    }
+    if (event?.type === 'message' && event.role === 'assistant') {
+      latestAssistantMessage = event;
+    }
+  }
+
+  const turnHistory = Number.isInteger(userMessage?.seq)
+    ? runHistory.filter((event) => !Number.isInteger(event?.seq) || event.seq >= userMessage.seq)
+    : runHistory;
+  const assistantTurnText = buildReplySelfCheckDisplayedAssistantTurn(turnHistory)
+    || normalizeReplySelfCheckText(latestAssistantMessage?.content || '');
+
+  return {
+    userMessage,
+    assistantTurnText,
+  };
+}
+
+function summarizeReplySelfCheckReason(value, fallback = REPLY_SELF_CHECK_DEFAULT_REASON) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return fallback;
+  if (text.length <= 160) return text;
+  return `${text.slice(0, 157).trimEnd()}…`;
+}
+
+async function runDetachedAssistantPrompt(sessionMeta, prompt, options = {}) {
+  const {
+    folder,
+    tool,
+    model,
+    effort,
+    thinking,
+  } = sessionMeta;
+
+  if (!tool) {
+    throw new Error('Detached assistant prompt requires an explicit tool');
+  }
+
+  const invocation = await createToolInvocation(tool, prompt, {
+    dangerouslySkipPermissions: true,
+    model: options.model ?? model,
+    effort: options.effort ?? effort,
+    thinking: options.thinking ?? thinking,
+    systemPrefix: Object.prototype.hasOwnProperty.call(options, 'systemPrefix')
+      ? options.systemPrefix
+      : '',
+    developerInstructions: options.developerInstructions,
+  });
+  const resolvedCmd = await resolveCommand(invocation.command);
+  const resolvedFolder = resolveCwd(folder);
+  const env = buildToolProcessEnv();
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(resolvedCmd, invocation.args, {
+      cwd: resolvedFolder,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    proc.stdin.end();
+
+    const rl = createInterface({ input: proc.stdout });
+    const textParts = [];
+
+    rl.on('line', (line) => {
+      const events = invocation.adapter.parseLine(line);
+      for (const evt of events) {
+        if (evt.type === 'message' && evt.role === 'assistant') {
+          textParts.push(evt.content || '');
+        }
+      }
+    });
+
+    proc.on('error', reject);
+
+    proc.on('exit', (code) => {
+      const raw = textParts.join('\n').trim();
+      if (code !== 0 && !raw) {
+        reject(new Error(`${tool} exited with code ${code}`));
+        return;
+      }
+      resolve(raw);
+    });
+  });
+}
+
+function normalizeVoiceTranscriptRewriteText(value) {
+  return String(value ?? '').replace(/\r\n/g, '\n').trim();
+}
+
+function clipVoiceTranscriptRewriteText(value, maxChars = 1200) {
+  const text = normalizeVoiceTranscriptRewriteText(value);
+  if (!text) return '';
+  if (text.length <= maxChars) return text;
+  const headChars = Math.max(1, Math.floor(maxChars * 0.65));
+  const tailChars = Math.max(1, maxChars - headChars);
+  return `${text.slice(0, headChars).trimEnd()}\n[… clipped …]\n${text.slice(-tailChars).trimStart()}`;
+}
+
+function formatVoiceTranscriptRewriteImages(images = []) {
+  return formatAttachmentContextLine(images);
+}
+
+function formatVoiceTranscriptRewriteDiscussionEvent(event) {
+  if (!(event && event.type === 'message')) return '';
+  const label = event.role === 'assistant' ? 'Assistant' : 'User';
+  const parts = [];
+  const content = clipVoiceTranscriptRewriteText(event.content, 700);
+  const imageLine = formatVoiceTranscriptRewriteImages(event.images);
+  if (content) parts.push(content);
+  if (imageLine) parts.push(imageLine);
+  if (parts.length === 0) return '';
+  return `[${label}]\n${parts.join('\n')}`;
+}
+
+async function loadVoiceTranscriptRewriteMemoryContext() {
+  const entries = [
+    { label: 'Collaboration bootstrap', path: VOICE_TRANSCRIPT_REWRITE_BOOTSTRAP_FILE, maxChars: 2600 },
+    { label: 'Project pointers', path: VOICE_TRANSCRIPT_REWRITE_PROJECTS_FILE, maxChars: 2200 },
+  ];
+  const parts = [];
+
+  for (const entry of entries) {
+    try {
+      const text = clipVoiceTranscriptRewriteText(await readFile(entry.path, 'utf8'), entry.maxChars);
+      if (text) {
+        parts.push(`${entry.label}:\n${text}`);
+      }
+    } catch {}
+  }
+
+  return parts.join('\n\n');
+}
+
+async function loadVoiceTranscriptRewriteSessionContext(sessionId, sessionMeta = null) {
+  const latestSeq = Number.isInteger(sessionMeta?.latestSeq) ? sessionMeta.latestSeq : 0;
+  const fromSeq = latestSeq > 0
+    ? Math.max(1, latestSeq - VOICE_TRANSCRIPT_REWRITE_RECENT_HISTORY_WINDOW + 1)
+    : 1;
+  const [contextHead, recentEvents] = await Promise.all([
+    getContextHead(sessionId).catch(() => null),
+    loadHistory(sessionId, {
+      fromSeq,
+      includeBodies: true,
+    }).catch(() => []),
+  ]);
+
+  const parts = [];
+  const summary = clipVoiceTranscriptRewriteText(
+    typeof contextHead?.summary === 'string' ? contextHead.summary : '',
+    VOICE_TRANSCRIPT_REWRITE_SESSION_SUMMARY_MAX_CHARS,
+  );
+  if (summary) {
+    parts.push(`Current session summary:\n${summary}`);
+  }
+
+  const recentDiscussion = recentEvents
+    .filter((event) => event?.type === 'message' && (event.role === 'user' || event.role === 'assistant'))
+    .slice(-VOICE_TRANSCRIPT_REWRITE_RECENT_MESSAGE_LIMIT)
+    .map(formatVoiceTranscriptRewriteDiscussionEvent)
+    .filter(Boolean)
+    .join('\n\n');
+  if (recentDiscussion) {
+    parts.push(`Recent discussion:\n${clipVoiceTranscriptRewriteText(recentDiscussion, VOICE_TRANSCRIPT_REWRITE_RECENT_DISCUSSION_MAX_CHARS)}`);
+  }
+
+  return parts.join('\n\n');
+}
+
+function buildVoiceTranscriptRewritePrompt(sessionMeta, transcript, memoryContext, sessionContext, options = {}) {
+  const languageHint = normalizeVoiceTranscriptRewriteText(options.language) || DEFAULT_VOICE_TRANSCRIPT_REWRITE_LANGUAGE_HINT;
+  return [
+    'You are cleaning up automatic speech recognition text for a RemoteLab chat composer.',
+    'Rewrite the raw transcript into the message the speaker most likely intended.',
+    'Use stable collaboration memory plus the current session summary and recent discussion to disambiguate names, terms, references, and obvious ASR mistakes.',
+    'Prefer the current session context when it clearly resolves a reference.',
+    'Prefer English technical/product terms, repo names, commands, paths, and identifiers when the project context strongly supports them, even if the raw transcript rendered them phonetically or as odd Chinese words.',
+    'If the transcript contains suspicious out-of-domain words, duplicated near-synonyms, or two conflicting terms for what is probably one concept, treat that as a likely ASR error and resolve it to the single most plausible intended term from context.',
+    'Preserve exact casing, spelling, and formatting for supported technical names when you can infer them confidently from context.',
+    'Allow light fluency smoothing: merge broken fragments, remove accidental repetitions, fix punctuation, and make the sentence sound natural without changing meaning.',
+    'Keep the same meaning, tone, and request.',
+    'Do not answer the request, summarize the conversation, or add any new facts, steps, or conclusions that are not already supported by the raw transcript or the context provided here.',
+    'If something is uncertain, stay close to the raw transcript instead of guessing.',
+    'Keep the result concise and chat-ready.',
+    'Return only the final cleaned transcript.',
+    '',
+    languageHint ? `Language hint: ${languageHint}` : '',
+    sessionMeta?.appName ? `Session app: ${sessionMeta.appName}` : '',
+    sessionMeta?.sourceName ? `Session source: ${sessionMeta.sourceName}` : '',
+    sessionMeta?.folder ? `Working folder: ${sessionMeta.folder}` : '',
+    memoryContext ? `Persistent collaboration memory:\n${memoryContext}` : 'Persistent collaboration memory: [none]',
+    sessionContext ? `Current session context:\n${sessionContext}` : 'Current session context: [none]',
+    '',
+    'Raw ASR transcript:',
+    transcript,
+    '',
+    'Final cleaned transcript:',
+  ].filter(Boolean).join('\n');
+}
+
+function normalizeVoiceTranscriptRewriteOutput(value) {
+  let text = normalizeVoiceTranscriptRewriteText(value);
+  if (!text) return '';
+  text = text
+    .replace(/^```[a-z0-9_-]*\n?/i, '')
+    .replace(/\n?```$/i, '')
+    .replace(/^(final rewritten transcript|rewritten transcript|transcript)\s*:\s*/i, '')
+    .trim();
+  const quotedMatch = text.match(/^["“](.*)["”]$/s);
+  if (quotedMatch?.[1]) {
+    text = quotedMatch[1].trim();
+  }
+  return text;
+}
+
+export async function rewriteVoiceTranscriptForSession(sessionId, transcript, options = {}) {
+  const rawTranscript = normalizeVoiceTranscriptRewriteText(transcript);
+  if (!rawTranscript) {
+    return {
+      transcript: '',
+      changed: false,
+      skipped: 'empty_transcript',
+    };
+  }
+
+  const sessionMeta = await findSessionMeta(sessionId);
+  if (!sessionMeta?.tool) {
+    return {
+      transcript: rawTranscript,
+      changed: false,
+      skipped: 'session_tool_unavailable',
+    };
+  }
+
+  const [memoryContext, sessionContext] = await Promise.all([
+    loadVoiceTranscriptRewriteMemoryContext(),
+    loadVoiceTranscriptRewriteSessionContext(sessionId, sessionMeta),
+  ]);
+  const rewritten = normalizeVoiceTranscriptRewriteOutput(await runDetachedAssistantPrompt({
+    ...sessionMeta,
+    effort: 'low',
+    thinking: false,
+  }, buildVoiceTranscriptRewritePrompt(sessionMeta, rawTranscript, memoryContext, sessionContext, options), {
+    developerInstructions: VOICE_TRANSCRIPT_REWRITE_DEVELOPER_INSTRUCTIONS,
+    systemPrefix: '',
+  }));
+
+  if (!rewritten) {
+    return {
+      transcript: rawTranscript,
+      changed: false,
+      skipped: 'empty_rewrite',
+    };
+  }
+
+  return {
+    transcript: rewritten,
+    changed: rewritten !== rawTranscript,
+    tool: sessionMeta.tool,
+    model: sessionMeta.model || '',
+  };
+}
+
+function buildReplySelfCheckPrompt({ userMessage, assistantTurnText }) {
+  return [
+    'You are RemoteLab\'s hidden end-of-turn completion reviewer.',
+    'Judge only whether the latest assistant reply stopped too early for the current user turn.',
+    'Unless the reply clearly completed the requested work or hit a real blocker, prefer "continue".',
+    'When uncertain between "accept" and "continue", choose "continue".',
+    'If there is no explicit user-side blocker, assume the assistant should continue with the obvious next step.',
+    'Accept only when the reply already reaches a meaningful stopping point for this turn or it clearly states the exact blocker that truly requires the user.',
+    'Real blockers are explicit user-side dependencies such as missing required input, genuine ambiguity that prevents safe progress, missing access / credentials / files, or destructive / irreversible actions that need confirmation.',
+    'Do not treat optional clarification, extra polish, or the assistant\'s own caution as blockers.',
+    'A reply that ends with an open offer or permission request such as "if you want I can...", "I can do that next", or "let me know and I\'ll continue" is never a meaningful stopping point by itself and must be marked "continue" unless the same reply clearly states a real blocker.',
+    'If the only remaining work is something the assistant could already do with the current context, you must choose "continue".',
+    'Strong continue signals include: promising to do the next step later, asking permission to continue without a real blocker, offering to continue if the user wants, summarizing a plan while leaving the requested action undone, or stopping after analysis when execution was still possible.',
+    'Do not require extra artifacts the user did not ask for. Conceptual discussion can already be complete when the user asked only for discussion.',
+    'Return exactly one <hide> JSON object with keys "action", "reason", and "continuationPrompt".',
+    'Valid actions: "accept" or "continue".',
+    'If action is "accept", set continuationPrompt to an empty string.',
+    'If action is "continue", continuationPrompt must tell the next assistant how to finish the missing work immediately without asking permission and without repeating the whole previous reply.',
+    'Write reason and continuationPrompt in the user\'s language.',
+    'Do not output any text outside the <hide> block.',
+    '',
+    'Current user message:',
+    clipReplySelfCheckText(userMessage?.content || '', 3000) || '[none]',
+    '',
+    'Latest assistant turn content shown to the user:',
+    clipReplySelfCheckText(assistantTurnText || '', 5000) || '[none]',
+  ].join('\n');
+}
+
+function parseReplySelfCheckDecision(content) {
+  const hidden = extractTaggedBlock(content, 'hide');
+  const parsed = parseJsonObjectText(hidden || content);
+  const rawAction = String(parsed?.action || '').trim().toLowerCase();
+  const action = rawAction === 'accept'
+    ? 'accept'
+    : 'continue';
+  return {
+    action,
+    reason: summarizeReplySelfCheckReason(parsed?.reason || ''),
+    continuationPrompt: action === 'continue' ? String(parsed?.continuationPrompt || '').trim() : '',
+  };
+}
+
+function buildReplySelfRepairPrompt({ userMessage, assistantTurnText, reviewDecision }) {
+  const continuationPrompt = String(reviewDecision?.continuationPrompt || '').trim();
+  const reason = summarizeReplySelfCheckReason(reviewDecision?.reason || 'finish the missing work now');
+  return [
+    'You are continuing the same user-facing reply after a hidden self-check found an avoidable early stop.',
+    'The previous assistant reply is already visible to the user.',
+    'Add only the missing completion now.',
+    'Default to taking the obvious next step with the information already available.',
+    'Prefer doing the work over describing what you would do.',
+    'Replace any prior open offer or permission request with the actual next action or result now.',
+    'Do not ask for permission to continue.',
+    'Do not mention the hidden self-check or internal review process.',
+    'Do not end with another open offer such as "if you want I can continue" or "I can do that next".',
+    'Only stop if a concrete user-side blocker truly prevents safe progress.',
+    'If you still truly need user input, state exactly what is missing and why it is required.',
+    '',
+    'Original user message:',
+    clipReplySelfCheckText(userMessage?.content || '', 3000) || '[none]',
+    '',
+    'Previous assistant turn content already shown to the user:',
+    clipReplySelfCheckText(assistantTurnText || '', 5000) || '[none]',
+    '',
+    'Hidden reviewer guidance:',
+    continuationPrompt || `Finish the missing work now. Reviewer reason: ${reason}`,
+    '',
+    'Return only the next user-visible assistant message.',
+  ].join('\n');
+}
+
+async function maybeRunReplySelfCheck(sessionId, session, run, manifest) {
+  if (!await shouldRunReplySelfCheck(session, run, manifest)) {
+    return false;
+  }
+  const latestSession = await getSession(sessionId);
+  if (!latestSession || latestSession.activeRunId || getSessionQueueCount(latestSession) > 0) {
+    return false;
+  }
+
+  const { userMessage, assistantTurnText } = await loadReplySelfCheckTurnContext(sessionId, run.id);
+  if (!assistantTurnText) {
+    return false;
+  }
+
+  await appendEvent(sessionId, statusEvent(REPLY_SELF_CHECK_REVIEWING_STATUS));
+  broadcastSessionInvalidation(sessionId);
+
+  let reviewText = '';
+  try {
+    reviewText = await runDetachedAssistantPrompt({
+      id: sessionId,
+      folder: session.folder,
+      tool: run.tool || session.tool,
+      model: run.model || undefined,
+      effort: run.effort || undefined,
+      thinking: false,
+    }, buildReplySelfCheckPrompt({ userMessage, assistantTurnText }));
+  } catch (error) {
+    await appendEvent(sessionId, statusEvent(`Assistant self-check: review failed — ${summarizeReplySelfCheckReason(error.message, 'background reviewer error')}`));
+    broadcastSessionInvalidation(sessionId);
+    return false;
+  }
+
+  const reviewDecision = parseReplySelfCheckDecision(reviewText);
+  const refreshed = await getSession(sessionId);
+  if (!refreshed || refreshed.activeRunId || getSessionQueueCount(refreshed) > 0) {
+    await appendEvent(sessionId, statusEvent('Assistant self-check: skipped automatic continuation because new work arrived first.'));
+    broadcastSessionInvalidation(sessionId);
+    return false;
+  }
+
+  if (reviewDecision.action !== 'continue') {
+    await appendEvent(sessionId, statusEvent(REPLY_SELF_CHECK_ACCEPT_STATUS));
+    broadcastSessionInvalidation(sessionId);
+    return true;
+  }
+
+  const reason = summarizeReplySelfCheckReason(reviewDecision.reason, REPLY_SELF_CHECK_DEFAULT_REASON);
+  await appendEvent(sessionId, statusEvent(`Assistant self-check: continuing automatically — ${reason}`));
+  broadcastSessionInvalidation(sessionId);
+
+  try {
+    await sendMessage(sessionId, buildReplySelfRepairPrompt({
+      userMessage,
+      assistantTurnText,
+      reviewDecision,
+    }), [], {
+      tool: run.tool || session.tool,
+      model: run.model || undefined,
+      effort: run.effort || undefined,
+      thinking: !!run.thinking,
+      recordUserMessage: false,
+      queueIfBusy: false,
+      internalOperation: REPLY_SELF_REPAIR_INTERNAL_OPERATION,
+    });
+  } catch (error) {
+    await appendEvent(sessionId, statusEvent(`Assistant self-check: failed to continue automatically — ${summarizeReplySelfCheckReason(error.message, 'unable to launch follow-up reply')}`));
+    broadcastSessionInvalidation(sessionId);
+    return false;
+  }
+
+  return true;
 }
 
 function parseCompactionWorkerOutput(content) {
@@ -1254,11 +2452,7 @@ function clipCompactionEventText(value, maxChars = 4000) {
 }
 
 function formatCompactionAttachments(images) {
-  const refs = (images || [])
-    .map((img) => getAttachmentDisplayName(img))
-    .filter(Boolean);
-  if (refs.length === 0) return '';
-  return `[Attached files: ${refs.join(', ')}]`;
+  return formatAttachmentContextLine(images);
 }
 
 function formatCompactionMessage(evt) {
@@ -1468,13 +2662,151 @@ async function findLatestAssistantMessageForRun(sessionId, runId) {
   return null;
 }
 
-async function buildPrompt(sessionId, session, text, previousTool, effectiveTool, snapshot = null, options = {}) {
+async function maybeApplyAssistantTaskCard(sessionId, runId, session = null) {
+  const currentSession = session || await getSession(sessionId);
+  if (!currentSession || !isTaskCardEnabledForSession(currentSession)) {
+    return null;
+  }
+
+  const assistantEvent = await findLatestAssistantMessageForRun(sessionId, runId);
+  const taskCard = parseTaskCardFromAssistantContent(assistantEvent?.content || '');
+  if (!taskCard) return null;
+
+  return updateSessionTaskCard(sessionId, taskCard);
+}
+
+async function findResultAssetMessageForRun(sessionId, runId) {
+  const events = await loadHistory(sessionId, { includeBodies: false });
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== 'message' || event.role !== 'assistant') continue;
+    if (event?.source !== 'result_file_assets') continue;
+    if (event?.resultRunId !== runId) continue;
+    return event;
+  }
+  return null;
+}
+
+async function maybePublishRunResultAssets(sessionId, run, manifest, normalizedEvents) {
+  if (manifest?.internalOperation) {
+    return false;
+  }
+
+  let attachments = normalizePublishedResultAssetAttachments(run?.publishedResultAssets || []);
+  if (attachments.length === 0) {
+    const generatedFiles = await collectGeneratedResultFilesFromRun(run, manifest, normalizedEvents);
+    if (generatedFiles.length === 0) {
+      return false;
+    }
+
+    const publishedAssets = [];
+    for (const file of generatedFiles) {
+      try {
+        const published = await publishLocalFileAssetFromPath({
+          sessionId,
+          localPath: file.localPath,
+          originalName: file.originalName,
+          mimeType: file.mimeType,
+          createdBy: 'assistant',
+        });
+        publishedAssets.push({
+          assetId: published.id,
+          originalName: published.originalName || file.originalName,
+          mimeType: published.mimeType || file.mimeType,
+        });
+      } catch (error) {
+        console.error(`[result-file-assets] Failed to publish ${file.localPath}: ${error?.message || error}`);
+      }
+    }
+
+    if (publishedAssets.length === 0) {
+      return false;
+    }
+
+    const updatedRun = await updateRun(run.id, (current) => ({
+      ...current,
+      publishedResultAssets: Array.isArray(current.publishedResultAssets) && current.publishedResultAssets.length > 0
+        ? current.publishedResultAssets
+        : publishedAssets,
+      publishedResultAssetsAt: current.publishedResultAssetsAt || nowIso(),
+    })) || run;
+    attachments = normalizePublishedResultAssetAttachments(updatedRun.publishedResultAssets || publishedAssets);
+  }
+
+  if (attachments.length === 0) {
+    return false;
+  }
+  if (await findResultAssetMessageForRun(sessionId, run.id)) {
+    return false;
+  }
+
+  await appendEvent(sessionId, messageEvent('assistant', buildResultAssetReadyMessage(attachments), attachments, {
+    source: 'result_file_assets',
+    resultRunId: run.id,
+    ...(run.requestId ? { requestId: run.requestId } : {}),
+  }));
+  return true;
+}
+
+const MANAGER_TURN_POLICY_BLOCK = `Manager note: ${MANAGER_TURN_POLICY_REMINDER}`;
+
+function buildManagerTurnContextText(session, text = '') {
+  return [
+    MANAGER_TURN_POLICY_BLOCK,
+    buildTurnRoutingHint(text),
+    buildSessionAgreementsPromptBlock(session?.activeAgreements || []),
+    buildTaskCardPromptBlock(session?.taskCard),
+  ].filter(Boolean).join('\n\n');
+}
+
+function resolveResumeState(toolId, session, options = {}) {
+  if (options.freshThread === true) {
+    return {
+      hasResume: false,
+      claudeSessionId: null,
+      codexThreadId: null,
+    };
+  }
+
+  const tool = typeof toolId === 'string' ? toolId.trim() : '';
+  if (tool === 'claude') {
+    const claudeSessionId = session?.claudeSessionId || null;
+    return {
+      hasResume: !!claudeSessionId,
+      claudeSessionId,
+      codexThreadId: null,
+    };
+  }
+
+  if (tool === 'codex') {
+    const codexThreadId = session?.codexThreadId || null;
+    return {
+      hasResume: !!codexThreadId,
+      claudeSessionId: null,
+      codexThreadId,
+    };
+  }
+
+  return {
+    hasResume: false,
+    claudeSessionId: null,
+    codexThreadId: null,
+  };
+}
+
+function wrapPrivatePromptBlock(text) {
+  const normalized = typeof text === 'string' ? text.trim() : '';
+  if (!normalized) return '';
+  return ['<private>', normalized, '</private>'].join('\n');
+}
+
+export async function buildPrompt(sessionId, session, text, previousTool, effectiveTool, snapshot = null, options = {}) {
   const toolDefinition = await getToolDefinitionAsync(effectiveTool);
   const promptMode = toolDefinition?.promptMode === 'bare-user'
     ? 'bare-user'
     : 'default';
   const flattenPrompt = toolDefinition?.flattenPrompt === true;
-  const hasResume = !options.freshThread && (!!session.claudeSessionId || !!session.codexThreadId);
+  const { hasResume } = resolveResumeState(effectiveTool, session, options);
   let continuationContext = '';
   let contextToolIndex = '';
 
@@ -1497,15 +2829,29 @@ async function buildPrompt(sessionId, session, text, previousTool, effectiveTool
 
   let actualText = text;
   if (promptMode === 'default') {
+    const turnPrefix = wrapPrivatePromptBlock(buildManagerTurnContextText(session, text));
+    const turnSections = [];
+
     if (continuationContext) {
-      actualText = `${continuationContext}\n\n---\n\nCurrent user message:\n${text}`;
-    } else if (!hasResume) {
-      actualText = `User message:\n${text}`;
+      turnSections.push(continuationContext);
+      turnSections.push(TURN_ACTIVATION_CARD);
+      if (turnPrefix) turnSections.push(turnPrefix);
+      turnSections.push(`Current user message:\n${text}`);
+    } else {
+      turnSections.push(TURN_ACTIVATION_CARD);
+      if (turnPrefix) turnSections.push(turnPrefix);
+      turnSections.push(`${hasResume ? 'Current user message' : 'User message'}:\n${text}`);
     }
 
+    actualText = turnSections.join('\n\n---\n\n');
+
     if (!hasResume) {
-      const systemContext = await buildSystemContext();
+      const systemContext = await buildSystemContext({ sessionId });
       let preamble = systemContext;
+      const sourceRuntimePrompt = buildSourceRuntimePrompt(session);
+      if (sourceRuntimePrompt) {
+        preamble += `\n\n---\n\nSource/runtime instructions (backend-owned for this session source):\n${sourceRuntimePrompt}`;
+      }
       if (session.systemPrompt) {
         preamble += `\n\n---\n\nApp instructions (follow these for this session):\n${session.systemPrompt}`;
       }
@@ -1587,109 +2933,6 @@ function scheduleSessionWorkflowStateSuggestion(session, run) {
     });
   }).catch((error) => {
     console.error(`[workflow-state] Failed to update workflow state for ${session.id?.slice(0, 8)}: ${error.message}`);
-  });
-
-  return true;
-}
-
-function chooseBoardLayoutAnchorSession(sessions, preferredSessionId = '') {
-  const preferred = sessions.find((session) => session.id === preferredSessionId && session.tool);
-  if (preferred) return preferred;
-  return sessions.find((session) => session.tool) || null;
-}
-
-async function applySuggestedBoardLayout(sourceSessionId, activeSessions, suggestion) {
-  const sessionIds = activeSessions
-    .map((session) => session?.id)
-    .filter(Boolean);
-  const result = await replaceBoardLayout(suggestion, {
-    sessionIds,
-    sourceSessionId,
-  });
-  if (result.changed) {
-    broadcastSessionsInvalidation();
-  }
-  return result.layout;
-}
-
-export async function getSessionBoardLayout() {
-  return summarizeBoardLayout(await loadBoardLayout());
-}
-
-export async function rebuildSessionBoardLayout({
-  sessionId = '',
-  tool = '',
-  model,
-  effort,
-  thinking = false,
-} = {}) {
-  const activeSessions = await listSessions({ includeVisitor: true, includeArchived: false });
-  if (activeSessions.length === 0) {
-    return {
-      ok: false,
-      skipped: 'no_sessions',
-      board: summarizeBoardLayout(await loadBoardLayout()),
-    };
-  }
-
-  const anchorSession = chooseBoardLayoutAnchorSession(activeSessions, sessionId);
-  if (!anchorSession) {
-    return {
-      ok: false,
-      skipped: 'no_tool',
-      board: summarizeBoardLayout(await loadBoardLayout()),
-    };
-  }
-
-  const [currentHistory, existingBoardLayout] = await Promise.all([
-    loadHistory(anchorSession.id, { includeBodies: true }),
-    loadBoardLayout(),
-  ]);
-
-  const suggestion = await triggerSessionBoardLayoutSuggestion({
-    id: anchorSession.id,
-    folder: anchorSession.folder,
-    name: anchorSession.name || '',
-    group: anchorSession.group || '',
-    description: anchorSession.description || '',
-    tool: tool || anchorSession.tool,
-    model: model || anchorSession.model || undefined,
-    effort: effort || anchorSession.effort || undefined,
-    thinking,
-    currentHistory,
-    activeSessions,
-    existingBoardLayout,
-  });
-
-  if (!suggestion?.ok || !suggestion.boardLayout) {
-    return {
-      ok: false,
-      error: suggestion?.error || 'Board layout suggestion failed',
-      board: summarizeBoardLayout(existingBoardLayout),
-    };
-  }
-
-  const board = await applySuggestedBoardLayout(anchorSession.id, activeSessions, suggestion.boardLayout);
-  return {
-    ok: true,
-    sourceSessionId: anchorSession.id,
-    board: summarizeBoardLayout(board),
-  };
-}
-
-function scheduleSessionBoardLayoutSuggestion(session, run) {
-  if (!session?.id || !run || session.archived || isInternalSession(session)) {
-    return false;
-  }
-
-  rebuildSessionBoardLayout({
-    sessionId: session.id,
-    tool: run.tool || session.tool,
-    model: run.model || session.model || undefined,
-    effort: run.effort || session.effort || undefined,
-    thinking: false,
-  }).catch((error) => {
-    console.error(`[board-layout] Failed to rebuild board layout from ${session.id?.slice(0, 8)}: ${error.message}`);
   });
 
   return true;
@@ -1798,8 +3041,22 @@ async function queueContextCompaction(sessionId, session, run, { automatic = fal
 async function maybeAutoCompact(sessionId, session, run, manifest) {
   if (!session || !run || manifest?.internalOperation) return false;
   if (getSessionQueueCount(session) > 0) return false;
-  const contextTokens = getRunLiveContextTokens(run);
-  const autoCompactTokens = getAutoCompactContextTokens(run);
+  let contextTokens = getRunLiveContextTokens(run);
+  let autoCompactTokens = getAutoCompactContextTokens(run);
+  if (!Number.isInteger(contextTokens) || !Number.isFinite(autoCompactTokens)) {
+    const refreshed = await refreshCodexContextMetrics(run);
+    if (refreshed) {
+      const syntheticRun = {
+        ...run,
+        contextInputTokens: refreshed.contextTokens,
+        ...(Number.isInteger(refreshed.contextWindowTokens)
+          ? { contextWindowTokens: refreshed.contextWindowTokens }
+          : {}),
+      };
+      contextTokens = refreshed.contextTokens;
+      autoCompactTokens = getAutoCompactContextTokens(syntheticRun);
+    }
+  }
   if (!Number.isInteger(contextTokens) || !Number.isFinite(autoCompactTokens)) return false;
   if (contextTokens <= autoCompactTokens) return false;
   return queueContextCompaction(sessionId, session, run, { automatic: true });
@@ -1843,7 +3100,7 @@ async function applyCompactionWorkerResult(targetSessionId, run, manifest) {
   return true;
 }
 
-async function finalizeDetachedRun(sessionId, run, manifest) {
+async function finalizeDetachedRun(sessionId, run, manifest, normalizedEvents = []) {
   let historyChanged = false;
   let sessionChanged = false;
   const live = liveSessions.get(sessionId);
@@ -1853,6 +3110,11 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
   const compactionTargetSessionId = typeof manifest?.compactionTargetSessionId === 'string'
     ? manifest.compactionTargetSessionId
     : '';
+
+  if (Array.isArray(normalizedEvents) && normalizedEvents.length > 0) {
+    await appendEvents(sessionId, normalizedEvents);
+    historyChanged = true;
+  }
 
   if (run.state === 'cancelled') {
     const event = {
@@ -1958,11 +3220,20 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
     broadcastSessionInvalidation(sessionId);
     return { historyChanged, sessionChanged };
   }
-
-  const latestSession = finalizedMeta.meta ? await enrichSessionMeta(finalizedMeta.meta) : await getSession(sessionId);
+  let latestSession = await getSession(sessionId);
   if (!latestSession) {
     return { historyChanged, sessionChanged };
   }
+
+  if (!manifest?.internalOperation) {
+    const taskCardSession = await maybeApplyAssistantTaskCard(sessionId, run.id, latestSession);
+    if (taskCardSession) {
+      latestSession = taskCardSession;
+      sessionChanged = true;
+    }
+  }
+
+  historyChanged = await maybePublishRunResultAssets(sessionId, finalizedRun, manifest, normalizedEvents) || historyChanged;
 
   if (getSessionQueueCount(latestSession) > 0) {
     scheduleQueuedFollowUpDispatch(sessionId);
@@ -1971,7 +3242,6 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
   queueSessionCompletionTargets(latestSession, finalizedRun, manifest);
   if (!manifest?.internalOperation) {
     scheduleSessionWorkflowStateSuggestion(latestSession, finalizedRun);
-    scheduleSessionBoardLayoutSuggestion(latestSession, finalizedRun);
   }
 
   const needsRename = isSessionAutoRenamePending(latestSession);
@@ -1989,6 +3259,8 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
         name: latestSession.name || '',
         group: latestSession.group || '',
         description: latestSession.description || '',
+        appName: latestSession.appName || '',
+        sourceName: latestSession.sourceName || '',
         autoRenamePending: latestSession.autoRenamePending,
         tool: finalizedRun.tool || latestSession.tool,
         model: finalizedRun.model || undefined,
@@ -2018,6 +3290,9 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
         }
         sendCompletionPush({ ...(updated || latestSession), id: sessionId }).catch(() => {});
       });
+      if (!manifest?.internalOperation) {
+        void maybeRunReplySelfCheck(sessionId, latestSession, finalizedRun, manifest);
+      }
       return { historyChanged, sessionChanged };
     }
 
@@ -2028,161 +3303,25 @@ async function finalizeDetachedRun(sessionId, run, manifest) {
 
   void maybeAutoCompact(sessionId, latestSession, finalizedRun, manifest);
   sendCompletionPush({ ...latestSession, id: sessionId }).catch(() => {});
+  if (!manifest?.internalOperation) {
+    void maybeRunReplySelfCheck(sessionId, latestSession, finalizedRun, manifest);
+  }
   return { historyChanged, sessionChanged };
 }
 
 async function syncDetachedRun(sessionId, runId) {
-  let run = await getRun(runId);
-  if (!run) {
-    stopObservedRun(runId);
-    return null;
+  if (!runId) return null;
+  if (runSyncPromises.has(runId)) {
+    return runSyncPromises.get(runId);
   }
-  const manifest = await getRunManifest(runId);
-  if (!manifest) return run;
-
-  const consumedLineCount = Number.isInteger(run.normalizedLineCount) ? run.normalizedLineCount : 0;
-  const consumedByteOffset = Number.isInteger(run.normalizedByteOffset) ? run.normalizedByteOffset : 0;
-  const canResumeFromByteOffset = consumedByteOffset > 0;
-  const spoolDelta = canResumeFromByteOffset
-    ? await readRunSpoolDelta(runId, { startOffset: consumedByteOffset })
-    : await readRunSpoolDelta(runId, { skipLines: consumedLineCount });
-  const spoolRecords = spoolDelta.records || [];
-  const consumedNormalizedEventCount = Number.isInteger(run.normalizedEventCount)
-    ? run.normalizedEventCount
-    : 0;
-  let historyChanged = false;
-  let sessionChanged = false;
-  let nextNormalizedEventCount = consumedNormalizedEventCount;
-  let runtimeInvocation = null;
-
-  if (spoolRecords.length > 0) {
-    runtimeInvocation = await createToolInvocation(manifest.tool, '', {
-      model: manifest.options?.model,
-      effort: manifest.options?.effort,
-      thinking: manifest.options?.thinking,
+  const promise = (async () => syncDetachedRunUnlocked(sessionId, runId))()
+    .finally(() => {
+      if (runSyncPromises.get(runId) === promise) {
+        runSyncPromises.delete(runId);
+      }
     });
-    const { adapter } = runtimeInvocation;
-    const events = [];
-    for (const record of spoolRecords) {
-      if (record.stream !== 'stdout') continue;
-      const line = await materializeRunSpoolLine(runId, record);
-      if (!line) continue;
-      events.push(...adapter.parseLine(line));
-    }
-    events.push(...adapter.flush());
-    const normalizedEvents = normalizeRunEvents(run, events);
-    nextNormalizedEventCount += normalizedEvents.length;
-    if (normalizedEvents.length > 0) {
-      await appendEvents(sessionId, normalizedEvents);
-      historyChanged = true;
-    }
-    const latestUsage = [...normalizedEvents].reverse().find((event) => event.type === 'usage');
-    const contextInputTokens = Number.isInteger(latestUsage?.contextTokens)
-      ? latestUsage.contextTokens
-      : null;
-    const contextWindowTokens = Number.isInteger(latestUsage?.contextWindowTokens)
-      ? latestUsage.contextWindowTokens
-      : null;
-    if (Number.isInteger(contextInputTokens) || Number.isInteger(contextWindowTokens)) {
-      run = await updateRun(runId, (current) => ({
-        ...current,
-        ...(Number.isInteger(contextInputTokens) ? { contextInputTokens } : {}),
-        ...(Number.isInteger(contextWindowTokens) ? { contextWindowTokens } : {}),
-      })) || run;
-    }
-  }
-
-  const nextNormalizedLineCount = canResumeFromByteOffset
-    ? consumedLineCount + (spoolDelta.processedLineCount || 0)
-    : (spoolDelta.skippedLineCount || 0) + (spoolDelta.processedLineCount || 0);
-  const nextNormalizedByteOffset = Number.isInteger(spoolDelta.nextOffset)
-    ? spoolDelta.nextOffset
-    : consumedByteOffset;
-
-  if (
-    nextNormalizedLineCount !== consumedLineCount
-    || nextNormalizedByteOffset !== consumedByteOffset
-    || nextNormalizedEventCount !== consumedNormalizedEventCount
-  ) {
-    run = await updateRun(runId, (current) => ({
-      ...current,
-      normalizedLineCount: nextNormalizedLineCount,
-      normalizedByteOffset: nextNormalizedByteOffset,
-      normalizedEventCount: nextNormalizedEventCount,
-      lastNormalizedAt: nowIso(),
-    })) || run;
-  }
-
-  if (run.claudeSessionId || run.codexThreadId) {
-    sessionChanged = await persistResumeIds(sessionId, run.claudeSessionId, run.codexThreadId) || sessionChanged;
-  }
-
-  if (!runtimeInvocation) {
-    runtimeInvocation = await createToolInvocation(manifest.tool, '', {
-      model: manifest.options?.model,
-      effort: manifest.options?.effort,
-      thinking: manifest.options?.thinking,
-    });
-  }
-
-  const isStructuredRuntime = runtimeInvocation.isClaudeFamily || runtimeInvocation.isCodexFamily;
-  const result = await getRunResult(runId);
-  const inferredState = deriveRunStateFromResult(run, result);
-  const completedAt = typeof result?.completedAt === 'string' && result.completedAt
-    ? result.completedAt
-    : null;
-  const previewFromDelta = spoolRecords
-    .filter((record) => ['stdout', 'stderr', 'error'].includes(record.stream))
-    .map((record) => typeof record?.line === 'string' ? clipFailurePreview(record.line) : '')
-    .filter(Boolean)
-    .slice(-3)
-    .join(' | ');
-  const zeroStructuredOutputReason = (
-    isStructuredRuntime
-    && inferredState === 'completed'
-    && nextNormalizedEventCount === 0
-  )
-    ? await deriveStructuredRuntimeFailureReason(runId, previewFromDelta)
-    : null;
-
-  if (zeroStructuredOutputReason) {
-    run = await updateRun(runId, (current) => ({
-      ...current,
-      state: 'failed',
-      completedAt,
-      result,
-      failureReason: zeroStructuredOutputReason,
-    })) || run;
-  }
-
-  if (!isTerminalRunState(run.state)) {
-    if (inferredState && completedAt) {
-      run = await updateRun(runId, (current) => ({
-        ...current,
-        state: inferredState,
-        completedAt,
-        result,
-        failureReason: inferredState === 'failed'
-          ? deriveRunFailureReasonFromResult(current, result)
-          : null,
-      })) || run;
-    }
-  }
-
-  if (isTerminalRunState(run.state) && !run.finalizedAt) {
-    const finalized = await finalizeDetachedRun(sessionId, run, manifest);
-    historyChanged = historyChanged || finalized.historyChanged;
-    sessionChanged = sessionChanged || finalized.sessionChanged;
-    run = await getRun(runId) || run;
-  }
-
-  if (historyChanged || sessionChanged) {
-    broadcastSessionInvalidation(sessionId);
-  }
-  if (isTerminalRunState(run.state)) {
-    stopObservedRun(runId);
-  }
-  return run;
+  runSyncPromises.set(runId, promise);
+  return promise;
 }
 
 export async function startDetachedRunObservers() {
@@ -2201,8 +3340,14 @@ export async function startDetachedRunObservers() {
   await resumePendingCompletionTargets();
 }
 
-export async function listSessions({ includeVisitor = false, includeArchived = true, appId = '', sourceId = '', includeQueuedMessages = false } = {}) {
-  const metas = await reconcileSessionsMetaList(await loadSessionsMeta());
+export async function listSessions({
+  includeVisitor = false,
+  includeArchived = true,
+  appId = '',
+  sourceId = '',
+  includeQueuedMessages = false,
+} = {}) {
+  const metas = await loadSessionsMeta();
   const normalizedAppId = normalizeAppId(appId);
   const normalizedSourceId = normalizeAppId(sourceId);
   const filtered = metas
@@ -2215,18 +3360,55 @@ export async function listSessions({ includeVisitor = false, includeArchived = t
       getSessionPinSortRank(b) - getSessionPinSortRank(a)
       || getSessionSortTime(b) - getSessionSortTime(a)
     ));
-  return Promise.all(filtered.map((meta) => enrichSessionMetaForClient(meta, { includeQueuedMessages })));
+  return Promise.all(filtered.map((meta) => enrichSessionMetaForClient(meta, {
+    includeQueuedMessages,
+  })));
 }
 
 export async function getSession(id, options = {}) {
-  const meta = await reconcileSessionMeta(await findSessionMeta(id));
+  const metas = await loadSessionsMeta();
+  const meta = metas.find((entry) => entry.id === id) || await findSessionMeta(id);
   if (!meta) return null;
   return enrichSessionMetaForClient(meta, options);
 }
 
 export async function getSessionEventsAfter(sessionId, afterSeq = 0, options = {}) {
-  await reconcileSessionMeta(await findSessionMeta(sessionId));
-  return readEventsAfter(sessionId, afterSeq, options);
+  const events = await buildSessionTimelineEvents(sessionId, {
+    includeBodies: options?.includeBodies !== false,
+  });
+  const filtered = (Array.isArray(events) ? events : []).filter((event) => Number.isInteger(event?.seq) && event.seq > afterSeq);
+  if (options?.includeAttachmentPaths === true) return filtered;
+  return filtered.map((event) => stripEventAttachmentSavedPaths(event));
+}
+
+export async function getSessionTimelineEvents(sessionId, options = {}) {
+  return buildSessionTimelineEvents(sessionId, options);
+}
+
+export async function getSessionSourceContext(sessionId, options = {}) {
+  const session = await getSession(sessionId);
+  if (!session) return null;
+  const requestedRequestId = typeof options.requestId === 'string' ? options.requestId.trim() : '';
+  const events = await loadHistory(sessionId, { includeBodies: false });
+  let matchedRequestId = requestedRequestId;
+  let messageContext = null;
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== 'message' || event.role !== 'user') continue;
+    if (requestedRequestId && (event.requestId || '') !== requestedRequestId) continue;
+    const candidate = normalizeSourceContext(event.sourceContext);
+    if (!candidate) continue;
+    messageContext = candidate;
+    matchedRequestId = event.requestId || matchedRequestId;
+    break;
+  }
+
+  return {
+    session: normalizeSourceContext(session.sourceContext),
+    message: messageContext,
+    requestId: matchedRequestId,
+  };
 }
 
 export async function getRunState(runId) {
@@ -2244,6 +3426,29 @@ export async function createSession(folder, tool, name, extra = {}) {
   const requestedVisitorName = normalizeSessionVisitorName(extra.visitorName);
   const requestedUserId = typeof extra.userId === 'string' ? extra.userId.trim() : '';
   const requestedUserName = normalizeSessionUserName(extra.userName);
+  const requestedGroup = normalizeSessionGroup(extra.group || '');
+  const requestedDescription = normalizeSessionDescription(extra.description || '');
+  const hasRequestedSystemPrompt = Object.prototype.hasOwnProperty.call(extra, 'systemPrompt');
+  const requestedSystemPrompt = typeof extra.systemPrompt === 'string' ? extra.systemPrompt : '';
+  const hasRequestedModel = Object.prototype.hasOwnProperty.call(extra, 'model');
+  const requestedModel = typeof extra.model === 'string' ? extra.model.trim() : '';
+  const hasRequestedEffort = Object.prototype.hasOwnProperty.call(extra, 'effort');
+  const requestedEffort = typeof extra.effort === 'string' ? extra.effort.trim() : '';
+  const hasRequestedThinking = Object.prototype.hasOwnProperty.call(extra, 'thinking');
+  const requestedThinking = extra.thinking === true;
+  const hasRequestedSourceContext = Object.prototype.hasOwnProperty.call(extra, 'sourceContext');
+  const requestedSourceContext = normalizeSourceContext(extra.sourceContext);
+  const hasRequestedActiveAgreements = Object.prototype.hasOwnProperty.call(extra, 'activeAgreements');
+  const requestedActiveAgreements = hasRequestedActiveAgreements
+    ? normalizeSessionAgreements(extra.activeAgreements || [])
+    : [];
+  const requestedInitialNaming = resolveInitialSessionName(name, {
+    group: requestedGroup,
+    appName: requestedAppName,
+    sourceId: requestedSourceId,
+    sourceName: requestedSourceName,
+    externalTriggerId,
+  });
   const created = await withSessionsMetaMutation(async (metas, saveSessionsMeta) => {
     if (externalTriggerId) {
       const existingIndex = metas.findIndex((meta) => meta.externalTriggerId === externalTriggerId && !meta.archived);
@@ -2252,16 +3457,29 @@ export async function createSession(folder, tool, name, extra = {}) {
         const updated = { ...existing };
         let changed = false;
 
-        const group = normalizeSessionGroup(extra.group || '');
-        if (group && updated.group !== group) {
-          updated.group = group;
+        if (requestedGroup && updated.group !== requestedGroup) {
+          updated.group = requestedGroup;
           changed = true;
         }
 
-        const description = normalizeSessionDescription(extra.description || '');
-        if (description && updated.description !== description) {
-          updated.description = description;
+        if (requestedDescription && updated.description !== requestedDescription) {
+          updated.description = requestedDescription;
           changed = true;
+        }
+
+        const refreshedInitialNaming = resolveInitialSessionName(name, {
+          group: requestedGroup || updated.group || '',
+          appName: requestedAppName || updated.appName || '',
+          sourceId: requestedSourceId || updated.sourceId || '',
+          sourceName: requestedSourceName || updated.sourceName || '',
+          externalTriggerId: externalTriggerId || updated.externalTriggerId || '',
+        });
+        if (isSessionAutoRenamePending(updated) && !refreshedInitialNaming.autoRenamePending) {
+          if (updated.name !== refreshedInitialNaming.name || updated.autoRenamePending !== false) {
+            updated.name = refreshedInitialNaming.name;
+            updated.autoRenamePending = false;
+            changed = true;
+          }
         }
 
         const workflowState = normalizeSessionWorkflowState(extra.workflowState || '');
@@ -2306,9 +3524,27 @@ export async function createSession(folder, tool, name, extra = {}) {
           changed = true;
         }
 
-        const systemPrompt = typeof extra.systemPrompt === 'string' ? extra.systemPrompt : '';
-        if (systemPrompt && updated.systemPrompt !== systemPrompt) {
-          updated.systemPrompt = systemPrompt;
+        if (hasRequestedSystemPrompt && (updated.systemPrompt || '') !== requestedSystemPrompt) {
+          if (requestedSystemPrompt) updated.systemPrompt = requestedSystemPrompt;
+          else delete updated.systemPrompt;
+          changed = true;
+        }
+
+        if (hasRequestedModel && (updated.model || '') !== requestedModel) {
+          if (requestedModel) updated.model = requestedModel;
+          else delete updated.model;
+          changed = true;
+        }
+
+        if (hasRequestedEffort && (updated.effort || '') !== requestedEffort) {
+          if (requestedEffort) updated.effort = requestedEffort;
+          else delete updated.effort;
+          changed = true;
+        }
+
+        if (hasRequestedThinking && updated.thinking !== requestedThinking) {
+          if (requestedThinking) updated.thinking = true;
+          else delete updated.thinking;
           changed = true;
         }
 
@@ -2316,6 +3552,23 @@ export async function createSession(folder, tool, name, extra = {}) {
         if (completionTargets.length > 0 && JSON.stringify(updated.completionTargets || []) !== JSON.stringify(completionTargets)) {
           updated.completionTargets = completionTargets;
           changed = true;
+        }
+
+        if (hasRequestedActiveAgreements) {
+          if (JSON.stringify(normalizeSessionAgreements(updated.activeAgreements || [])) !== JSON.stringify(requestedActiveAgreements)) {
+            if (requestedActiveAgreements.length > 0) updated.activeAgreements = requestedActiveAgreements;
+            else delete updated.activeAgreements;
+            changed = true;
+          }
+        }
+
+        if (hasRequestedSourceContext) {
+          const currentSourceContext = normalizeSourceContext(updated.sourceContext);
+          if (JSON.stringify(currentSourceContext) !== JSON.stringify(requestedSourceContext)) {
+            if (requestedSourceContext) updated.sourceContext = requestedSourceContext;
+            else delete updated.sourceContext;
+            changed = true;
+          }
         }
 
         const nextAppId = requestedAppId || resolveEffectiveAppId(updated.appId);
@@ -2336,10 +3589,8 @@ export async function createSession(folder, tool, name, extra = {}) {
     }
 
     const id = generateId();
-    const initialNaming = resolveInitialSessionName(name);
+    const initialNaming = requestedInitialNaming;
     const now = nowIso();
-    const group = normalizeSessionGroup(extra.group || '');
-    const description = normalizeSessionDescription(extra.description || '');
     const workflowState = normalizeSessionWorkflowState(extra.workflowState || '');
     const workflowPriority = normalizeSessionWorkflowPriority(extra.workflowPriority || '');
     const completionTargets = sanitizeEmailCompletionTargets(extra.completionTargets || []);
@@ -2355,8 +3606,8 @@ export async function createSession(folder, tool, name, extra = {}) {
       updatedAt: now,
     };
 
-    if (group) session.group = group;
-    if (description) session.description = description;
+    if (requestedGroup) session.group = requestedGroup;
+    if (requestedDescription) session.description = requestedDescription;
     if (workflowState) session.workflowState = workflowState;
     if (workflowPriority) session.workflowPriority = workflowPriority;
     if (requestedAppName) session.appName = requestedAppName;
@@ -2366,15 +3617,22 @@ export async function createSession(folder, tool, name, extra = {}) {
     if (requestedVisitorName) session.visitorName = requestedVisitorName;
     if (requestedUserId) session.userId = requestedUserId;
     if (requestedUserName) session.userName = requestedUserName;
-    if (extra.systemPrompt) session.systemPrompt = extra.systemPrompt;
+    if (requestedSystemPrompt) session.systemPrompt = requestedSystemPrompt;
+    if (requestedModel) session.model = requestedModel;
+    if (requestedEffort) session.effort = requestedEffort;
+    if (requestedThinking) session.thinking = true;
     if (extra.internalRole) session.internalRole = extra.internalRole;
     if (extra.compactsSessionId) session.compactsSessionId = extra.compactsSessionId;
     if (externalTriggerId) session.externalTriggerId = externalTriggerId;
+    if (requestedSourceContext) session.sourceContext = requestedSourceContext;
     if (extra.forkedFromSessionId) session.forkedFromSessionId = extra.forkedFromSessionId;
     if (Number.isInteger(extra.forkedFromSeq)) session.forkedFromSeq = extra.forkedFromSeq;
     if (extra.rootSessionId) session.rootSessionId = extra.rootSessionId;
     if (extra.forkedAt) session.forkedAt = extra.forkedAt;
     if (completionTargets.length > 0) session.completionTargets = completionTargets;
+    if (hasRequestedActiveAgreements && requestedActiveAgreements.length > 0) {
+      session.activeAgreements = requestedActiveAgreements;
+    }
 
     metas.push(session);
     await saveSessionsMeta(metas);
@@ -2400,12 +3658,10 @@ export async function setSessionArchived(id, archived = true) {
       session.archived = true;
       delete session.pinned;
       session.archivedAt = nowIso();
-      session.updatedAt = session.archivedAt;
       return true;
     }
     delete session.archived;
     delete session.archivedAt;
-    session.updatedAt = nowIso();
     return true;
   });
 
@@ -2493,10 +3749,77 @@ export async function updateSessionGrouping(id, patch = {}) {
         changed = true;
       }
     }
+    if (Object.prototype.hasOwnProperty.call(patch, 'sidebarOrder')) {
+      const nextSidebarOrder = normalizeSessionSidebarOrder(patch.sidebarOrder);
+      if (nextSidebarOrder) {
+        if (session.sidebarOrder !== nextSidebarOrder) {
+          session.sidebarOrder = nextSidebarOrder;
+          changed = true;
+        }
+      } else if (session.sidebarOrder) {
+        delete session.sidebarOrder;
+        changed = true;
+      }
+    }
     if (changed) {
       session.updatedAt = nowIso();
     }
     return changed;
+  });
+
+  if (!result.meta) return null;
+  if (result.changed) {
+    broadcastSessionInvalidation(id);
+  }
+  return enrichSessionMeta(result.meta);
+}
+
+async function updateSessionTaskCard(id, taskCard) {
+  const nextTaskCard = normalizeSessionTaskCard(taskCard);
+  const result = await mutateSessionMeta(id, (session) => {
+    const currentTaskCard = normalizeSessionTaskCard(session.taskCard);
+    if (JSON.stringify(currentTaskCard) === JSON.stringify(nextTaskCard)) {
+      return false;
+    }
+
+    if (nextTaskCard) {
+      session.taskCard = nextTaskCard;
+    } else if (session.taskCard) {
+      delete session.taskCard;
+    }
+
+    session.updatedAt = nowIso();
+    return true;
+  });
+
+  if (!result.meta) return null;
+  if (result.changed) {
+    broadcastSessionInvalidation(id);
+  }
+  return enrichSessionMeta(result.meta);
+}
+
+export async function updateSessionAgreements(id, patch = {}) {
+  const hasActiveAgreements = Object.prototype.hasOwnProperty.call(patch || {}, 'activeAgreements');
+  if (!hasActiveAgreements) {
+    return getSession(id);
+  }
+
+  const nextActiveAgreements = normalizeSessionAgreements(patch.activeAgreements);
+  const result = await mutateSessionMeta(id, (session) => {
+    const currentActiveAgreements = normalizeSessionAgreements(session.activeAgreements || []);
+    if (JSON.stringify(currentActiveAgreements) === JSON.stringify(nextActiveAgreements)) {
+      return false;
+    }
+
+    if (nextActiveAgreements.length > 0) {
+      session.activeAgreements = nextActiveAgreements;
+    } else if (session.activeAgreements) {
+      delete session.activeAgreements;
+    }
+
+    session.updatedAt = nowIso();
+    return true;
   });
 
   if (!result.meta) return null;
@@ -2512,6 +3835,33 @@ export async function updateSessionWorkflowState(id, workflowState) {
 
 export async function updateSessionWorkflowPriority(id, workflowPriority) {
   return updateSessionWorkflowClassification(id, { workflowPriority });
+}
+
+export async function updateSessionLastReviewedAt(id, lastReviewedAt) {
+  const nextLastReviewedAt = normalizeSessionReviewedAt(lastReviewedAt || '');
+  const result = await mutateSessionMeta(id, (session) => {
+    const currentLastReviewedAt = normalizeSessionReviewedAt(session.lastReviewedAt || '');
+    if (nextLastReviewedAt) {
+      if (currentLastReviewedAt !== nextLastReviewedAt) {
+        session.lastReviewedAt = nextLastReviewedAt;
+        return true;
+      }
+      return false;
+    }
+
+    if (currentLastReviewedAt) {
+      delete session.lastReviewedAt;
+      return true;
+    }
+
+    return false;
+  });
+
+  if (!result.meta) return null;
+  if (result.changed) {
+    broadcastSessionInvalidation(id);
+  }
+  return enrichSessionMeta(result.meta);
 }
 
 export async function updateSessionWorkflowClassification(id, payload = {}) {
@@ -2728,9 +4078,6 @@ export async function updateSessionRuntimePreferences(id, patch = {}) {
     return enrichSessionMeta(result.meta);
   }
 
-  if (toolChanged) {
-    await clearPersistedResumeIds(id);
-  }
   broadcastSessionInvalidation(id);
   if (shouldExposeSession(result.meta)) {
     broadcastSessionsInvalidation();
@@ -2843,14 +4190,19 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
     throw error;
   }
 
-  if (findQueuedFollowUpByRequest(sessionMeta, requestId) || hasRecentFollowUpRequestId(sessionMeta, requestId)) {
+  const existingQueuedFollowUp = findQueuedFollowUpByRequest(sessionMeta, requestId);
+  if (existingQueuedFollowUp || hasRecentFollowUpRequestId(sessionMeta, requestId)) {
     return {
       duplicate: true,
-      queued: !!findQueuedFollowUpByRequest(sessionMeta, requestId),
+      queued: !!existingQueuedFollowUp,
       run: null,
-      session: await getSession(sessionId),
+      session: await getSession(sessionId, {
+        includeQueuedMessages: !!existingQueuedFollowUp,
+      }),
     };
   }
+
+  const normalizedText = text.trim();
 
   let activeRun = null;
   let hasActiveRun = false;
@@ -2870,7 +4222,6 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
   }
 
   if ((hasActiveRun || hasPendingCompact || getFollowUpQueueCount(sessionMeta) > 0) && options.queueIfBusy !== false) {
-    const normalizedText = text.trim();
     const queuedImages = options.preSavedAttachments?.length > 0
       ? sanitizeQueuedFollowUpAttachments(options.preSavedAttachments)
       : sanitizeQueuedFollowUpAttachments(await saveAttachments(images));
@@ -2900,22 +4251,28 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
       duplicate: wasDuplicateQueueInsert,
       queued: true,
       run: null,
-      session: await getSession(sessionId) || (queuedMeta.meta ? await enrichSessionMetaForClient(queuedMeta.meta) : session),
+      session: await getSession(sessionId, {
+        includeQueuedMessages: true,
+      }) || (queuedMeta.meta ? await enrichSessionMetaForClient(queuedMeta.meta, {
+        includeQueuedMessages: true,
+      }) : session),
     };
   }
 
   const snapshot = await getHistorySnapshot(sessionId);
   const previousTool = session.tool;
   const effectiveTool = options.tool || session.tool;
-  const normalizedText = text.trim();
   const recordedUserText = typeof options.recordedUserText === 'string' && options.recordedUserText.trim()
     ? options.recordedUserText.trim()
     : normalizedText;
   const savedImages = options.preSavedAttachments?.length > 0
     ? sanitizeQueuedFollowUpAttachments(options.preSavedAttachments)
     : await saveAttachments(images);
+  const sourceContext = normalizeSourceContext(options.sourceContext);
   const imageRefs = savedImages.map((img) => ({
-    filename: img.filename,
+    ...(img.filename ? { filename: img.filename } : {}),
+    ...(img.savedPath ? { savedPath: img.savedPath } : {}),
+    ...(img.assetId ? { assetId: img.assetId } : {}),
     ...(img.originalName ? { originalName: img.originalName } : {}),
     mimeType: img.mimeType,
   }));
@@ -2932,15 +4289,16 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
   }
 
   if (effectiveTool !== session.tool) {
-    await clearPersistedResumeIds(sessionId);
     const updatedToolSession = await updateSessionTool(sessionId, effectiveTool);
     if (updatedToolSession) {
       session = updatedToolSession;
     }
   }
 
-  const persistedClaudeSessionId = options.freshThread === true ? null : (session.claudeSessionId || null);
-  const persistedCodexThreadId = options.freshThread === true ? null : (session.codexThreadId || null);
+  const {
+    claudeSessionId: persistedClaudeSessionId,
+    codexThreadId: persistedCodexThreadId,
+  } = resolveResumeState(effectiveTool, session, options);
 
   const run = await createRun({
     status: {
@@ -2999,8 +4357,23 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
     const userEvent = messageEvent('user', recordedUserText, imageRefs.length > 0 ? imageRefs : undefined, {
       requestId,
       runId: run.id,
+      ...(sourceContext ? { sourceContext } : {}),
     });
     await appendEvent(sessionId, userEvent);
+
+    const toolDefinition = await getToolDefinitionAsync(effectiveTool);
+    const promptMode = toolDefinition?.promptMode === 'bare-user'
+      ? 'bare-user'
+      : 'default';
+    if (promptMode === 'default') {
+      const managerTurnContext = buildManagerTurnContextText(session, normalizedText);
+      if (managerTurnContext) {
+        await appendEvent(sessionId, managerContextEvent(managerTurnContext, {
+          requestId,
+          runId: run.id,
+        }));
+      }
+    }
   }
 
   if (!options.internalOperation && isFirstRecordedUserMessage && isSessionAutoRenamePending(session)) {
@@ -3017,14 +4390,16 @@ export async function submitHttpMessage(sessionId, text, images, options = {}) {
     || !session.group
     || !session.description;
 
-  if (!options.internalOperation && options.recordUserMessage !== false && needsEarlySessionLabeling) {
+  if (!options.internalOperation && options.recordUserMessage !== false && !isInternalSession(session) && needsEarlySessionLabeling) {
     launchEarlySessionLabelSuggestion(sessionId, {
       id: sessionId,
       folder: session.folder,
       name: session.name || '',
       group: session.group || '',
       description: session.description || '',
-      autoRenamePending: session.autoRenamePending,
+      appName: session.appName || '',
+      sourceName: session.sourceName || '',
+      autoRenamePending: false,
       tool: effectiveTool,
       model: options.model || undefined,
       effort: options.effort || undefined,
@@ -3094,6 +4469,7 @@ export async function forkSession(sessionId) {
     appId: source.appId || '',
     appName: source.appName || '',
     systemPrompt: source.systemPrompt || '',
+    activeAgreements: source.activeAgreements || [],
     userId: source.userId || '',
     userName: source.userName || '',
     forkedFromSessionId: source.id,
@@ -3130,6 +4506,63 @@ export async function forkSession(sessionId) {
 
   broadcastSessionsInvalidation();
   return getSession(child.id);
+}
+
+export async function delegateSession(sessionId, payload = {}) {
+  const source = await getSession(sessionId);
+  if (!source) return null;
+  if (source.visitorId) return null;
+
+  const task = typeof payload?.task === 'string' ? payload.task.trim() : '';
+  if (!task) {
+    throw new Error('task is required');
+  }
+
+  const requestedName = typeof payload?.name === 'string' ? payload.name.trim() : '';
+  const requestedTool = typeof payload?.tool === 'string' ? payload.tool.trim() : '';
+  const runInternally = payload?.internal === true;
+  const nextTool = requestedTool || source.tool;
+  const inheritRuntimePreferences = !requestedTool || requestedTool === source.tool;
+
+  const child = await createSession(source.folder, nextTool, requestedName || buildDelegatedSessionName(source, task), {
+    appId: source.appId || '',
+    appName: source.appName || '',
+    sourceId: source.sourceId || '',
+    sourceName: source.sourceName || '',
+    systemPrompt: source.systemPrompt || '',
+    activeAgreements: source.activeAgreements || [],
+    model: inheritRuntimePreferences ? source.model || '' : '',
+    effort: inheritRuntimePreferences ? source.effort || '' : '',
+    thinking: inheritRuntimePreferences && source.thinking === true,
+    userId: source.userId || '',
+    userName: source.userName || '',
+    ...(runInternally ? { internalRole: INTERNAL_SESSION_ROLE_AGENT_DELEGATE } : {}),
+  });
+  if (!child) return null;
+
+  const handoffText = buildDelegationHandoff({
+    source,
+    task,
+  });
+  const outcome = await submitHttpMessage(child.id, handoffText, [], {
+    requestId: createInternalRequestId('delegate'),
+    tool: requestedTool || undefined,
+    model: inheritRuntimePreferences ? source.model || undefined : undefined,
+    effort: inheritRuntimePreferences ? source.effort || undefined : undefined,
+    thinking: inheritRuntimePreferences && source.thinking === true,
+  });
+
+  if (!runInternally) {
+    await appendEvent(source.id, messageEvent('assistant', buildDelegationNoticeMessage(task, child), undefined, {
+      messageKind: 'session_delegate_notice',
+    }));
+    broadcastSessionInvalidation(source.id);
+  }
+
+  return {
+    session: outcome.session || await getSession(child.id) || child,
+    run: outcome.run || null,
+  };
 }
 
 export async function dropToolUse(sessionId) {

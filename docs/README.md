@@ -15,7 +15,9 @@ Read these first when you need the current truth:
 2. `../README.md` / `../README.zh.md` — product framing, setup path, operator-facing expectations
 3. `project-architecture.md` — current shipped architecture and code map
 4. `../notes/current/core-domain-contract.md` — current domain/refactor baseline
-5. `setup.md` / `external-message-protocol.md` / other focused guides as needed
+5. `../notes/current/session-first-workflow-surfaces.md` — current workflow-organization contract for session list / grouping / task-like views
+6. `../notes/current/product-surface-lifecycle.md` — current keep/iterate/retire rule for shipped product surfaces
+7. `setup.md` / `external-message-protocol.md` / other focused guides as needed
 
 ## Keep These In Sync
 
@@ -47,6 +49,8 @@ For setup, deployment, connector, and feature-rollout docs, assume the operator 
 - `setup.md` — model-first setup contract, one-round input handoff, human checkpoints, and target state
 - `external-message-protocol.md` — canonical integration contract for external channels
 - `creating-apps.md` — user/developer guide for Apps
+- `../notes/current/session-first-workflow-surfaces.md` — current rule that workflow-organization views stay session-first
+- `../notes/current/product-surface-lifecycle.md` — current rule that shipped features stay reviewable and may later be simplified or retired
 
 ### Focused Integrations
 
@@ -55,6 +59,7 @@ For setup, deployment, connector, and feature-rollout docs, assume the operator 
 - `feishu-bot-setup.md` — model-first operator + console contract for the RemoteLab Feishu connector
 - `github-auto-triage.md` — model-first GitHub intake and auto-reply rollout contract
 - `remote-capability-monitor.md` — remote-agent capability monitoring backed by a RemoteLab App and review session
+- `tunnel-diagnostics.md` — Cloudflare Tunnel latency probe workflow for separating app cost from edge/tunnel cost
 - `voice-connector.md` — model-first wake-word speaker/microphone connector contract for RemoteLab
 
 ## What Lives In `notes/`

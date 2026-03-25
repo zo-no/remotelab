@@ -92,19 +92,15 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && req.url === '/api/sessions') {
     const payload = JSON.parse(body || '{}');
-    assert.equal(Array.isArray(payload.completionTargets), true);
-    assert.equal(payload.completionTargets.length, 1);
-    assert.equal(payload.completionTargets[0].type, 'email');
     sessionCreates.push(payload);
     res.writeHead(201, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ session: { id: 'sess_1' } }));
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/api/sessions/sess_1/messages') {
+  if (req.method === 'POST' && /^\/api\/sessions\/[^/]+\/messages$/.test(req.url || '')) {
     const payload = JSON.parse(body || '{}');
-    assert.equal(payload.requestId.startsWith('mailbox_reply_'), true);
-    assert.match(payload.text, /Original email:/);
+    assert.match(payload.text, /User message:/);
     messageSubmissions.push(payload);
     res.writeHead(202, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -204,13 +200,18 @@ try {
   assert.equal(sessionCreates.length, 1);
   assert.equal(sessionCreates[0].appId, 'email');
   assert.equal(sessionCreates[0].appName, 'Email');
+  assert.equal(sessionCreates[0].sourceId, 'email');
+  assert.equal(sessionCreates[0].sourceName, 'Email');
   assert.equal(sessionCreates[0].tool, 'claude');
+  assert.equal(sessionCreates[0].systemPrompt, 'Reply with plain text only.');
   assert.equal(sessionCreates[0].externalTriggerId, expectedThreadTriggerId);
   assert.equal(sessionCreates[0].completionTargets[0].inReplyTo, '<root-thread@example.com>');
   assert.equal(sessionCreates[0].completionTargets[0].references, '<root-thread@example.com>');
   assert.equal(sessionCreates[0].completionTargets[0].subject, 'Re: hello!');
   assert.match(messageSubmissions[0].text, /please take a response to test!/);
-  assert.match(messageSubmissions[0].text, /Prefer completeness, careful troubleshooting, and explicit resolution over speed or brevity\./);
+  assert.match(messageSubmissions[0].text, /^Inbound email\./);
+  assert.match(messageSubmissions[0].text, /User message:/);
+  assert.doesNotMatch(messageSubmissions[0].text, /Prefer completeness, careful troubleshooting/);
   assert.equal(messageSubmissions[0].tool, 'claude');
   assert.equal(messageSubmissions[0].model, 'claude-sonnet-4-5');
   assert.equal(messageSubmissions[0].thinking, true);
@@ -448,6 +449,171 @@ try {
   assert.equal(sessionCreates[3].completionTargets[0].inReplyTo, '<blank-subject-thread@example.com>');
   assert.equal(sessionCreates[3].completionTargets[0].references, '<blank-subject-thread@example.com>');
   assert.equal(sessionCreates[3].completionTargets[0].subject, '', 'blank-subject replies should preserve an empty subject');
+
+  const inlinePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2lmLcAAAAASUVORK5CYII=';
+  const imageIngested = ingestRawMessage(
+    [
+      'From: owner@example.com',
+      'To: rowan@example.com',
+      'Subject: Screenshot included',
+      'Message-ID: <image-thread@example.com>',
+      'Content-Type: multipart/mixed; boundary="image-boundary"',
+      '',
+      '--image-boundary',
+      'Content-Type: text/plain; charset="UTF-8"',
+      '',
+      'please inspect the attached screenshot.',
+      '--image-boundary',
+      'Content-Type: image/png; name="mail-shot.png"',
+      'Content-Transfer-Encoding: base64',
+      'Content-Disposition: attachment; filename="mail-shot.png"',
+      '',
+      inlinePngBase64,
+      '--image-boundary--',
+    ].join('\n'),
+    'image-thread.eml',
+    mailboxRoot,
+  );
+  const approvedImage = findQueueItem(imageIngested.id, mailboxRoot)?.item;
+  assert.equal(approvedImage?.queue, 'approved');
+  assert.equal(approvedImage?.content?.images?.length, 1);
+  assert.equal(approvedImage?.content?.images?.[0]?.originalName, 'mail-shot.png');
+
+  const fifthWorker = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(repoRoot, 'scripts', 'agent-mail-worker.mjs'), '--once', '--root', mailboxRoot], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: tempHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `worker exited with ${code}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+
+  const fifthSummary = JSON.parse(fifthWorker.stdout);
+  assert.equal(fifthSummary.processed, 1);
+  assert.equal(fifthSummary.failures.length, 0);
+  assert.equal(sessionCreates.length, 5);
+  assert.equal(messageSubmissions.length, 5);
+  assert.equal(messageSubmissions[4].images?.length, 1);
+  assert.equal(messageSubmissions[4].images[0].mimeType, 'image/png');
+  assert.equal(messageSubmissions[4].images[0].originalName, 'mail-shot.png');
+  assert.equal(messageSubmissions[4].images[0].data, inlinePngBase64);
+
+  const updatedImage = findQueueItem(approvedImage.id, mailboxRoot)?.item;
+  assert.equal(updatedImage?.status, 'processing_for_reply');
+  assert.equal(updatedImage?.automation?.status, 'processing_for_reply');
+
+  requests.length = 0;
+  sessionCreates.length = 0;
+  messageSubmissions.length = 0;
+
+  const guestAuthDir = join(tempHome, '.remotelab', 'instances', 'trial6', 'config');
+  const guestAuthFile = join(guestAuthDir, 'auth.json');
+  mkdirSync(guestAuthDir, { recursive: true });
+  writeFileSync(guestAuthFile, JSON.stringify({
+    token: 'trial6-auth-token',
+  }, null, 2));
+  writeFileSync(join(tempHome, '.config', 'remotelab', 'guest-instances.json'), JSON.stringify([
+    {
+      name: 'trial6',
+      authFile: guestAuthFile,
+      localBaseUrl: `http://127.0.0.1:${port}`,
+    },
+  ], null, 2));
+
+  saveMailboxAutomation(mailboxRoot, {
+    allowlistAutoApprove: true,
+    chatBaseUrl: 'http://127.0.0.1:7690',
+    deliveryMode: 'session_only',
+    session: {
+      folder: '~',
+      tool: 'codex',
+      group: 'Mail',
+      description: 'Inbound email',
+      systemPrompt: '',
+    },
+  });
+
+  const routedIngested = ingestRawMessage(
+    [
+      'From: owner@example.com',
+      'To: rowan@example.com',
+      'Subject: route to trial6',
+      'Message-ID: <trial6-session@example.com>',
+      'Content-Type: text/plain; charset=UTF-8',
+      '',
+      'this should create a session in trial6 without an email reply.',
+    ].join('\n'),
+    'trial6-session.eml',
+    mailboxRoot,
+    {
+      text: 'this should create a session in trial6 without an email reply.',
+      envelope: {
+        rcptTo: 'rowan+trial6@example.com',
+      },
+    },
+  );
+  const approvedRouted = findQueueItem(routedIngested.id, mailboxRoot)?.item;
+  assert.equal(approvedRouted?.routing?.instanceName, 'trial6');
+
+  const sessionOnlyWorker = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(repoRoot, 'scripts', 'agent-mail-worker.mjs'), '--once', '--root', mailboxRoot], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: tempHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `worker exited with ${code}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+
+  const sessionOnlySummary = JSON.parse(sessionOnlyWorker.stdout);
+  assert.equal(sessionOnlySummary.processed, 1);
+  assert.equal(sessionOnlySummary.failures.length, 0);
+  assert.equal(requests.length, 3);
+  assert.equal(sessionCreates.length, 1);
+  assert.equal(messageSubmissions.length, 1);
+  assert.equal(sessionCreates[0].appId, 'email');
+  assert.equal(sessionCreates[0].appName, 'Email');
+  assert.equal(sessionCreates[0].completionTargets, undefined);
+  assert.equal(messageSubmissions[0].requestId.startsWith('mailbox_session_'), true);
+  const loginRequest = requests.find((entry) => entry.method === 'GET' && entry.url.startsWith('/?token='));
+  assert.equal(new URL(loginRequest.url, 'http://127.0.0.1').searchParams.get('token'), 'trial6-auth-token');
+
+  const updatedRouted = findQueueItem(approvedRouted.id, mailboxRoot)?.item;
+  assert.equal(updatedRouted?.status, 'submitted_to_session');
+  assert.equal(updatedRouted?.automation?.status, 'submitted_to_session');
+  assert.equal(updatedRouted?.automation?.targetInstance, 'trial6');
+  assert.equal(updatedRouted?.automation?.targetBaseUrl, `http://127.0.0.1:${port}`);
 } finally {
   server.close();
   rmSync(tempHome, { recursive: true, force: true });

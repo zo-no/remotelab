@@ -10,7 +10,8 @@ import {
   sessions, saveAuthSessionsAsync,
   verifyTokenAsync, verifyPasswordAsync, generateToken,
   parseCookies, setCookie, clearCookie,
-  getAuthSession, refreshAuthSession,
+  setVisitorCookie, clearVisitorCookie,
+  getAuthSession, getVisitorAuthSession, refreshAuthSession,
 } from '../lib/auth.mjs';
 import { saveUiRuntimeSelection } from '../lib/runtime-selection.mjs';
 import { getAvailableToolsAsync, saveSimpleToolAsync } from '../lib/tools.mjs';
@@ -19,24 +20,38 @@ import {
   cancelActiveRun,
   compactSession,
   createSession,
+  delegateSession,
   dropToolUse,
   forkSession,
   getHistory,
   getRunState,
+  resolveSavedAttachments,
+  saveAttachments,
   getSession,
-  getSessionBoardLayout,
   getSessionEventsAfter,
+  getSessionSourceContext,
+  getSessionTimelineEvents,
   listSessions,
-  rebuildSessionBoardLayout,
   renameSession,
+  rewriteVoiceTranscriptForSession,
   saveSessionAsTemplate,
   sendMessage,
   setSessionArchived,
   setSessionPinned,
   submitHttpMessage,
+  updateSessionLastReviewedAt,
+  updateSessionGrouping,
+  updateSessionAgreements,
   updateSessionWorkflowClassification,
   updateSessionRuntimePreferences,
 } from './session-manager.mjs';
+import {
+  createTrigger,
+  deleteTrigger,
+  getTrigger,
+  listTriggers,
+  updateTrigger,
+} from './triggers.mjs';
 import {
   normalizeSessionWorkflowPriority,
   normalizeSessionWorkflowState,
@@ -69,22 +84,34 @@ import {
   updateVisitor,
 } from './visitors.mjs';
 import { createShareSnapshot, getShareAsset, getShareSnapshot } from './shares.mjs';
+import { createSessionDetail, createSessionListItem } from './session-api-shapes.mjs';
+import { buildEventBlockEvents, buildSessionDisplayEvents } from './session-display-events.mjs';
 import { parseSessionGetRoute } from './session-route-utils.mjs';
-import { readBody } from '../lib/utils.mjs';
+import { escapeHtml, readBody } from '../lib/utils.mjs';
 import {
   getClientIp, isRateLimited, recordFailedAttempt, clearFailedAttempts,
   setSecurityHeaders, generateNonce, requireAuth,
 } from './middleware.mjs';
 import { pathExists, statOrNull } from './fs-utils.mjs';
 import { broadcastAll } from './ws-clients.mjs';
+import { handlePublicRoutes } from './router-public-routes.mjs';
+import { handleAdminRoutes } from './router-admin-routes.mjs';
+import {
+  buildFileAssetDirectUrl,
+  createFileAssetUploadIntent,
+  finalizeFileAssetUpload,
+  getFileAsset,
+  getFileAssetBootstrapConfig,
+  getFileAssetForClient,
+} from './file-assets.mjs';
 
-// Paths (files are read from disk on each request for hot-reload)
+// Paths are resolved from the active runtime root on each request.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const chatTemplatePath = join(__dirname, '..', 'templates', 'chat.html');
 const loginTemplatePath = join(__dirname, '..', 'templates', 'login.html');
-const shareTemplatePath = join(__dirname, '..', 'templates', 'share.html');
 const staticDir = join(__dirname, '..', 'static');
 const packageJsonPath = join(__dirname, '..', 'package.json');
+const releaseMetadataPath = join(__dirname, '..', '.remotelab-release.json');
 const serviceBuildRoots = [
   join(__dirname, '..', 'chat'),
   join(__dirname, '..', 'lib'),
@@ -110,6 +137,28 @@ let cachedPageBuildInfo = null;
 const frontendBuildWatchers = [];
 let frontendBuildInvalidationTimer = null;
 
+async function listSessionsForClient(options = {}) {
+  const sessions = await listSessions(options);
+  return sessions.map(createClientSessionDetail);
+}
+
+async function listSessionListItemsForClient(options = {}) {
+  const sessions = await listSessions(options);
+  return sessions.map(createSessionListItem);
+}
+
+async function getSessionForClient(id, options = {}) {
+  return createClientSessionDetail(await getSession(id, options));
+}
+
+async function getSessionListItemForClient(id, options = {}) {
+  return createSessionListItem(await getSession(id, options));
+}
+
+function createClientSessionDetail(session) {
+  return createSessionDetail(session);
+}
+
 const staticMimeTypesByExtension = {
   '.css': 'text/css; charset=utf-8',
   '.gif': 'image/gif',
@@ -131,6 +180,7 @@ const staticMimeTypesByExtension = {
 
 const staticDirResolved = resolve(staticDir);
 const MESSAGE_SUBMISSION_MAX_BYTES = 256 * 1024 * 1024;
+const VOICE_CLEANUP_PAYLOAD_MAX_BYTES = 256 * 1024;
 const uploadedMediaMimeTypes = {
   gif: 'image/gif',
   jpeg: 'image/jpeg',
@@ -169,6 +219,15 @@ function parseFormString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function parseFormJson(value, fallback) {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 async function readSessionMessagePayload(req, pathname) {
   const contentType = String(req.headers['content-type'] || '').toLowerCase();
   if (!contentType.startsWith('multipart/form-data')) {
@@ -197,6 +256,30 @@ async function readSessionMessagePayload(req, pathname) {
       originalName: typeof entry.name === 'string' ? entry.name : '',
     });
   }
+  const existingImages = parseFormJson(parseFormString(formData.get('existingImages')), []);
+  if (Array.isArray(existingImages)) {
+    for (const image of existingImages) {
+      if (!image || typeof image !== 'object') continue;
+      if (typeof image.filename !== 'string' || !image.filename.trim()) continue;
+      images.push({
+        filename: image.filename.trim(),
+        originalName: parseFormString(image.originalName),
+        mimeType: parseFormString(image.mimeType),
+      });
+    }
+  }
+  const externalAssets = parseFormJson(parseFormString(formData.get('externalAssets')), []);
+  if (Array.isArray(externalAssets)) {
+    for (const asset of externalAssets) {
+      if (!asset || typeof asset !== 'object') continue;
+      if (typeof asset.assetId !== 'string' || !asset.assetId.trim()) continue;
+      images.push({
+        assetId: asset.assetId.trim(),
+        originalName: parseFormString(asset.originalName),
+        mimeType: parseFormString(asset.mimeType),
+      });
+    }
+  }
 
   return {
     requestId: parseFormString(formData.get('requestId')),
@@ -205,7 +288,30 @@ async function readSessionMessagePayload(req, pathname) {
     model: parseFormString(formData.get('model')),
     effort: parseFormString(formData.get('effort')),
     thinking: parseFormString(formData.get('thinking')) === 'true',
+    sourceContext: parseFormJson(parseFormString(formData.get('sourceContext')), null),
     images,
+  };
+}
+
+async function readVoiceCleanupPayload(req) {
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (contentType.startsWith('multipart/form-data')) {
+    const error = new Error('Audio voice input has been removed. Send `providedTranscript` JSON instead.');
+    error.statusCode = 410;
+    throw error;
+  }
+
+  const body = await readBody(req, VOICE_CLEANUP_PAYLOAD_MAX_BYTES);
+  const payload = body ? JSON.parse(body) : {};
+  if (payload?.audio) {
+    const error = new Error('Audio voice input has been removed. Send `providedTranscript` JSON instead.');
+    error.statusCode = 410;
+    throw error;
+  }
+
+  return {
+    rewriteWithContext: payload?.rewriteWithContext === true,
+    providedTranscript: typeof payload?.providedTranscript === 'string' ? payload.providedTranscript.trim() : '',
   };
 }
 
@@ -250,29 +356,55 @@ function hasDirtyRepoPaths(paths) {
   }
 }
 
+function normalizeReleaseText(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readReleaseMetadata() {
+  try {
+    const payload = JSON.parse(readFileSync(releaseMetadataPath, 'utf8'));
+    return payload && typeof payload === 'object' ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 function loadBuildInfo() {
+  const releaseMetadata = readReleaseMetadata();
   let version = 'dev';
-  try {
-    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-    if (pkg?.version) version = String(pkg.version);
-  } catch {}
+  const releasedVersion = normalizeReleaseText(releaseMetadata?.sourceVersion);
+  if (releasedVersion) {
+    version = releasedVersion;
+  } else {
+    try {
+      const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+      if (pkg?.version) version = String(pkg.version);
+    } catch {}
+  }
 
-  let commit = '';
-  try {
-    commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
-      cwd: join(__dirname, '..'),
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {}
+  let commit = normalizeReleaseText(releaseMetadata?.sourceCommit);
+  if (!commit) {
+    try {
+      commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+        cwd: join(__dirname, '..'),
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch {}
+  }
 
-  const serviceDirty = hasDirtyRepoPaths(serviceBuildStatusPaths);
-  const serviceFingerprint = serviceDirty
-    ? formatMtimeFingerprint(serviceBuildRoots.reduce(
-      (latestMtime, root) => Math.max(latestMtime, getLatestMtimeMsSync(root)),
-      0,
-    ))
-    : '';
+  const releaseId = normalizeReleaseText(releaseMetadata?.releaseId);
+  const runtimeMode = releaseId ? 'release' : 'source';
+  const releasedDirty = typeof releaseMetadata?.sourceDirty === 'boolean'
+    ? releaseMetadata.sourceDirty
+    : null;
+  const serviceDirty = releasedDirty === null ? hasDirtyRepoPaths(serviceBuildStatusPaths) : releasedDirty;
+  const releasedFingerprint = normalizeReleaseText(releaseMetadata?.sourceFingerprint);
+  const computedFingerprint = formatMtimeFingerprint(serviceBuildRoots.reduce(
+    (latestMtime, root) => Math.max(latestMtime, getLatestMtimeMsSync(root)),
+    0,
+  ));
+  const serviceFingerprint = releasedFingerprint || (serviceDirty ? computedFingerprint : '');
   const serviceRevisionBase = commit || '';
   const serviceRevisionLabel = serviceRevisionBase
     ? (serviceDirty ? `${serviceRevisionBase}*` : serviceRevisionBase)
@@ -282,8 +414,9 @@ function loadBuildInfo() {
   const serviceLabel = serviceLabelParts.join(' · ');
   const serviceAssetVersion = sanitizeAssetVersion([
     version,
-    commit || 'working',
+    commit || releaseId || 'working',
     serviceDirty && serviceFingerprint ? `dirty-${serviceFingerprint}` : 'clean',
+    releaseId ? `rel-${releaseId}` : '',
   ].filter(Boolean).join('-'));
   const serviceTitleParts = [`Service v${version}`];
   if (serviceRevisionLabel) serviceTitleParts.push(serviceRevisionLabel);
@@ -302,6 +435,9 @@ function loadBuildInfo() {
     serviceAssetVersion,
     serviceLabel,
     serviceTitle,
+    runtimeMode,
+    releaseId: releaseId || null,
+    releaseCreatedAt: normalizeReleaseText(releaseMetadata?.createdAt) || null,
   };
 }
 
@@ -312,11 +448,21 @@ function renderPageTemplate(template, nonce, replacements = {}) {
     BUILD_LABEL: BUILD_INFO.label,
     BUILD_TITLE: BUILD_INFO.title,
     BUILD_JSON: serializeJsonForScript(BUILD_INFO),
+    PAGE_TITLE: 'RemoteLab Chat',
+    PAGE_HEAD_TAGS: '',
+    BODY_CLASS: '',
     BOOTSTRAP_JSON: serializeJsonForScript({ auth: null }),
+    EXTRA_BOOTSTRAP_SCRIPTS: '',
     ...replacements,
   };
+  if (!Object.prototype.hasOwnProperty.call(replacements, 'BOOTSTRAP_SCRIPT_TAGS')) {
+    merged.BOOTSTRAP_SCRIPT_TAGS = [
+      `<script nonce="${merged.NONCE}">window.__REMOTELAB_BUILD__ = ${merged.BUILD_JSON};</script>`,
+      `<script nonce="${merged.NONCE}">window.__REMOTELAB_BOOTSTRAP__ = ${merged.BOOTSTRAP_JSON};</script>`,
+    ].join('\n');
+  }
   return Object.entries(merged).reduce(
-    (output, [key, value]) => output.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value ?? '')),
+    (output, [key, value]) => output.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), () => String(value ?? '')),
     template,
   );
 }
@@ -333,6 +479,9 @@ function buildTemplateReplacements(buildInfo) {
 function buildAuthInfo(authSession) {
   if (!authSession) return null;
   const info = { role: authSession.role === 'visitor' ? 'visitor' : 'owner' };
+  if (typeof authSession.preferredLanguage === 'string' && authSession.preferredLanguage.trim()) {
+    info.preferredLanguage = authSession.preferredLanguage.trim();
+  }
   if (info.role === 'visitor') {
     info.appId = authSession.appId;
     info.sessionId = authSession.sessionId;
@@ -344,6 +493,7 @@ function buildAuthInfo(authSession) {
 function buildChatPageBootstrap(authSession) {
   return {
     auth: buildAuthInfo(authSession),
+    assetUploads: getFileAssetBootstrapConfig(),
   };
 }
 
@@ -391,14 +541,14 @@ async function createOwnerTemplatedSession({ folder = '~', tool = '', name = '',
   session = await applyAppTemplateToSession(session.id, app.id) || session;
   if (app.welcomeMessage) {
     await appendEvent(session.id, messageEvent('assistant', app.welcomeMessage));
-    session = await getSession(session.id) || session;
+    session = await getSessionForClient(session.id) || session;
   }
   return session;
 }
 
 async function ensureUserSeedSession(user, { folder = '~', tool = '' } = {}) {
   if (!user?.id) return null;
-  const existing = (await listSessions({ includeVisitor: true })).find((session) => session.userId === user.id);
+  const existing = (await listSessionsForClient({ includeVisitor: true })).find((session) => session.userId === user.id);
   if (existing) return existing;
   const app = await getApp(user.defaultAppId || user.appIds?.[0] || '');
   if (!app || !isTemplateAppScopeId(app.id)) return null;
@@ -442,13 +592,18 @@ function buildVisitorSessionExternalTriggerId(appId, visitorId) {
 
 async function findReusableVisitorSession(appId, visitorId) {
   if (!appId || !visitorId) return null;
-  const sessionsForApp = await listSessions({ includeVisitor: true, appId });
+  const sessionsForApp = await listSessionsForClient({ includeVisitor: true, appId });
   return sessionsForApp.find((session) => session.visitorId === visitorId && !session.archived)
     || sessionsForApp.find((session) => session.visitorId === visitorId)
     || null;
 }
 
-async function bootstrapPublicVisitorSession(app, { visitorId, visitorName = '', sessionName = '' } = {}) {
+async function bootstrapPublicVisitorSession(app, {
+  visitorId,
+  visitorName = '',
+  sessionName = '',
+  preferredLanguage = '',
+} = {}) {
   const existingSession = await findReusableVisitorSession(app?.id, visitorId);
   const chatSession = await createSession(
     '~',
@@ -475,6 +630,7 @@ async function bootstrapPublicVisitorSession(app, { visitorId, visitorName = '',
     appId: app.id,
     visitorId,
     visitorName,
+    preferredLanguage,
     sessionId: chatSession.id,
   });
   await saveAuthSessionsAsync();
@@ -649,6 +805,10 @@ function writeJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function createJsonBody(value) {
+  return JSON.stringify(value);
+}
+
 function createEtag(value) {
   return `"${createHash('sha1').update(value).digest('hex')}"`;
 }
@@ -705,11 +865,27 @@ function writeJsonCached(req, res, payload, {
   writeCachedResponse(req, res, {
     statusCode,
     contentType: 'application/json',
-    body: JSON.stringify(payload),
+    body: createJsonBody(payload),
     cacheControl,
     vary,
     headers,
   });
+}
+
+function createSessionSummaryPayload(session) {
+  return { session: createSessionListItem(session) };
+}
+
+function createSessionSummaryEtag(session) {
+  return createEtag(createJsonBody(createSessionSummaryPayload(session)));
+}
+
+function createSessionSummaryRef(session) {
+  const projected = createSessionListItem(session);
+  return {
+    id: projected?.id,
+    summaryEtag: createSessionSummaryEtag(projected),
+  };
 }
 
 function writeFileCached(req, res, contentType, body, {
@@ -744,7 +920,11 @@ async function isDirectoryPath(path) {
   return (await statOrNull(path))?.isDirectory() === true;
 }
 
-function setShareSnapshotHeaders(res) {
+function setShareSnapshotHeaders(res, nonce = '') {
+  const scriptSrc = ["'self'"];
+  if (typeof nonce === 'string' && nonce) {
+    scriptSrc.push(`'nonce-${nonce}'`);
+  }
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
@@ -755,26 +935,122 @@ function setShareSnapshotHeaders(res) {
     "form-action 'none'",
     "frame-ancestors 'none'",
     "connect-src 'none'",
-    "script-src 'self'",
-    "style-src 'unsafe-inline'",
+    `script-src ${scriptSrc.join(' ')}`,
+    "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "media-src 'self' data: blob:",
     "font-src 'none'",
   ].join('; '));
 }
 
+function buildShareSnapshotClientPayload(snapshot) {
+  const timelineEvents = Array.isArray(snapshot?.events)
+    ? snapshot.events
+      .filter((event) => event && typeof event === 'object')
+      .map((event, index) => ({
+        ...event,
+        seq: Number.isInteger(event.seq) && event.seq > 0 ? event.seq : index + 1,
+      }))
+    : [];
+  const displayEvents = buildSessionDisplayEvents(timelineEvents, {
+    sessionRunning: false,
+  });
+  const eventBlocks = Object.create(null);
+  for (const event of displayEvents) {
+    if (event?.type !== 'thinking_block') continue;
+    const startSeq = Number.isInteger(event?.blockStartSeq) ? event.blockStartSeq : 0;
+    const endSeq = Number.isInteger(event?.blockEndSeq) ? event.blockEndSeq : 0;
+    if (startSeq < 1 || endSeq < startSeq) continue;
+    const key = `${startSeq}-${endSeq}`;
+    if (eventBlocks[key]) continue;
+    eventBlocks[key] = buildEventBlockEvents(timelineEvents, startSeq, endSeq);
+  }
+
+  return {
+    id: snapshot?.id,
+    version: snapshot?.version,
+    createdAt: snapshot?.createdAt || null,
+    session: snapshot?.session && typeof snapshot.session === 'object'
+      ? snapshot.session
+      : {},
+    view: snapshot?.view && typeof snapshot.view === 'object'
+      ? snapshot.view
+      : {},
+    eventCount: timelineEvents.length,
+    displayEvents,
+    eventBlocks,
+  };
+}
+
+function normalizePageText(value, fallback = '') {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized || fallback;
+}
+
+function getRequestOrigin(req) {
+  const forwardedProto = typeof req?.headers?.['x-forwarded-proto'] === 'string'
+    ? req.headers['x-forwarded-proto'].split(',')[0].trim().toLowerCase()
+    : '';
+  const protocol = forwardedProto === 'http' || forwardedProto === 'https'
+    ? forwardedProto
+    : (req.socket?.encrypted ? 'https' : 'http');
+  const forwardedHost = typeof req?.headers?.['x-forwarded-host'] === 'string'
+    ? req.headers['x-forwarded-host'].split(',')[0].trim()
+    : '';
+  const host = forwardedHost || (typeof req?.headers?.host === 'string' ? req.headers.host.trim() : '');
+  return host ? `${protocol}://${host}` : '';
+}
+
+function getShareSnapshotPageDisplayName(snapshot) {
+  const sessionName = normalizePageText(snapshot?.session?.name);
+  if (sessionName) return sessionName;
+  const toolName = normalizePageText(snapshot?.session?.tool);
+  if (toolName) return toolName;
+  return 'Shared Snapshot';
+}
+
+function buildShareSnapshotPageReplacements(req, shareId, snapshot) {
+  const displayName = getShareSnapshotPageDisplayName(snapshot);
+  const pageTitle = `${displayName} · Shared Snapshot`;
+  const description = 'A read-only RemoteLab conversation snapshot.';
+  const origin = getRequestOrigin(req);
+  const shareUrl = origin ? `${origin}/share/${encodeURIComponent(shareId)}` : '';
+  const escapedDisplayName = escapeHtml(displayName);
+  const escapedDescription = escapeHtml(description);
+  const escapedShareUrl = shareUrl ? escapeHtml(shareUrl) : '';
+  return {
+    PAGE_TITLE: escapeHtml(pageTitle),
+    PAGE_HEAD_TAGS: [
+      `<meta name="description" content="${escapedDescription}">`,
+      `<meta property="og:type" content="website">`,
+      `<meta property="og:site_name" content="RemoteLab">`,
+      `<meta property="og:title" content="${escapedDisplayName}">`,
+      `<meta property="og:description" content="${escapedDescription}">`,
+      escapedShareUrl ? `<meta property="og:url" content="${escapedShareUrl}">` : '',
+      `<meta name="twitter:card" content="summary">`,
+      `<meta name="twitter:title" content="${escapedDisplayName}">`,
+      `<meta name="twitter:description" content="${escapedDescription}">`,
+    ].filter(Boolean).join('\n'),
+  };
+}
+
 async function writeSnapshotPage(req, res, shareId, {
+  snapshot = null,
   cacheControl,
   headers = {},
   failureText = 'Failed to load snapshot page',
 } = {}) {
-  setShareSnapshotHeaders(res);
+  const pageNonce = '';
+  setShareSnapshotHeaders(res, pageNonce);
   try {
     const pageBuildInfo = await getPageBuildInfo();
-    const sharePage = await readFile(shareTemplatePath, 'utf8');
-    const body = renderPageTemplate(sharePage, '', {
+    const sharePage = await readFile(chatTemplatePath, 'utf8');
+    const body = renderPageTemplate(sharePage, pageNonce, {
       ...buildTemplateReplacements(pageBuildInfo),
-      SHARE_PAYLOAD_URL: `/share-payload/${shareId}.js`,
+      ...(snapshot ? buildShareSnapshotPageReplacements(req, shareId, snapshot) : {}),
+      BODY_CLASS: 'visitor-mode share-snapshot-mode',
+      BOOTSTRAP_SCRIPT_TAGS: `<script src="/share-payload/${shareId}.js"></script>`,
     });
     writeCachedResponse(req, res, {
       statusCode: 200,
@@ -800,10 +1076,11 @@ function serializeJsonForScript(value) {
 
 function isOwnerOnlyRoute(pathname, method) {
   if (pathname === '/api/sessions' && (method === 'GET' || method === 'POST')) return true;
-  if (pathname === '/api/board' && method === 'GET') return true;
-  if (pathname === '/api/board/rebuild' && method === 'POST') return true;
+  if (pathname === '/api/triggers' && (method === 'GET' || method === 'POST')) return true;
+  if (pathname.startsWith('/api/triggers/') && ['GET', 'PATCH', 'DELETE'].includes(method)) return true;
   if (pathname.startsWith('/api/sessions/') && pathname.endsWith('/share') && method === 'POST') return true;
   if (pathname.startsWith('/api/sessions/') && pathname.endsWith('/fork') && method === 'POST') return true;
+  if (pathname.startsWith('/api/sessions/') && pathname.endsWith('/delegate') && method === 'POST') return true;
   if (pathname.startsWith('/api/sessions/') && method === 'PATCH') return true;
   if (pathname === '/api/models' && method === 'GET') return true;
   if (pathname === '/api/tools' && (method === 'GET' || method === 'POST')) return true;
@@ -821,6 +1098,20 @@ function isOwnerOnlyRoute(pathname, method) {
 function parseSharePayloadRoute(pathname) {
   const match = /^\/share-payload\/(snap_[a-f0-9]{48})\.js$/.exec(pathname || '');
   return match ? match[1] : null;
+}
+
+function parseTriggerRoute(pathname) {
+  const match = /^\/api\/triggers\/(trg_[a-f0-9]{24})$/.exec(pathname || '');
+  return match ? match[1] : null;
+}
+
+function parseFileAssetRoute(pathname) {
+  const match = /^\/api\/assets\/(fasset_[a-f0-9]{24})(?:\/(download|finalize))?$/.exec(pathname || '');
+  if (!match) return null;
+  return {
+    assetId: match[1],
+    action: match[2] || null,
+  };
 }
 
 function parseShareAssetRoute(pathname) {
@@ -851,233 +1142,32 @@ export async function handleRequest(req, res) {
   const nonce = generateNonce();
   setSecurityHeaders(res, nonce);
 
-  // Token auth via query
-  const queryToken = parsedUrl.query.token;
-  if (queryToken) {
-    const ip = getClientIp(req);
-    if (isRateLimited(ip)) {
-      res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': '60' });
-      res.end('Too many failed attempts. Please try again later.');
-      return;
-    }
-    if (await verifyTokenAsync(queryToken)) {
-      clearFailedAttempts(ip);
-      const sessionToken = generateToken();
-      sessions.set(sessionToken, { expiry: Date.now() + SESSION_EXPIRY, role: 'owner' });
-      await saveAuthSessionsAsync();
-      res.writeHead(302, { 'Location': '/', 'Set-Cookie': setCookie(sessionToken) });
-      res.end();
-    } else {
-      recordFailedAttempt(ip);
-      res.writeHead(302, { 'Location': '/login' });
-      res.end();
-    }
-    return;
-  }
-
-  // Login — POST (form submit)
-  if (pathname === '/login' && req.method === 'POST') {
-    const ip = getClientIp(req);
-    if (isRateLimited(ip)) {
-      res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': '60' });
-      res.end('Too many failed attempts. Please try again later.');
-      return;
-    }
-    let body;
-    try { body = await readBody(req, 4096); } catch { body = ''; }
-    const params = new URLSearchParams(body);
-    const type = params.get('type');
-    let valid = false;
-    if (type === 'token') {
-      valid = await verifyTokenAsync(params.get('token') || '');
-    } else if (type === 'password') {
-      valid = await verifyPasswordAsync(params.get('username') || '', params.get('password') || '');
-    }
-    if (valid) {
-      clearFailedAttempts(ip);
-      const sessionToken = generateToken();
-      sessions.set(sessionToken, { expiry: Date.now() + SESSION_EXPIRY, role: 'owner' });
-      await saveAuthSessionsAsync();
-      res.writeHead(302, { 'Location': '/', 'Set-Cookie': setCookie(sessionToken) });
-    } else {
-      recordFailedAttempt(ip);
-      const mode = type === 'password' ? 'pw' : 'token';
-      res.writeHead(302, { 'Location': `/login?error=1&mode=${mode}` });
-    }
-    res.end();
-    return;
-  }
-
-  // Login — GET (show form)
-  if (pathname === '/login') {
-    const hasError = parsedUrl.query.error === '1';
-    const mode = parsedUrl.query.mode === 'token' ? 'token' : 'pw';
-    let loginHtml;
-    const pageBuildInfo = await getPageBuildInfo();
-    try { loginHtml = await readFile(loginTemplatePath, 'utf8'); } catch { loginHtml = '<h1>Login template missing</h1>'; }
-    res.writeHead(200, buildHeaders({
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'private, no-store, max-age=0, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0',
-    }));
-    res.end(renderPageTemplate(loginHtml, nonce, {
-      ...buildTemplateReplacements(pageBuildInfo),
-      ERROR_CLASS: hasError ? '' : 'hidden',
-      MODE: mode,
-    }));
-    return;
-  }
-
-  // Logout
-  if (pathname === '/logout') {
-    const cookies = parseCookies(req.headers.cookie || '');
-    const token = cookies.session_token;
-    if (token) { sessions.delete(token); await saveAuthSessionsAsync(); }
-    res.writeHead(302, { 'Location': '/login', 'Set-Cookie': clearCookie() });
-    res.end();
-    return;
-  }
-
-  // ---- App visitor entry point (before auth check — visitors aren't authenticated yet) ----
-  if (pathname.startsWith('/app/') && req.method === 'GET') {
-    const shareToken = pathname.slice('/app/'.length);
-    if (!shareToken) {
-      res.writeHead(404, buildHeaders({ 'Content-Type': 'text/plain' }));
-      res.end('Not Found');
-      return;
-    }
-    const app = await getAppByShareToken(shareToken);
-    if (!app) {
-      res.writeHead(404, buildHeaders({ 'Content-Type': 'text/plain' }));
-      res.end('App not found');
-      return;
-    }
-    const visitorBrowserId = getVisitorBrowserId(req) || createVisitorBrowserId();
-    const visitorId = buildAppShareVisitorId(app.id, visitorBrowserId);
-    const { sessionToken } = await bootstrapPublicVisitorSession(app, { visitorId, sessionName: app.name });
-    res.writeHead(302, {
-      'Location': '/?visitor=1',
-      'Set-Cookie': [
-        setCookie(sessionToken),
-        setVisitorBrowserCookie(visitorBrowserId),
-      ],
-    });
-    res.end();
-    return;
-  }
-
-  if (pathname.startsWith('/visitor/') && req.method === 'GET') {
-    const shareToken = pathname.slice('/visitor/'.length);
-    if (!shareToken) {
-      res.writeHead(404, buildHeaders({ 'Content-Type': 'text/plain' }));
-      res.end('Not Found');
-      return;
-    }
-    const visitor = await getVisitorByShareToken(shareToken);
-    if (!visitor) {
-      res.writeHead(404, buildHeaders({ 'Content-Type': 'text/plain' }));
-      res.end('Visitor link not found');
-      return;
-    }
-    const app = await getApp(visitor.appId);
-    if (!app || app.shareEnabled === false) {
-      res.writeHead(404, buildHeaders({ 'Content-Type': 'text/plain' }));
-      res.end('Assigned app not found');
-      return;
-    }
-    const { sessionToken } = await bootstrapPublicVisitorSession(app, {
-      visitorId: visitor.id,
-      visitorName: visitor.name || '',
-      sessionName: `${visitor.name || 'Visitor'} · ${app.name || 'App'}`,
-    });
-    res.writeHead(302, {
-      'Location': '/?visitor=1',
-      'Set-Cookie': setCookie(sessionToken),
-    });
-    res.end();
-    return;
-  }
-
-  const sharePayloadId = parseSharePayloadRoute(pathname);
-  if (sharePayloadId && req.method === 'GET') {
-    const snapshot = await getShareSnapshot(sharePayloadId);
-    if (!snapshot) {
-      res.writeHead(404, buildHeaders({
-        'Content-Type': 'text/plain',
-        'Cache-Control': 'no-store, max-age=0, must-revalidate',
-      }));
-      res.end('Shared snapshot not found');
-      return;
-    }
-    const body = `window.__REMOTELAB_SHARE__ = ${serializeJsonForScript(snapshot)};`;
-    writeCachedResponse(req, res, {
-      statusCode: 200,
-      contentType: 'application/javascript; charset=utf-8',
-      body,
-      cacheControl: SHARE_RESOURCE_CACHE_CONTROL,
-      headers: {
-        'X-Robots-Tag': 'noindex, nofollow, noarchive',
-      },
-    });
-    return;
-  }
-
-  const shareAssetRoute = parseShareAssetRoute(pathname);
-  if (shareAssetRoute && req.method === 'GET') {
-    const asset = await getShareAsset(shareAssetRoute.shareId, shareAssetRoute.assetId);
-    if (!asset) {
-      res.writeHead(404, buildHeaders({
-        'Content-Type': 'text/plain',
-        'Cache-Control': 'no-store, max-age=0, must-revalidate',
-      }));
-      res.end('Shared asset not found');
-      return;
-    }
-    try {
-      const content = await readFile(asset.filepath);
-      writeFileCached(req, res, asset.mimeType, content, {
-        cacheControl: SHARE_RESOURCE_CACHE_CONTROL,
-      });
-    } catch {
-      res.writeHead(404, buildHeaders({
-        'Content-Type': 'text/plain',
-        'Cache-Control': 'no-store, max-age=0, must-revalidate',
-      }));
-      res.end('Shared asset not found');
-    }
-    return;
-  }
-
-  if (pathname.startsWith('/share/') && req.method === 'GET') {
-    const shareId = pathname.slice('/share/'.length);
-    const snapshot = await getShareSnapshot(shareId);
-    if (!snapshot) {
-      res.writeHead(404, buildHeaders({
-        'Content-Type': 'text/plain',
-        'Cache-Control': 'no-store, max-age=0, must-revalidate',
-      }));
-      res.end('Shared snapshot not found');
-      return;
-    }
-    await writeSnapshotPage(req, res, shareId, {
-      cacheControl: SHARE_RESOURCE_CACHE_CONTROL,
-      failureText: 'Failed to load share page',
-    });
-    return;
-  }
-
-  if (pathname === '/api/build-info' && req.method === 'GET') {
-    const pageBuildInfo = await getPageBuildInfo();
-    writeJsonCached(req, res, pageBuildInfo, {
-      cacheControl: 'no-store, max-age=0, must-revalidate',
-      vary: '',
-      headers: {
-        'X-RemoteLab-Asset-Version': pageBuildInfo.assetVersion,
-        'X-RemoteLab-Service-Build': pageBuildInfo.serviceTitle,
-        'X-RemoteLab-Frontend-Build': pageBuildInfo.frontendTitle,
-      },
-    });
+  if (await handlePublicRoutes({
+    req,
+    res,
+    parsedUrl,
+    pathname,
+    nonce,
+    loginTemplatePath,
+    getPageBuildInfo,
+    buildHeaders,
+    renderPageTemplate,
+    buildTemplateReplacements,
+    getVisitorBrowserId,
+    createVisitorBrowserId,
+    setVisitorBrowserCookie,
+    buildAppShareVisitorId,
+    bootstrapPublicVisitorSession,
+    parseSharePayloadRoute,
+    buildShareSnapshotClientPayload,
+    serializeJsonForScript,
+    writeCachedResponse,
+    SHARE_RESOURCE_CACHE_CONTROL,
+    parseShareAssetRoute,
+    writeFileCached,
+    writeSnapshotPage,
+    writeJsonCached,
+  })) {
     return;
   }
 
@@ -1092,51 +1182,235 @@ export async function handleRequest(req, res) {
   // ---- API endpoints ----
 
   const sessionGetRoute = req.method === 'GET' ? parseSessionGetRoute(pathname) : null;
+  const triggerId = parseTriggerRoute(pathname);
+  const fileAssetRoute = parseFileAssetRoute(pathname);
 
-  if (sessionGetRoute?.kind === 'list') {
+  if (pathname === '/api/triggers' && req.method === 'GET') {
+    const sessionId = typeof parsedUrl?.query?.sessionId === 'string'
+      ? parsedUrl.query.sessionId
+      : '';
+    const triggers = await listTriggers({ sessionId });
+    writeJson(res, 200, { triggers });
+    return;
+  }
+
+  if (pathname === '/api/triggers' && req.method === 'POST') {
+    let payload = {};
+    try {
+      const body = await readBody(req, 32768);
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      writeJson(res, 400, { error: 'Invalid request body' });
+      return;
+    }
+    try {
+      if (Object.prototype.hasOwnProperty.call(payload, 'thinking') && typeof payload.thinking !== 'boolean') {
+        writeJson(res, 400, { error: 'thinking must be a boolean' });
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'enabled') && typeof payload.enabled !== 'boolean') {
+        writeJson(res, 400, { error: 'enabled must be a boolean' });
+        return;
+      }
+      const trigger = await createTrigger(payload || {});
+      writeJson(res, 201, { trigger });
+    } catch (error) {
+      writeJson(res, 400, { error: error.message || 'Failed to create trigger' });
+    }
+    return;
+  }
+
+  if (triggerId && req.method === 'GET') {
+    const trigger = await getTrigger(triggerId);
+    if (!trigger) {
+      writeJson(res, 404, { error: 'Trigger not found' });
+      return;
+    }
+    writeJson(res, 200, { trigger });
+    return;
+  }
+
+  if (triggerId && req.method === 'PATCH') {
+    let payload = {};
+    try {
+      const body = await readBody(req, 32768);
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      writeJson(res, 400, { error: 'Invalid request body' });
+      return;
+    }
+    try {
+      if (Object.prototype.hasOwnProperty.call(payload, 'thinking') && typeof payload.thinking !== 'boolean') {
+        writeJson(res, 400, { error: 'thinking must be a boolean' });
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'enabled') && typeof payload.enabled !== 'boolean') {
+        writeJson(res, 400, { error: 'enabled must be a boolean' });
+        return;
+      }
+      const trigger = await updateTrigger(triggerId, payload || {});
+      if (!trigger) {
+        writeJson(res, 404, { error: 'Trigger not found' });
+        return;
+      }
+      writeJson(res, 200, { trigger });
+    } catch (error) {
+      writeJson(res, 400, { error: error.message || 'Failed to update trigger' });
+    }
+    return;
+  }
+
+  if (triggerId && req.method === 'DELETE') {
+    const trigger = await deleteTrigger(triggerId);
+    if (!trigger) {
+      writeJson(res, 404, { error: 'Trigger not found' });
+      return;
+    }
+    writeJson(res, 200, { ok: true, trigger });
+    return;
+  }
+
+  if (pathname === '/api/assets/upload-intents' && req.method === 'POST') {
+    let payload = {};
+    try {
+      const body = await readBody(req, 32768);
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      writeJson(res, 400, { error: 'Invalid request body' });
+      return;
+    }
+
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId.trim() : '';
+    if (!sessionId) {
+      writeJson(res, 400, { error: 'sessionId is required' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, sessionId)) return;
+
+    try {
+      const intent = await createFileAssetUploadIntent({
+        sessionId,
+        originalName: typeof payload?.originalName === 'string' ? payload.originalName : '',
+        mimeType: typeof payload?.mimeType === 'string' ? payload.mimeType : '',
+        sizeBytes: payload?.sizeBytes,
+        createdBy: authSession?.role === 'visitor' ? 'visitor' : 'owner',
+      });
+      writeJson(res, 200, intent);
+    } catch (error) {
+      writeJson(res, error?.statusCode || 400, { error: error.message || 'Failed to create upload intent' });
+    }
+    return;
+  }
+
+  if (fileAssetRoute && req.method === 'GET' && !fileAssetRoute.action) {
+    const asset = await getFileAsset(fileAssetRoute.assetId);
+    if (!asset) {
+      writeJson(res, 404, { error: 'Asset not found' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+    const clientAsset = await getFileAssetForClient(asset.id, {
+      includeDirectUrl: asset.status === 'ready',
+    });
+    writeJson(res, 200, { asset: clientAsset });
+    return;
+  }
+
+  if (fileAssetRoute?.action === 'finalize' && req.method === 'POST') {
+    const asset = await getFileAsset(fileAssetRoute.assetId);
+    if (!asset) {
+      writeJson(res, 404, { error: 'Asset not found' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+
+    let payload = {};
+    try {
+      const body = await readBody(req, 32768);
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      writeJson(res, 400, { error: 'Invalid request body' });
+      return;
+    }
+
+    try {
+      const next = await finalizeFileAssetUpload(asset.id, {
+        sizeBytes: payload?.sizeBytes,
+        etag: typeof payload?.etag === 'string' ? payload.etag : '',
+      });
+      writeJson(res, 200, { asset: next });
+    } catch (error) {
+      writeJson(res, error?.statusCode || 400, { error: error.message || 'Failed to finalize asset upload' });
+    }
+    return;
+  }
+
+  if (fileAssetRoute?.action === 'download' && req.method === 'GET') {
+    const asset = await getFileAsset(fileAssetRoute.assetId);
+    if (!asset) {
+      writeJson(res, 404, { error: 'Asset not found' });
+      return;
+    }
+    if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+
+    try {
+      const direct = await buildFileAssetDirectUrl(asset);
+      res.writeHead(302, buildHeaders({
+        Location: direct.url,
+        'Cache-Control': 'private, no-store, max-age=0, must-revalidate',
+      }));
+      res.end();
+    } catch (error) {
+      writeJson(res, error?.statusCode || 400, { error: error.message || 'Failed to build asset download link' });
+    }
+    return;
+  }
+
+  if (sessionGetRoute?.kind === 'list' || sessionGetRoute?.kind === 'archived-list') {
     const includeVisitor = authSession?.role === 'owner'
       && ['1', 'true', 'yes'].includes(String(parsedUrl.query.includeVisitor || '').toLowerCase());
-    const [sessionList, board] = await Promise.all([
-      listSessions({
-        includeVisitor,
-        appId: typeof parsedUrl.query.appId === 'string' ? parsedUrl.query.appId : '',
-        sourceId: typeof parsedUrl.query.sourceId === 'string' ? parsedUrl.query.sourceId : '',
-      }),
-      getSessionBoardLayout(),
-    ]);
+    const view = typeof parsedUrl.query.view === 'string'
+      ? String(parsedUrl.query.view || '').trim().toLowerCase()
+      : '';
+    const sessionList = await listSessionListItemsForClient({
+      includeVisitor,
+      includeArchived: true,
+      appId: typeof parsedUrl.query.appId === 'string' ? parsedUrl.query.appId : '',
+      sourceId: typeof parsedUrl.query.sourceId === 'string' ? parsedUrl.query.sourceId : '',
+    });
     const folderFilter = parsedUrl.query.folder;
     const filtered = folderFilter
       ? sessionList.filter((session) => session.folder === folderFilter)
       : sessionList;
-    writeJsonCached(req, res, { sessions: filtered, board });
-    return;
-  }
-
-  if (pathname === '/api/board' && req.method === 'GET') {
-    writeJsonCached(req, res, { board: await getSessionBoardLayout() });
-    return;
-  }
-
-  if (pathname === '/api/board/rebuild' && req.method === 'POST') {
-    let body = {};
-    try {
-      const raw = await readBody(req, 10240);
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-      body = {};
+    const archivedSessions = filtered.filter((session) => session?.archived === true);
+    const activeSessions = filtered.filter((session) => session?.archived !== true);
+    const targetSessions = sessionGetRoute.kind === 'archived-list'
+      ? archivedSessions
+      : activeSessions;
+    const sessionRefs = targetSessions.map(createSessionSummaryRef).filter((ref) => ref?.id);
+    if (view === 'refs') {
+      writeJsonCached(req, res, {
+        sessionRefs,
+        archivedCount: archivedSessions.length,
+      });
+      return;
     }
-
-    const result = await rebuildSessionBoardLayout({
-      sessionId: typeof body?.sessionId === 'string' ? body.sessionId : '',
+    writeJsonCached(req, res, {
+      sessions: targetSessions,
+      archivedCount: archivedSessions.length,
     });
-    writeJson(res, 200, result);
     return;
   }
 
   if (sessionGetRoute?.kind === 'detail') {
     const { sessionId } = sessionGetRoute;
     if (!requireSessionAccess(res, authSession, sessionId)) return;
-    const session = await getSession(sessionId, { includeQueuedMessages: true });
+    const view = typeof parsedUrl.query.view === 'string'
+      ? String(parsedUrl.query.view || '').trim().toLowerCase()
+      : '';
+    const session = view === 'summary' || view === 'sidebar'
+      ? await getSessionListItemForClient(sessionId)
+      : await getSessionForClient(sessionId, { includeQueuedMessages: true });
     if (!session) {
       writeJson(res, 404, { error: 'Session not found' });
       return;
@@ -1148,8 +1422,63 @@ export async function handleRequest(req, res) {
   if (sessionGetRoute?.kind === 'events') {
     const { sessionId } = sessionGetRoute;
     if (!requireSessionAccess(res, authSession, sessionId)) return;
-    const events = await getSessionEventsAfter(sessionId, 0);
-    writeJsonCached(req, res, { sessionId, events });
+    const filter = typeof parsedUrl.query.filter === 'string'
+      ? String(parsedUrl.query.filter || '').trim().toLowerCase()
+      : '';
+    if (filter === 'all') {
+      const events = await getSessionEventsAfter(sessionId, 0);
+      writeJsonCached(req, res, { sessionId, filter: 'all', events });
+      return;
+    }
+    const session = await getSessionForClient(sessionId);
+    if (!session) {
+      writeJson(res, 404, { error: 'Session not found' });
+      return;
+    }
+    const timeline = await getSessionTimelineEvents(sessionId);
+    const events = buildSessionDisplayEvents(timeline, {
+      sessionRunning: session?.activity?.run?.state === 'running',
+    });
+    writeJsonCached(req, res, { sessionId, filter: 'visible', events });
+    return;
+  }
+
+  if (sessionGetRoute?.kind === 'source-context') {
+    const { sessionId } = sessionGetRoute;
+    if (!requireSessionAccess(res, authSession, sessionId)) return;
+    const sourceContext = await getSessionSourceContext(sessionId, {
+      requestId: typeof parsedUrl.query.requestId === 'string' ? parsedUrl.query.requestId : '',
+    });
+    if (!sourceContext) {
+      writeJson(res, 404, { error: 'Session not found' });
+      return;
+    }
+    writeJson(res, 200, { sessionId, sourceContext });
+    return;
+  }
+
+  if (sessionGetRoute?.kind === 'event-block') {
+    const {
+      sessionId,
+      startSeq,
+      endSeq,
+    } = sessionGetRoute;
+    if (!requireSessionAccess(res, authSession, sessionId)) return;
+    const session = await getSessionForClient(sessionId);
+    if (!session) {
+      writeJson(res, 404, { error: 'Session not found' });
+      return;
+    }
+    const timeline = await getSessionTimelineEvents(sessionId);
+    const events = buildEventBlockEvents(timeline, startSeq, endSeq);
+    if (events.length === 0) {
+      writeJson(res, 404, { error: 'Event block not found' });
+      return;
+    }
+    writeJsonCached(req, res, { sessionId, startSeq, endSeq, events }, {
+      cacheControl: IMMUTABLE_PRIVATE_EVENT_CACHE_CONTROL,
+      vary: '',
+    });
     return;
   }
 
@@ -1192,8 +1521,13 @@ export async function handleRequest(req, res) {
     const hasModelPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'model');
     const hasEffortPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'effort');
     const hasThinkingPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'thinking');
+    const hasGroupPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'group');
+    const hasDescriptionPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'description');
+    const hasSidebarOrderPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'sidebarOrder');
+    const hasActiveAgreementsPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'activeAgreements');
     const hasWorkflowStatePatch = Object.prototype.hasOwnProperty.call(patch || {}, 'workflowState');
     const hasWorkflowPriorityPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'workflowPriority');
+    const hasLastReviewedAtPatch = Object.prototype.hasOwnProperty.call(patch || {}, 'lastReviewedAt');
     if (hasArchivedPatch && typeof patch.archived !== 'boolean') {
       writeJson(res, 400, { error: 'archived must be a boolean' });
       return;
@@ -1218,12 +1552,39 @@ export async function handleRequest(req, res) {
       writeJson(res, 400, { error: 'thinking must be a boolean' });
       return;
     }
+    if (hasGroupPatch && patch.group !== null && typeof patch.group !== 'string') {
+      writeJson(res, 400, { error: 'group must be a string or null' });
+      return;
+    }
+    if (hasDescriptionPatch && patch.description !== null && typeof patch.description !== 'string') {
+      writeJson(res, 400, { error: 'description must be a string or null' });
+      return;
+    }
+    if (hasSidebarOrderPatch && patch.sidebarOrder !== null && (!Number.isInteger(patch.sidebarOrder) || patch.sidebarOrder < 1)) {
+      writeJson(res, 400, { error: 'sidebarOrder must be a positive integer or null' });
+      return;
+    }
+    if (hasActiveAgreementsPatch && patch.activeAgreements !== null && !Array.isArray(patch.activeAgreements)) {
+      writeJson(res, 400, { error: 'activeAgreements must be an array of strings or null' });
+      return;
+    }
+    if (hasActiveAgreementsPatch && Array.isArray(patch.activeAgreements)) {
+      const invalidAgreement = patch.activeAgreements.find((entry) => typeof entry !== 'string');
+      if (invalidAgreement !== undefined) {
+        writeJson(res, 400, { error: 'activeAgreements must contain only strings' });
+        return;
+      }
+    }
     if (hasWorkflowStatePatch && patch.workflowState !== null && typeof patch.workflowState !== 'string') {
       writeJson(res, 400, { error: 'workflowState must be a string or null' });
       return;
     }
     if (hasWorkflowPriorityPatch && patch.workflowPriority !== null && typeof patch.workflowPriority !== 'string') {
       writeJson(res, 400, { error: 'workflowPriority must be a string or null' });
+      return;
+    }
+    if (hasLastReviewedAtPatch && patch.lastReviewedAt !== null && typeof patch.lastReviewedAt !== 'string') {
+      writeJson(res, 400, { error: 'lastReviewedAt must be a string or null' });
       return;
     }
     if (
@@ -1244,6 +1605,15 @@ export async function handleRequest(req, res) {
       writeJson(res, 400, { error: 'workflowPriority must be high, medium, or low' });
       return;
     }
+    if (
+      hasLastReviewedAtPatch
+      && patch.lastReviewedAt !== null
+      && String(patch.lastReviewedAt).trim()
+      && !Number.isFinite(Date.parse(String(patch.lastReviewedAt).trim()))
+    ) {
+      writeJson(res, 400, { error: 'lastReviewedAt must be a valid timestamp or null' });
+      return;
+    }
     let session = null;
     if (typeof patch.name === 'string' && patch.name.trim()) {
       session = await renameSession(sessionId, patch.name.trim());
@@ -1253,6 +1623,18 @@ export async function handleRequest(req, res) {
     }
     if (hasPinnedPatch) {
       session = await setSessionPinned(sessionId, patch.pinned) || session;
+    }
+    if (hasGroupPatch || hasDescriptionPatch || hasSidebarOrderPatch) {
+      session = await updateSessionGrouping(sessionId, {
+        ...(hasGroupPatch ? { group: patch.group ?? '' } : {}),
+        ...(hasDescriptionPatch ? { description: patch.description ?? '' } : {}),
+        ...(hasSidebarOrderPatch ? { sidebarOrder: patch.sidebarOrder ?? null } : {}),
+      }) || session;
+    }
+    if (hasActiveAgreementsPatch) {
+      session = await updateSessionAgreements(sessionId, {
+        activeAgreements: patch.activeAgreements ?? [],
+      }) || session;
     }
     if (hasWorkflowStatePatch || hasWorkflowPriorityPatch) {
       session = await updateSessionWorkflowClassification(sessionId, {
@@ -1268,14 +1650,17 @@ export async function handleRequest(req, res) {
         ...(hasThinkingPatch ? { thinking: patch.thinking } : {}),
       }) || session;
     }
+    if (hasLastReviewedAtPatch) {
+      session = await updateSessionLastReviewedAt(sessionId, patch.lastReviewedAt || '') || session;
+    }
     if (!session) {
-      session = await getSession(sessionId);
+      session = await getSessionForClient(sessionId);
     }
     if (!session) {
       writeJson(res, 404, { error: 'Session not found' });
       return;
     }
-    writeJson(res, 200, { session });
+    writeJson(res, 200, { session: createClientSessionDetail(session) });
     return;
   }
 
@@ -1303,24 +1688,67 @@ export async function handleRequest(req, res) {
       }
       try {
         const requestId = typeof payload?.requestId === 'string' ? payload.requestId.trim() : '';
+        const requestedImages = Array.isArray(payload?.images) ? payload.images.filter(Boolean) : [];
+        const uploadedImages = requestedImages.filter((image) => Buffer.isBuffer(image?.buffer) || typeof image?.data === 'string');
+        const existingImages = requestedImages.filter((image) => typeof image?.filename === 'string' && image.filename.trim() && !image?.assetId);
+        const externalAssetImages = [];
+        for (const image of requestedImages) {
+          const assetId = typeof image?.assetId === 'string' ? image.assetId.trim() : '';
+          if (!assetId) continue;
+          const asset = await getFileAsset(assetId);
+          if (!asset) {
+            writeJson(res, 400, { error: `Unknown asset: ${assetId}` });
+            return;
+          }
+          if (!requireSessionAccess(res, authSession, asset.sessionId)) return;
+          if (asset.status !== 'ready') {
+            writeJson(res, 409, { error: `Asset is not ready: ${assetId}` });
+            return;
+          }
+          const localizedPath = typeof asset.localizedPath === 'string' && asset.localizedPath && await pathExists(asset.localizedPath)
+            ? asset.localizedPath
+            : '';
+          externalAssetImages.push({
+            assetId: asset.id,
+            ...(localizedPath ? {
+              savedPath: localizedPath,
+              filename: typeof image?.filename === 'string' && image.filename.trim()
+                ? image.filename.trim()
+                : basename(localizedPath),
+            } : {}),
+            originalName: typeof image?.originalName === 'string' && image.originalName.trim()
+              ? image.originalName.trim()
+              : asset.originalName,
+            mimeType: typeof image?.mimeType === 'string' && image.mimeType.trim()
+              ? image.mimeType.trim()
+              : asset.mimeType,
+          });
+        }
+        const preSavedAttachments = [
+          ...(await resolveSavedAttachments(existingImages)),
+          ...(uploadedImages.length > 0 ? await saveAttachments(uploadedImages) : []),
+          ...externalAssetImages,
+        ];
         const messageOptions = {
           tool: authSession?.role === 'visitor' ? undefined : payload.tool || undefined,
           thinking: authSession?.role === 'visitor' ? false : !!payload.thinking,
           model: authSession?.role === 'visitor' ? undefined : payload.model || undefined,
           effort: authSession?.role === 'visitor' ? undefined : payload.effort || undefined,
+          sourceContext: authSession?.role === 'visitor' ? undefined : payload.sourceContext,
+          ...(preSavedAttachments.length > 0 ? { preSavedAttachments } : {}),
         };
         const outcome = requestId
-          ? await submitHttpMessage(sessionId, payload.text.trim(), payload.images || [], {
+          ? await submitHttpMessage(sessionId, payload.text.trim(), [], {
               ...messageOptions,
               requestId,
             })
-          : await sendMessage(sessionId, payload.text.trim(), payload.images || [], messageOptions);
-        writeJson(res, outcome.duplicate ? 200 : 202, {
+          : await sendMessage(sessionId, payload.text.trim(), [], messageOptions);
+      writeJson(res, outcome.duplicate ? 200 : 202, {
           requestId: requestId || outcome.run?.requestId || null,
           duplicate: outcome.duplicate,
           queued: outcome.queued,
           run: outcome.run,
-          session: outcome.session,
+          session: createClientSessionDetail(outcome.session),
         });
       } catch (error) {
         const statusCode = error?.code === 'SESSION_ARCHIVED' ? 409 : 400;
@@ -1329,11 +1757,58 @@ export async function handleRequest(req, res) {
       return;
     }
 
+    if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'sessions' && sessionId && action === 'voice-transcriptions' && req.method === 'POST') {
+      if (!requireSessionAccess(res, authSession, sessionId)) return;
+      let payload;
+      try {
+        payload = await readVoiceCleanupPayload(req);
+      } catch (error) {
+        writeJson(
+          res,
+          error.code === 'BODY_TOO_LARGE' ? 413 : (error?.statusCode || 400),
+          { error: error.code === 'BODY_TOO_LARGE' ? 'Request body too large' : (error?.message || 'Bad request') },
+        );
+        return;
+      }
+
+      const providedTranscript = typeof payload?.providedTranscript === 'string'
+        ? payload.providedTranscript.trim()
+        : '';
+      if (!providedTranscript) {
+        writeJson(res, 400, { error: 'providedTranscript is required' });
+        return;
+      }
+
+      try {
+        let transcript = providedTranscript;
+        let rewriteApplied = false;
+        if (payload.rewriteWithContext && transcript) {
+          try {
+            const rewritten = await rewriteVoiceTranscriptForSession(sessionId, transcript);
+            if (typeof rewritten?.transcript === 'string' && rewritten.transcript.trim()) {
+              rewriteApplied = rewritten.changed === true;
+              transcript = rewritten.transcript.trim();
+            }
+          } catch (error) {
+            console.warn(`[voice-cleanup] transcript rewrite failed for ${sessionId.slice(0, 8)}: ${error?.message || error}`);
+          }
+        }
+        writeJson(res, 200, {
+          transcript,
+          ...(rewriteApplied ? { rawTranscript: providedTranscript } : {}),
+          rewriteApplied,
+        });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 400, { error: error?.message || 'Voice cleanup failed' });
+      }
+      return;
+    }
+
     if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'sessions' && sessionId && action === 'cancel') {
       if (!requireSessionAccess(res, authSession, sessionId)) return;
       const run = await cancelActiveRun(sessionId);
       if (!run) {
-        const session = await getSession(sessionId);
+        const session = await getSessionForClient(sessionId);
         if (session && session.activity?.run?.state !== 'running') {
           writeJson(res, 200, { run: null, session });
           return;
@@ -1354,7 +1829,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to compact session' });
         return;
       }
-      writeJson(res, 200, { ok: true, session: await getSession(sessionId) });
+      writeJson(res, 200, { ok: true, session: await getSessionForClient(sessionId) });
       return;
     }
 
@@ -1367,7 +1842,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to drop tool results' });
         return;
       }
-      writeJson(res, 200, { ok: true, session: await getSession(sessionId) });
+      writeJson(res, 200, { ok: true, session: await getSessionForClient(sessionId) });
       return;
     }
 
@@ -1392,7 +1867,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 400, { error: 'appId is required' });
         return;
       }
-      const session = await getSession(sessionId);
+      const session = await getSessionForClient(sessionId);
       if (!session) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
@@ -1410,7 +1885,7 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to apply template' });
         return;
       }
-      writeJson(res, 200, { session: updated });
+      writeJson(res, 200, { session: createClientSessionDetail(updated) });
       return;
     }
 
@@ -1432,7 +1907,7 @@ export async function handleRequest(req, res) {
           return;
         }
       }
-      const session = await getSession(sessionId);
+      const session = await getSessionForClient(sessionId);
       if (!session) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
@@ -1452,7 +1927,7 @@ export async function handleRequest(req, res) {
 
     if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'sessions' && sessionId && action === 'fork') {
       if (!requireSessionAccess(res, authSession, sessionId)) return;
-      const source = await getSession(sessionId);
+      const source = await getSessionForClient(sessionId);
       if (!source) {
         writeJson(res, 404, { error: 'Session not found' });
         return;
@@ -1470,7 +1945,63 @@ export async function handleRequest(req, res) {
         writeJson(res, 409, { error: 'Unable to fork session' });
         return;
       }
-      writeJson(res, 201, { session });
+      writeJson(res, 201, { session: createClientSessionDetail(session) });
+      return;
+    }
+
+    if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'sessions' && sessionId && action === 'delegate') {
+      if (!requireSessionAccess(res, authSession, sessionId)) return;
+      const source = await getSessionForClient(sessionId);
+      if (!source) {
+        writeJson(res, 404, { error: 'Session not found' });
+        return;
+      }
+      if (source.visitorId) {
+        writeJson(res, 409, { error: 'Visitor sessions cannot be delegated' });
+        return;
+      }
+
+      let payload = {};
+      try {
+        const body = await readBody(req, 32768);
+        payload = body ? JSON.parse(body) : {};
+      } catch {
+        writeJson(res, 400, { error: 'Invalid request body' });
+        return;
+      }
+
+      const task = typeof payload?.task === 'string' ? payload.task.trim() : '';
+      if (!task) {
+        writeJson(res, 400, { error: 'task is required' });
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'tool') && payload.tool !== null && typeof payload.tool !== 'string') {
+        writeJson(res, 400, { error: 'tool must be a string when provided' });
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'internal') && typeof payload.internal !== 'boolean') {
+        writeJson(res, 400, { error: 'internal must be a boolean when provided' });
+        return;
+      }
+
+      try {
+        const outcome = await delegateSession(sessionId, {
+          task,
+          name: typeof payload?.name === 'string' ? payload.name.trim() : '',
+          tool: typeof payload?.tool === 'string' ? payload.tool.trim() : '',
+          internal: payload?.internal === true,
+        });
+        if (!outcome?.session) {
+          writeJson(res, 409, { error: 'Unable to delegate session' });
+          return;
+        }
+        writeJson(res, 201, {
+          session: createClientSessionDetail(outcome.session),
+          run: outcome.run || null,
+        });
+      } catch (error) {
+        writeJson(res, 400, { error: error.message || 'Failed to delegate session' });
+      }
       return;
     }
   }
@@ -1483,7 +2014,7 @@ export async function handleRequest(req, res) {
       return;
     }
 
-    const session = await getSession(id);
+    const session = await getSessionForClient(id);
     if (!session) {
       writeJson(res, 404, { error: 'Session not found' });
       return;
@@ -1511,6 +2042,7 @@ export async function handleRequest(req, res) {
       throw err;
     }
     try {
+      const payload = JSON.parse(body);
       const {
         folder,
         tool,
@@ -1524,9 +2056,11 @@ export async function handleRequest(req, res) {
         group,
         description,
         systemPrompt,
+        internalRole,
         completionTargets,
         externalTriggerId,
-      } = JSON.parse(body);
+        sourceContext,
+      } = payload;
       if (!folder || !tool) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'folder and tool are required' }));
@@ -1564,7 +2098,7 @@ export async function handleRequest(req, res) {
           return;
         }
       }
-      let session = await createSession(resolvedFolder, tool, name || '', {
+      const createOptions = {
         appId: resolvedApp?.id || (typeof appId === 'string' ? appId : ''),
         appName: resolvedApp?.name || (typeof appName === 'string' ? appName : ''),
         userId: resolvedUser?.id || '',
@@ -1573,10 +2107,24 @@ export async function handleRequest(req, res) {
         sourceName: typeof sourceName === 'string' ? sourceName : '',
         group: group || '',
         description: description || '',
-        systemPrompt: typeof systemPrompt === 'string' ? systemPrompt : '',
         completionTargets: Array.isArray(completionTargets) ? completionTargets : [],
         externalTriggerId: typeof externalTriggerId === 'string' ? externalTriggerId : '',
-      });
+      };
+      if (Object.prototype.hasOwnProperty.call(payload, 'systemPrompt')) {
+        createOptions.systemPrompt = typeof systemPrompt === 'string' ? systemPrompt : '';
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'internalRole')) {
+        if (internalRole !== null && typeof internalRole !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'internalRole must be a string when provided' }));
+          return;
+        }
+        createOptions.internalRole = typeof internalRole === 'string' ? internalRole.trim() : '';
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'sourceContext')) {
+        createOptions.sourceContext = sourceContext;
+      }
+      let session = await createSession(resolvedFolder, tool, name || '', createOptions);
 
       const requestedApp = resolvedApp || (
         typeof appId === 'string' && appId.trim()
@@ -1587,12 +2135,12 @@ export async function handleRequest(req, res) {
         session = await applyAppTemplateToSession(session.id, requestedApp.id) || session;
         if (requestedApp.welcomeMessage) {
           await appendEvent(session.id, messageEvent('assistant', requestedApp.welcomeMessage));
-          session = await getSession(session.id) || session;
+          session = await getSessionForClient(session.id) || session;
         }
       }
 
       res.writeHead(201, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ session }));
+      res.end(JSON.stringify({ session: createClientSessionDetail(session) }));
     } catch {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid request body' }));
@@ -1811,353 +2359,16 @@ export async function handleRequest(req, res) {
     return;
   }
 
-  // ---- App CRUD APIs (owner only) ----
-
-  if (pathname === '/api/apps' && req.method === 'GET') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    writeJsonCached(req, res, { apps: await listApps() });
-    return;
-  }
-
-  if (pathname === '/api/apps' && req.method === 'POST') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    let body;
-    try { body = await readBody(req, 10240); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Bad request' }));
-      return;
-    }
-    try {
-      const { name, systemPrompt, welcomeMessage, skills, tool } = JSON.parse(body);
-      const app = await createApp({ name, systemPrompt, welcomeMessage, skills, tool });
-      res.writeHead(201, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ app }));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-    return;
-  }
-
-  if (pathname.startsWith('/api/apps/') && req.method === 'PATCH') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    const id = pathname.split('/').pop();
-    if (isBuiltinAppId(id)) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Built-in apps cannot be modified' }));
-      return;
-    }
-    let body;
-    try { body = await readBody(req, 10240); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Bad request' }));
-      return;
-    }
-    try {
-      const updates = JSON.parse(body);
-      const updated = await updateApp(id, updates);
-      if (updated) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ app: updated }));
-      } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'App not found' }));
-      }
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-    return;
-  }
-
-  if (pathname.startsWith('/api/apps/') && req.method === 'DELETE') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    const id = pathname.split('/').pop();
-    if (isBuiltinAppId(id)) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Built-in apps cannot be deleted' }));
-      return;
-    }
-    const ok = await deleteApp(id);
-    if (ok) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    } else {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'App not found' }));
-    }
-    return;
-  }
-
-  // ---- User profile APIs (owner only) ----
-
-  if (pathname === '/api/users' && req.method === 'GET') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    writeJsonCached(req, res, { users: await listUsers() });
-    return;
-  }
-
-  if (pathname === '/api/users' && req.method === 'POST') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    let body;
-    try { body = await readBody(req, 16384); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Bad request' }));
-      return;
-    }
-    try {
-      const payload = JSON.parse(body);
-      const apps = await resolveTemplateApps(payload.appIds);
-      if (apps.length === 0) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'At least one template app is required' }));
-        return;
-      }
-      const defaultAppId = typeof payload.defaultAppId === 'string' && payload.defaultAppId.trim()
-        ? payload.defaultAppId.trim()
-        : apps[0].id;
-      if (!apps.some((app) => app.id === defaultAppId)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'defaultAppId must be one of the allowed apps' }));
-        return;
-      }
-      const folder = await normalizeSessionFolderInput(payload.folder);
-      if (!folder) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Folder does not exist' }));
-        return;
-      }
-      const user = await createUser({
-        name: typeof payload.name === 'string' ? payload.name : '',
-        appIds: apps.map((app) => app.id),
-        defaultAppId,
-      });
-      const session = payload.autoCreateSession === false
-        ? null
-        : await ensureUserSeedSession(user, {
-          folder,
-          tool: typeof payload.tool === 'string' ? payload.tool.trim() : '',
-        });
-      res.writeHead(201, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ user, session }));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-    return;
-  }
-
-  if (pathname.startsWith('/api/users/') && req.method === 'PATCH') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    const id = pathname.split('/').pop();
-    let body;
-    try { body = await readBody(req, 16384); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Bad request' }));
-      return;
-    }
-    try {
-      const payload = JSON.parse(body);
-      const updates = {};
-      if (typeof payload.name === 'string') {
-        updates.name = payload.name;
-      }
-      if (Object.prototype.hasOwnProperty.call(payload, 'shareVisitorId')) {
-        updates.shareVisitorId = typeof payload.shareVisitorId === 'string'
-          ? payload.shareVisitorId.trim()
-          : '';
-      }
-      if (Object.prototype.hasOwnProperty.call(payload, 'appIds')) {
-        const apps = await resolveTemplateApps(payload.appIds);
-        if (apps.length === 0) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'At least one template app is required' }));
-          return;
-        }
-        updates.appIds = apps.map((app) => app.id);
-        if (typeof payload.defaultAppId === 'string' && payload.defaultAppId.trim()) {
-          if (!updates.appIds.includes(payload.defaultAppId.trim())) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'defaultAppId must be one of the allowed apps' }));
-            return;
-          }
-          updates.defaultAppId = payload.defaultAppId.trim();
-        }
-      } else if (typeof payload.defaultAppId === 'string' && payload.defaultAppId.trim()) {
-        updates.defaultAppId = payload.defaultAppId.trim();
-      }
-      const updated = await updateUser(id, updates);
-      if (updated) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ user: updated }));
-      } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'User not found' }));
-      }
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-    return;
-  }
-
-  if (pathname.startsWith('/api/users/') && req.method === 'DELETE') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    const id = pathname.split('/').pop();
-    const user = await getUser(id);
-    const ok = await deleteUser(id);
-    if (ok) {
-      if (user?.shareVisitorId) {
-        await deleteVisitor(user.shareVisitorId).catch(() => false);
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    } else {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'User not found' }));
-    }
-    return;
-  }
-
-  // ---- Visitor preset APIs (owner only) ----
-
-  if (pathname === '/api/visitors' && req.method === 'GET') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    writeJsonCached(req, res, { visitors: await listVisitors() });
-    return;
-  }
-
-  if (pathname === '/api/visitors' && req.method === 'POST') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    let body;
-    try { body = await readBody(req, 10240); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Bad request' }));
-      return;
-    }
-    try {
-      const { name, appId } = JSON.parse(body);
-      const app = await getApp(appId);
-      if (!app || app.shareEnabled === false) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Shareable app is required' }));
-        return;
-      }
-      const visitor = await createVisitor({ name, appId: app.id });
-      res.writeHead(201, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ visitor }));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-    return;
-  }
-
-  if (pathname.startsWith('/api/visitors/') && req.method === 'PATCH') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    const id = pathname.split('/').pop();
-    let body;
-    try { body = await readBody(req, 10240); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Bad request' }));
-      return;
-    }
-    try {
-      const updates = JSON.parse(body);
-      if (updates.appId) {
-        const app = await getApp(updates.appId);
-        if (!app || app.shareEnabled === false) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Shareable app is required' }));
-          return;
-        }
-      }
-      const updated = await updateVisitor(id, updates);
-      if (updated) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ visitor: updated }));
-      } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Visitor not found' }));
-      }
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-    return;
-  }
-
-  if (pathname.startsWith('/api/visitors/') && req.method === 'DELETE') {
-    const authSession = getAuthSession(req);
-    if (authSession?.role !== 'owner') {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Owner access required' }));
-      return;
-    }
-    const id = pathname.split('/').pop();
-    const ok = await deleteVisitor(id);
-    if (ok) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    } else {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Visitor not found' }));
-    }
+  if (await handleAdminRoutes({
+    req,
+    res,
+    pathname,
+    writeJsonCached,
+    createClientSessionDetail,
+    normalizeSessionFolderInput,
+    resolveTemplateApps,
+    ensureUserSeedSession,
+  })) {
     return;
   }
 
@@ -2180,7 +2391,12 @@ export async function handleRequest(req, res) {
   // Main page (chat UI) — read from disk each time for hot-reload
   if (pathname === '/') {
     try {
-      const authSession = getAuthSession(req);
+      // Use visitor cookie when explicitly in visitor mode, otherwise use owner cookie.
+      // This prevents visitor share links from hijacking the owner's session cookie.
+      const isVisitorMode = parsedUrl.query.visitor === '1';
+      const authSession = isVisitorMode
+        ? getVisitorAuthSession(req)
+        : getAuthSession(req);
       const pageBootstrap = buildChatPageBootstrap(authSession);
       const [pageBuildInfo, chatPage, refreshedCookie] = await Promise.all([
         getPageBuildInfo(),

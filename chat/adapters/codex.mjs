@@ -2,6 +2,9 @@ import {
   messageEvent, toolUseEvent, toolResultEvent,
   fileChangeEvent, reasoningEvent, statusEvent, usageEvent,
 } from '../normalizer.mjs';
+import { DEFAULT_CODEX_DEVELOPER_INSTRUCTIONS } from '../runtime-policy.mjs';
+
+export { DEFAULT_CODEX_DEVELOPER_INSTRUCTIONS } from '../runtime-policy.mjs';
 
 /**
  * Codex CLI adapter.
@@ -181,23 +184,54 @@ function parseItem(item) {
 }
 
 /**
- * System instruction prepended to every Codex prompt to ensure
- * the model completes all work within a single turn.
+ * Optional system instruction prepended to Codex prompts.
+ *
+ * RemoteLab now leaves this empty by default so local project memory and
+ * session prompts remain the primary steering layer. Operators can still set
+ * `REMOTELAB_CODEX_SYSTEM_PREFIX` if they want to force an extra prefix.
  */
-const CODEX_SYSTEM_PREFIX =
-  'IMPORTANT: Complete ALL requested work in this single response. ' +
-  'Do NOT stop after planning — execute every step (file creation, edits, commands) before finishing. ' +
-  'Never say "I will do X next" and then end your turn without actually doing X.\n\n';
+const CODEX_SYSTEM_PREFIX = process.env.REMOTELAB_CODEX_SYSTEM_PREFIX || '';
+/**
+ * Optional developer instructions passed through Codex's own supported
+ * `developer_instructions` config key. This is stronger than a prompt prefix
+ * when the manager needs to shape the agent's default reply style.
+ */
+const CODEX_DEVELOPER_INSTRUCTIONS = process.env.REMOTELAB_CODEX_DEVELOPER_INSTRUCTIONS || '';
+const HAS_CODEX_DEVELOPER_INSTRUCTIONS_ENV = Object.prototype.hasOwnProperty.call(
+  process.env,
+  'REMOTELAB_CODEX_DEVELOPER_INSTRUCTIONS',
+);
+
+function encodeTomlString(value) {
+  return JSON.stringify(String(value || ''));
+}
+
+function resolveDeveloperInstructions(options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'developerInstructions')) {
+    return typeof options.developerInstructions === 'string'
+      ? options.developerInstructions.trim()
+      : '';
+  }
+  if (HAS_CODEX_DEVELOPER_INSTRUCTIONS_ENV) {
+    return CODEX_DEVELOPER_INSTRUCTIONS.trim();
+  }
+  return DEFAULT_CODEX_DEVELOPER_INSTRUCTIONS;
+}
 
 /**
  * Build args for spawning Codex exec.
  */
 export function buildCodexArgs(prompt, options = {}) {
   const args = ['exec'];
+  const developerInstructions = resolveDeveloperInstructions(options);
 
   args.push('--json');
   args.push('--dangerously-bypass-approvals-and-sandbox');
   args.push('--skip-git-repo-check');
+
+  if (developerInstructions) {
+    args.push('-c', `developer_instructions=${encodeTomlString(developerInstructions)}`);
+  }
 
   if (options.model) {
     args.push('-m', options.model);

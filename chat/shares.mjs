@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { CHAT_IMAGES_DIR, CHAT_SHARE_SNAPSHOTS_DIR } from '../lib/config.mjs';
 import { createSerialTaskQueue, ensureDir, readJson, writeJsonAtomic } from './fs-utils.mjs';
+import { materializeFileAssetAttachments } from './file-assets.mjs';
 
 const runShareMutation = createSerialTaskQueue();
 const SHARE_ID_PATTERN = /^snap_[a-f0-9]{48}$/;
@@ -49,6 +50,15 @@ async function readAttachmentBuffer(image) {
   if (typeof image.data === 'string' && image.data) {
     const buffer = Buffer.from(image.data, 'base64');
     if (buffer.length > 0) return buffer;
+  }
+
+  if (typeof image.assetId === 'string' && image.assetId) {
+    try {
+      const materialized = (await materializeFileAssetAttachments([image]))[0];
+      if (typeof materialized?.savedPath === 'string' && materialized.savedPath) {
+        return await readFile(materialized.savedPath);
+      }
+    } catch {}
   }
 
   const filename = typeof image.filename === 'string' ? image.filename : null;

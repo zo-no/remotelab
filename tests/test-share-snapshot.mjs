@@ -16,6 +16,10 @@ const base = `http://127.0.0.1:${port}`;
 
 let server = null;
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function request(method, path, { body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, base);
@@ -104,6 +108,15 @@ async function main() {
   assert.strictEqual(createRes.status, 201, 'session creation should succeed');
   const session = JSON.parse(createRes.body).session;
   assert.ok(session?.id, 'session id should exist');
+
+  const renameRes = await request('PATCH', `/api/sessions/${session.id}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ name: 'Share preview title' }),
+  });
+  assert.strictEqual(renameRes.status, 200, 'session rename should succeed');
 
   const historyDir = join(configDir, 'chat-history', session.id);
   mkdirSync(join(historyDir, 'events'), { recursive: true });
@@ -236,17 +249,27 @@ async function main() {
   assert.match(publicShareRes.headers['content-security-policy'] || '', /connect-src 'none'/, 'share page CSP should block network access');
   assert.match(publicShareRes.headers['content-security-policy'] || '', /media-src 'self' data: blob:/, 'share page CSP should allow public media playback');
   assert.strictEqual(publicShareRes.headers['referrer-policy'], 'no-referrer', 'share page should suppress referrer leakage');
-  assert.match(publicShareRes.body, /Read-only snapshot/, 'share page should be read-only');
   assert.match(publicShareRes.body, /<meta name="color-scheme" content="light dark">/);
-  assert.match(publicShareRes.body, /<meta name="theme-color" content="#f5f7fb" media="\(prefers-color-scheme: light\)">/);
-  assert.match(publicShareRes.body, /<meta name="theme-color" content="#0b1020" media="\(prefers-color-scheme: dark\)">/);
-  assert.match(publicShareRes.body, /@media \(prefers-color-scheme: dark\)/);
+  assert.match(publicShareRes.body, /<meta name="theme-color" content="#ffffff" media="\(prefers-color-scheme: light\)">/);
+  assert.match(publicShareRes.body, /<meta name="theme-color" content="#1e1e1e" media="\(prefers-color-scheme: dark\)">/);
+  assert.match(publicShareRes.body, /<title>Share preview title · Shared Snapshot<\/title>/, 'share page title should expose the shared session name');
+  assert.match(publicShareRes.body, /<meta name="description" content="A read-only RemoteLab conversation snapshot\.">/, 'share page should expose a generic preview description');
+  assert.match(publicShareRes.body, /<meta property="og:title" content="Share preview title">/, 'share page should expose an OG title for previews');
+  assert.match(publicShareRes.body, /<meta property="og:description" content="A read-only RemoteLab conversation snapshot\.">/, 'share page should expose an OG description for previews');
+  assert.match(publicShareRes.body, new RegExp(`<meta property="og:url" content="${escapeRegex(`${base}${sharePayload.share.url}`)}">`), 'share page should expose an absolute OG URL for previews');
+  assert.match(publicShareRes.body, /<meta name="twitter:card" content="summary">/, 'share page should expose a compact twitter preview card');
+  assert.match(publicShareRes.body, /<meta name="twitter:title" content="Share preview title">/, 'share page should mirror the preview title for twitter cards');
   assert.match(publicShareRes.body, /\/favicon\.ico\?v=/, 'share page should fingerprint icon URLs for immutable caching');
   assert.match(publicShareRes.body, /\/icon\.svg\?v=/, 'share page should fingerprint svg icon URLs for immutable caching');
+  assert.match(publicShareRes.body, /<body class="visitor-mode share-snapshot-mode">/, 'share page should boot directly into read-only chat mode');
+  assert.match(publicShareRes.body, /\/chat\/chat\.css\?v=/, 'share page should reuse the main chat stylesheet');
+  assert.match(publicShareRes.body, /\/chat\/bootstrap\.js\?v=/, 'share page should reuse the main chat frontend bootstrap');
   assert.ok(publicShareRes.body.includes(`/share-payload/${shareId}.js`), 'share shell should bootstrap an external payload resource');
+  assert.ok(!publicShareRes.body.includes('/share.js'), 'share page should not load the removed legacy share renderer');
   assert.ok(!publicShareRes.body.includes('window.__REMOTELAB_SHARE__ ='), 'share shell should not inline the snapshot payload');
   assert.ok(!publicShareRes.body.includes('Please review this snippet.'), 'share shell should not inline conversation bodies');
-  assert.ok(!publicShareRes.body.includes('msgInput'), 'share page should not include live chat input');
+  assert.ok(!publicShareRes.body.includes('<section class="hero">'), 'share page should not fall back to the legacy snapshot hero shell');
+  assert.match(publicShareRes.body, /<div class="messages-inner" id="messagesInner">/, 'share page should render the shared chat timeline shell');
   assert.ok(!publicShareRes.body.includes('/api/auth/me'), 'share page should not bootstrap owner auth UI');
   assert.ok(!publicShareRes.body.includes('/ws'), 'share page should not connect to live websocket');
   const publicShare304Res = await request('GET', sharePayload.share.url, {
@@ -262,6 +285,8 @@ async function main() {
   assert.ok(payloadRes.headers.etag, 'share payload should expose an ETag');
   assert.match(payloadRes.headers['content-type'] || '', /^application\/javascript;/, 'share payload should be served as JavaScript');
   assert.ok(payloadRes.body.includes('window.__REMOTELAB_SHARE__ ='), 'share payload should assign the snapshot data');
+  assert.ok(payloadRes.body.includes('displayEvents'), 'share payload should expose chat-ready display events');
+  assert.ok(payloadRes.body.includes('eventBlocks'), 'share payload should expose collapsed block payloads for the chat viewer');
   assert.ok(payloadRes.body.includes('Please review this snippet.'), 'share payload should include conversation bodies');
   assert.ok(payloadRes.body.includes(storedAttachment.url), 'share payload should reference external attachment URLs');
   assert.ok(!payloadRes.body.includes('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0WQAAAAASUVORK5CYII='), 'share payload should not inline attachment base64');

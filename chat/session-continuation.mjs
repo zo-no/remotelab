@@ -1,3 +1,5 @@
+import { formatAttachmentContextLine } from './attachment-utils.mjs';
+
 const MAX_EVENT_CHARS = 4000;
 const MAX_CONTEXT_CHARS = 24000;
 const TRUNCATED_MARKER = '\n[... truncated by RemoteLab ...]\n';
@@ -64,19 +66,8 @@ function truncateMiddle(text, maxChars = MAX_CONTEXT_CHARS) {
   return `${text.slice(0, headChars).trimEnd()}${TRUNCATED_MARKER}${text.slice(-tailChars).trimStart()}`;
 }
 
-function getAttachmentDisplayName(attachment) {
-  if (typeof attachment?.originalName === 'string' && attachment.originalName.trim()) {
-    return attachment.originalName.trim();
-  }
-  return typeof attachment?.filename === 'string' ? attachment.filename : '';
-}
-
 function formatImages(images) {
-  const refs = (images || [])
-    .map((img) => getAttachmentDisplayName(img))
-    .filter(Boolean);
-  if (refs.length === 0) return '';
-  return `[Attached files: ${refs.join(', ')}]`;
+  return formatAttachmentContextLine(images);
 }
 
 function formatMessage(evt) {
@@ -152,8 +143,8 @@ function buildContinuationIntro(options = {}) {
   const toTool = options.toTool || '';
   const switchedTools = fromTool && toTool && fromTool !== toTool;
   return switchedTools
-    ? `RemoteLab session handoff: the user switched tools from ${fromTool} to ${toTool}.`
-    : 'RemoteLab session handoff for this existing conversation.';
+    ? `RemoteLab session continuity handoff: the user switched tools from ${fromTool} to ${toTool}.`
+    : 'RemoteLab session continuity handoff for this existing conversation.';
 }
 
 export function prepareSessionContinuationBody(events) {

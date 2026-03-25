@@ -119,6 +119,14 @@ setTimeout(() => {
   return { home, promptFile };
 }
 
+function readCapturedPrompts(promptFile) {
+  if (!existsSync(promptFile)) return [];
+  return readFileSync(promptFile, 'utf8')
+    .split('\n\n---PROMPT---\n\n')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 async function startServer({ home, port, promptFile }) {
   const child = spawn(process.execPath, ['chat-server.mjs'], {
     cwd: repoRoot,
@@ -164,23 +172,49 @@ async function createSession(port) {
 }
 
 async function submitVideoMessage(port, sessionId) {
+  return submitMultipartMessage(port, sessionId, {
+    requestId: 'req-video-upload',
+    text: 'Please inspect the attached video.',
+    mimeType: 'video/mp4',
+    filename: 'clip.mp4',
+    body: Buffer.from('fake-video-binary'),
+  });
+}
+
+async function submitMultipartMessage(port, sessionId, {
+  requestId,
+  text,
+  mimeType,
+  filename,
+  body,
+}) {
   const formData = new FormData();
-  formData.set('requestId', 'req-video-upload');
-  formData.set('text', 'Please inspect the attached video.');
+  formData.set('requestId', requestId);
+  formData.set('text', text);
   formData.set('tool', 'fake-codex');
   formData.set('model', 'fake-model');
   formData.set('effort', 'low');
-  formData.append('images', new Blob([Buffer.from('fake-video-binary')], { type: 'video/mp4' }), 'clip.mp4');
+  formData.append('images', new Blob([body], { type: mimeType }), filename);
 
   const res = await fetch(`http://127.0.0.1:${port}/api/sessions/${sessionId}/messages`, {
     method: 'POST',
     headers: { Cookie: cookie },
     body: formData,
   });
-  const text = await res.text();
+  const responseText = await res.text();
   let json = null;
-  try { json = text ? JSON.parse(text) : null; } catch {}
-  return { status: res.status, json, text, headers: Object.fromEntries(res.headers.entries()) };
+  try { json = responseText ? JSON.parse(responseText) : null; } catch {}
+  return { status: res.status, json, text: responseText, headers: Object.fromEntries(res.headers.entries()) };
+}
+
+async function submitJsonMessage(port, sessionId, requestId, text) {
+  return request(port, 'POST', `/api/sessions/${sessionId}/messages`, {
+    requestId,
+    text,
+    tool: 'fake-codex',
+    model: 'fake-model',
+    effort: 'low',
+  });
 }
 
 async function waitForRunTerminal(port, runId) {
@@ -215,15 +249,71 @@ try {
     assert.equal(eventsRes.userMessage.images[0].mimeType, 'video/mp4', 'user event should preserve video mime type');
     assert.equal(eventsRes.userMessage.images[0].originalName, 'clip.mp4', 'user event should preserve the original filename');
     assert.match(eventsRes.userMessage.images[0].filename || '', /\.mp4$/, 'stored filename should keep the video extension');
+    assert.equal(eventsRes.userMessage.images[0].savedPath, undefined, 'user event should not expose the internal attachment path');
 
     const mediaRes = await request(port, 'GET', `/api/media/${eventsRes.userMessage.images[0].filename}`);
     assert.equal(mediaRes.status, 200, 'uploaded video should be downloadable from the media route');
     assert.match(mediaRes.headers['content-type'] || '', /^video\/mp4/, 'media route should serve the correct video MIME type');
 
-    await waitFor(() => existsSync(promptFile), 'captured runner prompt');
-    const prompt = readFileSync(promptFile, 'utf8');
-    assert.match(prompt, /\[User attached video:/, 'runner prompt should advertise attached videos explicitly');
-    assert.match(prompt, /\.mp4\]/, 'runner prompt should include the stored video path');
+    const prompt = await waitFor(() => {
+      const prompts = readCapturedPrompts(promptFile);
+      return prompts.find((entry) => /\[User attached video: clip\.mp4 -> .*\.mp4\]/.test(entry)) || false;
+    }, 'captured runner prompt');
+    assert.match(prompt, /\[User attached video: clip\.mp4 -> .*\.mp4\]/, 'runner prompt should include the original video name and stored path');
+
+    const fileSession = await createSession(port);
+    const fileSubmitRes = await submitMultipartMessage(port, fileSession.id, {
+      requestId: 'req-generic-file-upload',
+      text: 'Please inspect the attached file.',
+      mimeType: 'text/csv',
+      filename: 'report.csv',
+      body: Buffer.from('col1,col2\n1,2\n', 'utf8'),
+    });
+    assert.ok(fileSubmitRes.status === 202 || fileSubmitRes.status === 200, 'multipart generic file submission should be accepted');
+    assert.ok(fileSubmitRes.json?.run?.id, 'accepted generic file submission should create a run');
+
+    const fileRun = await waitForRunTerminal(port, fileSubmitRes.json.run.id);
+    assert.equal(fileRun.state, 'completed', 'generic file upload run should complete successfully');
+
+    const fileEventsRes = await waitFor(async () => {
+      const res = await request(port, 'GET', `/api/sessions/${fileSession.id}/events`);
+      if (res.status !== 200) return false;
+      const userMessage = (res.json.events || []).find((event) => event.type === 'message' && event.role === 'user');
+      return userMessage ? { res, userMessage } : false;
+    }, 'user message with generic file attachment');
+
+    assert.equal(fileEventsRes.userMessage.images?.length, 1, 'user event should preserve the generic file attachment reference');
+    assert.equal(fileEventsRes.userMessage.images[0].mimeType, 'text/csv', 'user event should preserve generic file mime type');
+    assert.equal(fileEventsRes.userMessage.images[0].originalName, 'report.csv', 'user event should preserve the generic file name');
+    assert.match(fileEventsRes.userMessage.images[0].filename || '', /\.csv$/, 'stored filename should keep the generic file extension');
+    assert.equal(fileEventsRes.userMessage.images[0].savedPath, undefined, 'generic file event should not expose the internal attachment path');
+
+    const fileMediaRes = await request(port, 'GET', `/api/media/${fileEventsRes.userMessage.images[0].filename}`);
+    assert.equal(fileMediaRes.status, 200, 'generic file should be downloadable from the media route');
+    assert.equal(fileMediaRes.buffer.toString('utf8'), 'col1,col2\n1,2\n', 'downloaded generic file should keep its contents');
+
+    const updatedPrompt = await waitFor(() => {
+      const prompts = readCapturedPrompts(promptFile);
+      return prompts.find((entry) => /\[User attached file: report\.csv -> .*\.csv\]/.test(entry)) || false;
+    }, 'captured generic-file runner prompt');
+    assert.match(updatedPrompt, /\[User attached file: report\.csv -> .*\.csv\]/, 'runner prompt should include the original file name and stored path');
+
+    const followUpRes = await submitJsonMessage(port, fileSession.id, 'req-generic-file-follow-up', 'Continue using the same attached file.');
+    assert.ok(followUpRes.status === 202 || followUpRes.status === 200, 'follow-up message should be accepted');
+    assert.ok(followUpRes.json?.run?.id, 'follow-up message should create a run');
+
+    const followUpRun = await waitForRunTerminal(port, followUpRes.json.run.id);
+    assert.equal(followUpRun.state, 'completed', 'follow-up run should complete successfully');
+
+    const followUpPrompt = await waitFor(() => {
+      const prompts = readCapturedPrompts(promptFile);
+      return prompts.find((entry) => (
+        /RemoteLab session continuity handoff for this existing conversation\./.test(entry)
+        && /\[Attached files: report\.csv -> .*\.csv\]/.test(entry)
+      )) || false;
+    }, 'follow-up prompt with continued attachment path');
+    assert.match(followUpPrompt, /RemoteLab session continuity handoff for this existing conversation\./, 'follow-up prompt should include session continuation');
+    assert.match(followUpPrompt, /\[Attached files: report\.csv -> .*\.csv\]/, 'follow-up prompt should carry the stored attachment path into continuation context');
 
     console.log('test-http-session-media-upload: ok');
   } finally {

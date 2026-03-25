@@ -9,7 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(__dirname);
 
 const realtimeSource = readFileSync(join(repoRoot, 'static/chat/realtime.js'), 'utf8');
-const sessionHttpSource = readFileSync(join(repoRoot, 'static/chat/session-http.js'), 'utf8');
+const sessionHttpSource = readFileSync(join(repoRoot, 'static/chat/session-http-helpers.js'), 'utf8') + '\n' + readFileSync(join(repoRoot, 'static/chat/session-http-list-state.js'), 'utf8') + '\n' + readFileSync(join(repoRoot, 'static/chat/session-http.js'), 'utf8');
 
 function sliceBetween(source, startToken, endToken) {
   const start = source.indexOf(startToken);
@@ -71,10 +71,23 @@ function createBaseContext() {
     encodeURIComponent,
     currentSessionId: null,
     hasAttachedSession: false,
+    archivedSessionCount: 0,
     sessions: [],
     visitorMode: false,
     getEffectiveSessionAppId(session) {
       return session?.appId || 'chat';
+    },
+    normalizeSessionReviewStamp(value) {
+      const trimmed = typeof value === 'string' ? value.trim() : '';
+      if (!trimmed) return '';
+      const time = new Date(trimmed).getTime();
+      return Number.isFinite(time) ? new Date(time).toISOString() : '';
+    },
+    getLocalSessionReviewedAt() {
+      return '';
+    },
+    getSessionReviewBaselineAt() {
+      return '';
     },
   };
   context.globalThis = context;
@@ -164,6 +177,7 @@ let attentionRefreshes = 0;
 let scheduledRefreshes = 0;
 let appliedSession = null;
 let requestPayload = null;
+const finalizedRequestIds = [];
 
 dispatchContext.currentSessionId = 'session-send';
 dispatchContext.createRequestId = () => 'req-test';
@@ -194,6 +208,10 @@ dispatchContext.renderSessionList = () => {
 };
 dispatchContext.applyAttachedSessionState = (id, session) => {
   appliedSession = { id, session };
+};
+dispatchContext.finalizeComposerPendingSend = (requestId) => {
+  finalizedRequestIds.push(requestId);
+  return true;
 };
 dispatchContext.refreshSidebarSession = async () => null;
 dispatchContext.savePendingMessage = () => {
@@ -233,9 +251,294 @@ assert.deepEqual(
 );
 assert.equal(refreshCalls, 2, 'accepted sends should retry the session refresh after a transient failure');
 assert.equal(scheduledRefreshes, 1, 'accepted sends should schedule exactly one async refresh retry');
+assert.deepEqual(finalizedRequestIds, ['req-test'], 'accepted sends should immediately finalize the pending composer request from the HTTP acknowledgment');
 assert.equal(savedPendingCalls, 0, 'frontend should not persist pending-send state');
 assert.equal(clearedPendingCalls, 0, 'frontend should not clear any pending-send cache because none exists');
 assert.equal(attentionRefreshes, 0, 'frontend should not synthesize unread or send-failure attention state');
+
+const detachedSendContext = createBaseContext();
+let detachedCurrentRefreshes = 0;
+let detachedSidebarRefreshes = 0;
+let detachedRequestPayload = null;
+
+detachedSendContext.currentSessionId = 'session-viewing';
+detachedSendContext.createRequestId = () => 'req-detached';
+detachedSendContext.fetchSessionsList = async () => [];
+detachedSendContext.refreshCurrentSession = async () => {
+  detachedCurrentRefreshes += 1;
+  return { ok: true };
+};
+detachedSendContext.refreshSidebarSession = async (sessionId) => {
+  detachedSidebarRefreshes += 1;
+  return { id: sessionId };
+};
+detachedSendContext.fetchJsonOrRedirect = async (url, options = {}) => {
+  detachedRequestPayload = { url, options };
+  return {
+    queued: true,
+    session: {
+      id: 'session-origin',
+      activity: createSessionActivity({ runState: 'running', queueState: 'queued', queueCount: 1 }),
+    },
+  };
+};
+detachedSendContext.upsertSession = (value) => value;
+detachedSendContext.renderSessionList = () => {};
+detachedSendContext.applyAttachedSessionState = () => {
+  throw new Error('send should not reattach a different session while the user is viewing another one');
+};
+detachedSendContext.finalizeComposerPendingSend = () => true;
+detachedSendContext.savePendingMessage = () => {};
+detachedSendContext.clearPendingMessage = () => {};
+detachedSendContext.refreshSessionAttentionUi = () => {};
+detachedSendContext.setTimeout = () => 1;
+
+vm.runInNewContext(dispatchActionSnippet, detachedSendContext, {
+  filename: 'chat-dispatch-action-runtime-detached.js',
+});
+
+const detachedSendAccepted = await detachedSendContext.dispatchAction({
+  action: 'send',
+  sessionId: 'session-origin',
+  text: 'send this from the original session',
+});
+assert.equal(detachedSendAccepted, true, 'session-bound sends should still succeed when the UI is attached elsewhere');
+assert.equal(detachedRequestPayload?.url, '/api/sessions/session-origin/messages', 'send should target the explicit origin session instead of the currently attached one');
+assert.equal(detachedCurrentRefreshes, 0, 'detached sends should not refresh the unrelated currently attached session');
+assert.equal(detachedSidebarRefreshes, 1, 'detached sends should refresh the origin session in the sidebar instead');
+
+const attachReuseContext = createBaseContext();
+let attachRefreshCalls = 0;
+let attachStateCalls = 0;
+let attachEventCalls = 0;
+let attachRequested = null;
+
+attachReuseContext.sessions = [
+  {
+    id: 'session-attach-existing',
+    activity: createSessionActivity({ runState: 'idle', queueState: 'idle', queueCount: 0 }),
+  },
+];
+attachReuseContext.getCurrentSession = () => attachReuseContext.sessions.find((session) => session.id === attachReuseContext.currentSessionId) || null;
+attachReuseContext.getSessionRunState = (session) => session?.activity?.run?.state || 'idle';
+attachReuseContext.fetchSessionEvents = async (sessionId, options = {}) => {
+  attachEventCalls += 1;
+  attachRequested = { sessionId, options };
+  return [];
+};
+attachReuseContext.fetchSessionState = async () => {
+  attachStateCalls += 1;
+  return null;
+};
+attachReuseContext.refreshCurrentSession = async () => {
+  attachRefreshCalls += 1;
+  return null;
+};
+
+vm.runInNewContext(dispatchActionSnippet, attachReuseContext, {
+  filename: 'chat-dispatch-action-attach-runtime.js',
+});
+
+const attachReused = await attachReuseContext.dispatchAction({ action: 'attach', sessionId: 'session-attach-existing' });
+assert.equal(attachReused, true, 'attach should succeed when the session is already available in local state');
+assert.equal(attachReuseContext.currentSessionId, 'session-attach-existing', 'attach should still update the current session id');
+assert.equal(attachReuseContext.hasAttachedSession, true, 'attach should still mark the UI as attached');
+assert.equal(attachEventCalls, 1, 'attach should fetch visible events for an already-known session');
+assert.equal(attachStateCalls, 0, 'attach should skip the redundant detail fetch when the sidebar metadata is already present');
+assert.equal(attachRefreshCalls, 0, 'attach should avoid the full refresh path when local metadata is already sufficient');
+assert.equal(attachRequested?.sessionId, 'session-attach-existing', 'attach should request events for the selected session');
+assert.equal(attachRequested?.options?.runState, 'idle', 'attach should carry the existing run state into the event refresh path');
+
+const attachQueuedContext = createBaseContext();
+let queuedAttachStateCalls = 0;
+let queuedAttachEventCalls = 0;
+let queuedAttachRefreshCalls = 0;
+
+attachQueuedContext.sessions = [
+  {
+    id: 'session-attach-queued',
+    activity: createSessionActivity({ runState: 'running', queueState: 'queued', queueCount: 2 }),
+  },
+];
+attachQueuedContext.getCurrentSession = () => attachQueuedContext.sessions.find((session) => session.id === attachQueuedContext.currentSessionId) || null;
+attachQueuedContext.getSessionRunState = (session) => session?.activity?.run?.state || 'idle';
+attachQueuedContext.fetchSessionEvents = async () => {
+  queuedAttachEventCalls += 1;
+  return [];
+};
+attachQueuedContext.fetchSessionState = async () => {
+  queuedAttachStateCalls += 1;
+  return {
+    id: 'session-attach-queued',
+    queuedMessages: [{ text: 'queued follow-up' }],
+  };
+};
+attachQueuedContext.refreshCurrentSession = async () => {
+  queuedAttachRefreshCalls += 1;
+  return null;
+};
+
+vm.runInNewContext(dispatchActionSnippet, attachQueuedContext, {
+  filename: 'chat-dispatch-action-attach-queued-runtime.js',
+});
+
+const attachQueued = await attachQueuedContext.dispatchAction({ action: 'attach', sessionId: 'session-attach-queued' });
+assert.equal(attachQueued, true, 'attach should succeed for queued sessions');
+assert.equal(queuedAttachEventCalls, 1, 'attach should still fetch events for queued sessions');
+assert.equal(queuedAttachStateCalls, 1, 'attach should fetch detail only when queued follow-up bodies are actually needed');
+assert.equal(queuedAttachRefreshCalls, 0, 'queued attach should still avoid the older full refresh path');
+
+const archiveContext = createBaseContext();
+let archiveFilterRefreshes = 0;
+let archiveRequest = null;
+const archiveAppliedStates = [];
+
+archiveContext.currentSessionId = 'session-archive';
+archiveContext.sessions = [
+  {
+    id: 'session-newer',
+    activity: createSessionActivity(),
+    updatedAt: '2026-03-12T09:00:00.000Z',
+  },
+  {
+    id: 'session-archive',
+    activity: createSessionActivity(),
+    pinned: true,
+    updatedAt: '2026-03-12T08:00:00.000Z',
+  },
+];
+archiveContext.sortSessionsInPlace = () => {
+  archiveContext.sessions.sort((a, b) => (
+    Number(b?.pinned === true) - Number(a?.pinned === true)
+    || String(b?.lastEventAt || b?.updatedAt || b?.created || '').localeCompare(
+      String(a?.lastEventAt || a?.updatedAt || a?.created || ''),
+    )
+  ));
+};
+archiveContext.refreshAppCatalog = () => {
+  archiveFilterRefreshes += 1;
+};
+archiveContext.renderSessionList = () => {};
+archiveContext.applyAttachedSessionState = (id, session) => {
+  archiveAppliedStates.push({
+    id,
+    archived: session?.archived === true,
+    pinned: session?.pinned === true,
+  });
+};
+archiveContext.fetchSessionsList = async () => archiveContext.sessions;
+archiveContext.refreshCurrentSession = async () => null;
+archiveContext.refreshSidebarSession = async () => null;
+archiveContext.fetchJsonOrRedirect = async (url, options = {}) => {
+  archiveRequest = {
+    url,
+    options,
+    optimisticSessions: archiveContext.sessions.map((session) => ({ ...session })),
+    attachedStates: archiveAppliedStates.slice(),
+  };
+  return {
+    session: {
+      id: 'session-archive',
+      activity: createSessionActivity(),
+      archived: true,
+      archivedAt: '2026-03-12T10:00:00.000Z',
+      updatedAt: '2026-03-12T08:00:00.000Z',
+    },
+  };
+};
+archiveContext.upsertSession = (value) => {
+  const index = archiveContext.sessions.findIndex((session) => session.id === value.id);
+  if (index === -1) {
+    archiveContext.sessions.push(value);
+  } else {
+    archiveContext.sessions[index] = value;
+  }
+  return value;
+};
+
+vm.runInNewContext(dispatchActionSnippet, archiveContext, {
+  filename: 'chat-dispatch-action-runtime.js',
+});
+
+const archiveAccepted = await archiveContext.dispatchAction({ action: 'archive', sessionId: 'session-archive' });
+assert.equal(archiveAccepted, true, 'archive should resolve successfully after server acceptance');
+assert.equal(archiveRequest?.url, '/api/sessions/session-archive');
+assert.match(String(archiveRequest?.options?.body || ''), /"archived":true/);
+assert.equal(
+  archiveRequest?.optimisticSessions.find((session) => session.id === 'session-archive')?.archived,
+  true,
+  'archive should hide the session from the active list before the request resolves',
+);
+assert.equal(
+  archiveRequest?.optimisticSessions.find((session) => session.id === 'session-archive')?.pinned,
+  undefined,
+  'archive should immediately clear the pinned state in the optimistic sidebar model',
+);
+assert.deepEqual(
+  archiveRequest?.attachedStates,
+  [{ id: 'session-archive', archived: true, pinned: false }],
+  'archiving the current session should update the attached view immediately',
+);
+assert.equal(archiveFilterRefreshes, 1, 'archive should refresh sidebar filter state during the optimistic update');
+
+const archiveFailureContext = createBaseContext();
+const archiveFailureAppliedStates = [];
+
+archiveFailureContext.console = { ...console, error() {} };
+archiveFailureContext.currentSessionId = 'session-failure';
+archiveFailureContext.sessions = [{
+  id: 'session-failure',
+  activity: createSessionActivity(),
+  pinned: true,
+  updatedAt: '2026-03-12T08:00:00.000Z',
+}];
+archiveFailureContext.sortSessionsInPlace = () => {};
+archiveFailureContext.refreshAppCatalog = () => {};
+archiveFailureContext.renderSessionList = () => {};
+archiveFailureContext.applyAttachedSessionState = (id, session) => {
+  archiveFailureAppliedStates.push({
+    id,
+    archived: session?.archived === true,
+    pinned: session?.pinned === true,
+  });
+};
+archiveFailureContext.fetchSessionsList = async () => archiveFailureContext.sessions;
+archiveFailureContext.refreshCurrentSession = async () => null;
+archiveFailureContext.refreshSidebarSession = async () => null;
+archiveFailureContext.fetchJsonOrRedirect = async () => {
+  assert.equal(
+    archiveFailureContext.sessions.find((session) => session.id === 'session-failure')?.archived,
+    true,
+    'failed archive should still apply the optimistic hidden state before the request rejects',
+  );
+  throw new Error('archive failed');
+};
+archiveFailureContext.upsertSession = (value) => value;
+
+vm.runInNewContext(dispatchActionSnippet, archiveFailureContext, {
+  filename: 'chat-dispatch-action-runtime.js',
+});
+
+const archiveRejected = await archiveFailureContext.dispatchAction({ action: 'archive', sessionId: 'session-failure' });
+assert.equal(archiveRejected, false, 'failed archive should return a failed action result');
+assert.equal(
+  archiveFailureContext.sessions.find((session) => session.id === 'session-failure')?.archived,
+  undefined,
+  'failed archive should restore the pre-click sidebar state',
+);
+assert.equal(
+  archiveFailureContext.sessions.find((session) => session.id === 'session-failure')?.pinned,
+  true,
+  'failed archive should restore the original pin state',
+);
+assert.deepEqual(
+  archiveFailureAppliedStates,
+  [
+    { id: 'session-failure', archived: true, pinned: false },
+    { id: 'session-failure', archived: false, pinned: true },
+  ],
+  'failed archive should roll the attached session view back after the optimistic update',
+);
 
 const attachContext = createBaseContext();
 let attachStatusUpdate = null;

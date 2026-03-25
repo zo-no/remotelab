@@ -32,6 +32,10 @@ export function reasoningEvent(content) {
   return createEvent('reasoning', { role: 'assistant', content });
 }
 
+export function managerContextEvent(content, extra = {}) {
+  return createEvent('manager_context', { role: 'system', content, ...extra });
+}
+
 export function statusEvent(content) {
   return createEvent('status', { role: 'system', content });
 }

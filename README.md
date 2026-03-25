@@ -2,40 +2,117 @@
 
 [中文](README.zh.md) | English
 
-Mobile-first control console for AI workers running on your own Mac or Linux machine.
+**A cross-surface AI workbench that helps ordinary people hand repetitive digital work to AI.**
 
-Control CodeX (`codex`), Claude Code, Cline, and compatible local tools from a phone browser. RemoteLab is not a terminal emulator or mobile IDE; it is a durable chat/control plane that keeps sessions, runs, and history on disk.
+RemoteLab is not only for the small group of people who already know how to use AI well. The goal is to bring AI automation to a much wider set of users, especially people with lots of repetitive digital work but no engineering automation background.
 
-![Chat UI](docs/demo.gif)
+It does not care much whether the control surface is a phone, tablet, or desktop. The point is to let a user hand over a messy recurring task, screenshot, or sample file, have the AI clarify the problem first, and then let strong executors like `codex`, `claude`, and compatible local tools do the real work on a real machine.
 
-> Current baseline: `v0.2` — filesystem-backed HTTP control plane, detached runners, thin WebSocket invalidation, and a no-build mobile UI.
+![RemoteLab across surfaces](docs/readme-multisurface-demo.png)
+
+> Current baseline: `v0.3` — an owner-first session runtime, durable on-disk history, executor adapters, App-based workflow packaging, and a no-build web UI that works across phone and desktop.
+
+> Reach the same system from desktop, phone, and integration surfaces like Feishu or email-driven flows.
+
+## Quick install
+
+If the demo makes sense, do not keep reading. Open a fresh terminal on the host machine, start Codex, Claude Code, or another coding agent, and paste this:
+
+```text
+I want to set up RemoteLab on this machine so I can hand repetitive digital work to AI from any device and let it automate the work on a real computer.
+
+Network mode: [cloudflare | tailscale]
+
+# For Cloudflare mode:
+My domain: [YOUR_DOMAIN]
+Subdomain I want to use: [SUBDOMAIN]
+
+# For Tailscale mode:
+(No extra config needed — the host machine and the client devices I want to use are on the same tailnet.)
+
+Use the setup contract at `https://raw.githubusercontent.com/Ninglo/remotelab/main/docs/setup.md` as the source of truth.
+Do not assume the repo is already cloned. If `~/code/remotelab` does not exist yet, fetch that contract, clone `https://github.com/Ninglo/remotelab.git` yourself, and continue.
+Keep the workflow inside this chat.
+Before you start work, collect every missing piece of context in one message so I can answer once.
+Do every step you can automatically.
+After my reply, continue autonomously and only stop for real [HUMAN] steps, approvals, or final completion.
+When you stop, tell me exactly what I need to do and how you'll verify it after I reply.
+```
+
+Need the longer version first? Jump to [Setup details](#setup-details) or open `docs/setup.md`.
 
 ---
 
 ## For Humans
 
+### Vision
+
+Bluntly: RemoteLab is an AI automation workbench for ordinary people. It should first serve people who have repetitive digital work but have not yet turned AI into part of their daily operating flow.
+
+The first goal is concrete: in a short conversation, help a user hand off a tedious job that used to cost hours every week — data cleanup, light analysis, report generation, file batch work, exports/imports, triggered notifications, and other scriptable chores.
+
+### Core judgments
+
+- The biggest unmet need is not encouraging people to open endless concurrent sessions; it is finding repetitive work that is actually worth automating.
+- Most target users are not AI-native operators and do not arrive with product-manager-grade prompts; the AI needs to help clarify the task, gather examples, and design a workable approach.
+- The first high-fit user slice is not literally everyone with a computer; it looks more like time-pressed middle managers / owner-operators in traditional industries who both coordinate others and still personally carry repetitive digital admin work.
+- The first screen cannot be a blank session list. New users need a default `Welcome App` that briefly explains what RemoteLab can do, asks about their role and repetitive-work pain point, and guides them toward one concrete first automation.
+- The best wedge is simple, fast-payback digital work: data cleanup, analysis, file processing, reports, notifications, and other repetitive scriptable tasks.
+- Phone + desktop + real-machine execution is the product advantage: capture context anywhere, let the machine do the heavy work, and review results or approvals from the most convenient device.
+- `Session`, `App`, concurrency, and distribution still matter, but they are enabling layers or later multipliers rather than the first headline.
+
 ### What RemoteLab is
 
-RemoteLab is a **mobile-first control console for AI workers running on your own Mac or Linux machine**.
+- an AI automation workbench that sits above strong executors running on a real machine
+- an AI collaboration entry point that helps users turn vague problems into executable plans
+- a cross-surface control plane where people can start from phone, continue from desktop, and let the machine do the work
+- a durable work-thread system that helps humans recover context instead of repeatedly re-explaining the task
+- a packaging layer that can turn proven automations into reusable `Apps`
 
-It is not a terminal emulator, not a mobile IDE, and not a generic multi-user chat SaaS. The current product model is:
+### What RemoteLab is not
+
+- a terminal emulator
+- a traditional editor-first IDE
+- a power-user cockpit whose main value is opening as many concurrent sessions as possible
+- a prompt playground that assumes the user already knows how to specify the work perfectly
+- a generic multi-user chat SaaS
+- a closed all-in-one executor stack trying to out-execute `codex` or `claude`
+
+### Two core product layers
+
+1. **First, solve repetitive digital work.** RemoteLab should accept a messy but recurring task, help the user clarify inputs, outputs, and constraints, and turn it into an automation that reliably saves time.
+2. **Then package and reuse what works.** Once an automation proves valuable, RemoteLab can turn it into an `App`, template, or other reusable entry point for the same user or nearby user groups.
+
+### Product grammar
+
+The current product model is intentionally simple:
 
 - `Session` — the durable work thread
-- `Run` — one execution attempt under a session
-- `App` — a reusable template or policy for starting sessions
+- `Run` — one execution attempt inside a session
+- `App` — a reusable workflow / policy package for starting sessions
 - `Share snapshot` — an immutable read-only export of a session
 
-The important architectural assumptions are:
+The architectural assumptions behind that model:
 
 - HTTP is the canonical state path and WebSocket only hints that something changed
 - the browser is a control surface, not the system of record
 - runtime processes are disposable; durable state lives on disk
-- the product is single-owner first, with visitor access scoped through Apps
-- the frontend stays framework-light and mobile-friendly
+- the product is single-owner first, with visitor access scoped through `Apps`
+- the frontend stays framework-light and endpoint-flexible
+
+### Why this boundary matters
+
+RemoteLab is opinionated in a few ways:
+
+- **Clarify the problem before executing.** RemoteLab should not assume the user already thinks like an AI product manager; the AI needs to carry part of the problem-framing and solution-design work.
+- **Do not rebuild the executor layer.** RemoteLab should not spend most of its energy optimizing single-task agent internals.
+- **Recover context, do not dump logs.** Durable sessions matter more than raw terminal continuity.
+- **Package workflows, do not just share prompts.** `Apps` are reusable operating shapes, not just copy-pasted text.
+- **Integrate the strongest tools, keep them replaceable.** The point is a stable abstraction layer so better executors can be adopted quickly as the ecosystem evolves.
 
 ### What you can do
 
-- start a session from your phone while the agent works on your real machine
+- start a session from phone or desktop while the agent works on your real machine
 - keep durable history even if the browser disconnects
 - recover long-running work after control-plane restarts
 - let the agent auto-title and auto-group sessions in the sidebar
@@ -46,14 +123,16 @@ The important architectural assumptions are:
 
 ### Provider note
 
-- RemoteLab now treats `CodeX` (`codex`) as the default built-in tool and shows it first in the picker.
-- The main reason is policy clarity: API-key / local-CLI style integrations are usually a cleaner fit for a self-hosted control plane than consumer-login-based remote wrappers.
-- `Claude Code` still works in RemoteLab, and Claude-flavored local setups that talk to other backends are a separate decision, but you should review the current provider terms yourself before routing any proprietary CLI through a third-party UI like RemoteLab.
-- In practice, the risk is usually about the underlying provider auth / terms, not the binary name by itself. Make your own call based on the provider and account type behind that tool.
+- RemoteLab treats `Codex` (`codex`) as the default built-in tool and shows it first in the picker.
+- That is not because executor choice is the product. The opposite is true: RemoteLab should stay adapter-first and integrate the strongest executors available locally.
+- API-key / local-CLI style integrations are usually a cleaner fit for a self-hosted control plane than consumer-login-based remote wrappers.
+- `Claude Code` still works in RemoteLab, and any other compatible local tool can fit as long as its auth and terms work for your setup.
+- Over time, the goal is portability across executors, not loyalty to one closed runtime.
+- In practice, the main risk is usually the underlying provider auth / terms, not the binary name by itself. Make your own call based on the provider and account type behind that tool.
 
-### Get set up in 5 minutes — hand it to an AI
+### Setup details
 
-The fastest path is still to paste a setup prompt into CodeX, Claude Code, or another capable coding agent on the machine that will host RemoteLab. It can handle almost everything automatically and stop only for truly manual steps such as Cloudflare login.
+The fastest path is still to paste a setup prompt into Codex, Claude Code, or another capable coding agent on the machine that will host RemoteLab. It can handle almost everything automatically and stop only for truly manual steps such as Cloudflare login when that mode is in play.
 
 Configuration and feature-rollout docs in this repo are model-first and prompt-first: the human copies a prompt into their own AI coding agent, the agent gathers the needed context up front in as few rounds as possible, and the rest of the work stays inside that conversation except for explicit `[HUMAN]` steps.
 
@@ -63,17 +142,26 @@ The best pattern is one early handoff: the agent asks for everything it needs in
 - **macOS**: Homebrew installed + Node.js 18+
 - **Linux**: Node.js 18+
 - At least one AI tool installed (`codex`, `claude`, `cline`, or a compatible local tool)
-- A domain pointed at Cloudflare ([free account](https://cloudflare.com), domain ~$1–12/yr from Namecheap or Porkbun)
+- **Network** (pick one):
+  - **Cloudflare Tunnel**: a domain pointed at Cloudflare ([free account](https://cloudflare.com), domain ~$1–12/yr from Namecheap or Porkbun)
+  - **Tailscale**: [free for personal use](https://tailscale.com) — install on the host machine and any client device you want to use, join the same tailnet, no domain needed
 
-**Copy this prompt into CodeX or another coding agent:**
+**Open a fresh terminal on the host machine, start Codex or another coding agent, and paste this:**
 
 ```text
-I want to set up RemoteLab on this machine so I can control AI coding tools from my phone.
+I want to set up RemoteLab on this machine so I can control AI workers from any device and keep long-running AI work organized.
 
+Network mode: [cloudflare | tailscale]
+
+# For Cloudflare mode:
 My domain: [YOUR_DOMAIN]
 Subdomain I want to use: [SUBDOMAIN]
 
-Please follow the full setup guide at docs/setup.md in this repository.
+# For Tailscale mode:
+(No extra config needed — the host machine and the client devices I want to use are on the same tailnet.)
+
+Use the setup contract at `https://raw.githubusercontent.com/Ninglo/remotelab/main/docs/setup.md` as the source of truth.
+Do not assume the repo is already cloned. If `~/code/remotelab` does not exist yet, fetch that contract, clone `https://github.com/Ninglo/remotelab.git` yourself, and continue.
 Keep the workflow inside this chat.
 Before you start work, collect every missing piece of context in one message so I can answer once.
 Do every step you can automatically.
@@ -85,11 +173,13 @@ If you want the full setup contract and the human-only checkpoints, use `docs/se
 
 ### What you'll have when done
 
-Open `https://[subdomain].[domain]/?token=YOUR_TOKEN` on your phone:
+Open your RemoteLab URL on the device you want to use:
+- **Cloudflare**: `https://[subdomain].[domain]/?token=YOUR_TOKEN`
+- **Tailscale**: `http://[hostname].[tailnet].ts.net:7690/?token=YOUR_TOKEN`
 
 ![Dashboard](docs/new-dashboard.png)
 
-- create a session with a local AI tool, with CodeX first by default
+- create a session with a local AI tool, with Codex first by default
 - start from `~` by default, or point the agent at another repo when needed
 - send messages while the UI re-fetches canonical HTTP state in the background
 - leave and come back later without losing the conversation thread
@@ -98,11 +188,12 @@ Open `https://[subdomain].[domain]/?token=YOUR_TOKEN` on your phone:
 
 ### Daily usage
 
-Once set up, the service can auto-start on boot (macOS LaunchAgent / Linux systemd). Open the URL on your phone and work from there.
+Once set up, the service can auto-start on boot (macOS LaunchAgent / Linux systemd). Open the URL from phone or desktop and work from there.
 
 ```bash
 remotelab start
 remotelab stop
+remotelab release
 remotelab restart chat
 ```
 
@@ -128,13 +219,13 @@ RemoteLab’s shipped architecture is now centered on a stable chat control plan
 | `chat-server.mjs` | `7690` | Primary chat/control plane for production use |
 
 ```
-Phone Browser
-   │
-   ▼
-Cloudflare Tunnel
-   │
-   ▼
-chat-server.mjs (:7690)
+Browser / client surface               Browser / client surface
+   │                                      │
+   ▼                                      ▼
+Cloudflare Tunnel                    Tailscale (VPN)
+   │                                      │
+   ▼                                      ▼
+chat-server.mjs (:7690)             chat-server.mjs (:7690)
    │
    ├── HTTP control plane
    ├── auth + policy
@@ -165,22 +256,34 @@ remotelab setup                Run interactive setup wizard
 remotelab start                Start all services
 remotelab stop                 Stop all services
 remotelab restart [service]    Restart: chat | tunnel | all
+remotelab release              Run tests, snapshot the runtime, restart, and health-check the active release
+remotelab guest-instance       Create isolated guest instances with separate config + memory
 remotelab chat                 Run chat server in foreground (debug)
 remotelab generate-token       Generate a new access token
 remotelab set-password         Set username & password login
 remotelab --help               Show help
 ```
 
+For quick shareable sandboxes on the same machine, use `remotelab guest-instance create <name>`. It provisions a separate `REMOTELAB_INSTANCE_ROOT`, a dedicated launchd service, and an optional Cloudflare hostname without mixing chat history or memory into the owner's main instance. If the agent mailbox is initialized, `create` and `show` also print the default inbound mailbox for that instance, such as `rowan+trial4@example.com` or `trial4@example.com`, depending on the mailbox identity's `instanceAddressMode`.
+
+Production updates should go through `remotelab release` rather than live-editing the running `7690` surface. The release command snapshots the shipped runtime, restarts only after the test gate passes, and automatically restores the previous active release if the health check fails.
+
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_PORT` | `7690` | Chat server port |
+| `CHAT_BIND_HOST` | `127.0.0.1` | Host to bind the chat server (`127.0.0.1` for Cloudflare/local only, `0.0.0.0` for Tailscale or LAN access) |
 | `SESSION_EXPIRY` | `86400000` | Cookie lifetime in ms (24h) |
-| `SECURE_COOKIES` | `1` | Set `0` only for local HTTP debugging |
+| `SECURE_COOKIES` | `1` | Set `0` for Tailscale or local HTTP access (no HTTPS) |
+| `REMOTELAB_INSTANCE_ROOT` | unset | Optional isolated data root for an additional instance; defaults to `<root>/config` + `<root>/memory` when set |
+| `REMOTELAB_CONFIG_DIR` | `~/.config/remotelab` | Optional runtime data/config override for auth, sessions, runs, apps, push, and provider-managed homes |
+| `REMOTELAB_MEMORY_DIR` | `~/.remotelab/memory` | Optional user-memory override for pointer-first startup files |
 | `REMOTELAB_LIVE_CONTEXT_COMPACT_TOKENS` | `window overflow` | Optional auto-compact override in live-context tokens; unset = compact only after live context exceeds 100% of a known context window, `Inf` = disable |
 
 ## Common file locations
+
+These are the default paths when no instance overrides are set.
 
 | Path | Contents |
 |------|----------|
@@ -206,14 +309,21 @@ remotelab --help               Show help
 - If you want to reclaim disk space, periodically review old archived sessions and prune them manually from the terminal, or ask an AI operator to help you clean them up carefully.
 - In practice, most storage growth lives under `~/.config/remotelab/chat-history/` and `~/.config/remotelab/chat-runs/`.
 
+## Ad-hoc extra instances
+
+- `scripts/chat-instance.sh` now supports `--instance-root`, `--config-dir`, and `--memory-dir` in addition to the older `--home` mode.
+- Use `--instance-root` when you want a second instance to keep the same machine `HOME` (so provider auth keeps working) while isolating RemoteLab's own runtime data and memory.
+- Example: `scripts/chat-instance.sh start --port 7692 --name companion --instance-root ~/.remotelab/instances/companion --secure-cookies 1`
+
 ## Security
 
-- HTTPS via Cloudflare (TLS at the edge, localhost HTTP on the machine)
+- **Cloudflare mode**: HTTPS via Cloudflare (TLS at the edge, localhost HTTP on the machine); services bind to `127.0.0.1` only
+- **Tailscale mode**: traffic encrypted by Tailscale's WireGuard mesh; services bind to `0.0.0.0` (all interfaces), so the port is also reachable from LAN/WAN — on untrusted networks, configure a firewall to restrict port `7690` to the Tailscale subnet (e.g. `100.64.0.0/10`)
 - `256`-bit random access token with timing-safe comparison
 - optional scrypt-hashed password login
-- `HttpOnly` + `Secure` + `SameSite=Strict` auth cookies
+- `HttpOnly` + `Secure` + `SameSite=Strict` auth cookies (`Secure` disabled in Tailscale mode)
 - per-IP rate limiting with exponential backoff on failed login
-- services bind to `127.0.0.1` only — no direct external exposure
+- default: services bind to `127.0.0.1` only — no direct external exposure; set `CHAT_BIND_HOST=0.0.0.0` for LAN access
 - share snapshots are read-only and isolated from the owner chat surface
 - CSP headers with nonce-based script allowlist
 

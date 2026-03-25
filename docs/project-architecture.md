@@ -40,20 +40,22 @@ When the architecture changes materially, keep these docs aligned as part of the
 
 ## 1. What RemoteLab is
 
-RemoteLab is a **mobile-first control console for AI workers running on a real computer**.
+RemoteLab is an **endpoint-flexible AI automation workbench that helps people hand repetitive digital work to AI on a real computer**.
 
 The core product shape is:
 
-- the user talks to an agent from a phone browser
-- the agent runs on the owner’s macOS/Linux machine
+- the user steers work from phone or desktop, whichever is most convenient
+- strong executors run on the owner’s macOS/Linux machine
+- RemoteLab sits above them as a guided-intake, execution, context-recovery, and workflow-packaging layer
 - the agent is treated more like a person operating a full computer than a sandboxed in-browser chatbot
 - the browser is mainly a control surface and a status surface, not the system of record
 
 RemoteLab is explicitly **not** trying to be:
 
 - a terminal emulator
-- a mobile IDE
+- a traditional editor-first IDE
 - a generic multi-user SaaS chat app
+- a closed all-in-one executor stack
 
 Important product assumptions that shape the code:
 
@@ -62,7 +64,7 @@ Important product assumptions that shape the code:
 - **HTTP is the canonical state path**
 - **WebSocket is only an invalidation hint**
 - **filesystem-first persistence** is preferred over a database until proven necessary
-- **frontend stays minimal** and agent-driven workflows are preferred over heavy UI orchestration
+- **frontend stays minimal and endpoint-flexible** and agent-driven workflows are preferred over heavy UI orchestration
 
 ---
 
@@ -81,7 +83,7 @@ Then branch by the change you need:
 
 - runtime / message execution → `chat/session-manager.mjs`, `chat/runs.mjs`, `chat/runner-sidecar.mjs`, `chat/adapters/*.mjs`
 - HTTP / API / role checks → `chat/router.mjs`, `lib/auth.mjs`, `chat/middleware.mjs`
-- UI / mobile behavior → `templates/chat.html`, `static/chat/`, `static/sw.js`
+- UI / cross-endpoint behavior → `templates/chat.html`, `static/chat/`, `static/sw.js`
 - Apps / visitor flow → `chat/apps.mjs`, `chat/router.mjs`, `chat/session-manager.mjs`
 - session labeling / rename / grouping → `chat/summarizer.mjs`, `chat/session-naming.mjs`
 - memory activation / startup prompt → `chat/system-prompt.mjs`, `notes/current/memory-activation-architecture.md`
@@ -109,7 +111,7 @@ Optional side subsystem:
 ### 3.2 End-to-end shape
 
 ```text
-Phone Browser
+Browser / client surface
    │
    ▼
 Cloudflare Tunnel
@@ -198,14 +200,12 @@ This layer should stay comparatively thin and avoid absorbing product policy.
 
 ### 4.4 Frontend layer
 
-Responsible for rendering HTTP-derived state in a mobile-friendly UI.
+Responsible for rendering HTTP-derived state in an endpoint-flexible UI that works well on phone and desktop.
 
 - `templates/chat.html`
-- `templates/share.html`
 - `templates/login.html`
 - `static/chat/`
 - `static/chat.js` (compatibility loader)
-- `static/share.js`
 - `static/sw.js`
 
 Important: the frontend is **vanilla JS** with **no build step**.
@@ -290,6 +290,7 @@ Common fields include:
 - `systemPrompt`
 - `completionTargets`
 - `externalTriggerId`
+- `forkedFromSessionId`, `forkedFromSeq`, `rootSessionId`, `forkedAt`
 - `archived`
 
 Stored in:
@@ -353,18 +354,22 @@ Represents an immutable, read-only capture of a session’s sanitized history.
 
 It is intentionally separate from the live session.
 
-### 6.7 Sidebar summary state
+### 6.7 Session workflow projection
 
-Represents lightweight progress cards used by the “progress” tab.
+Represents owner-facing session organization views such as the sidebar and session list ordering.
+
+It is not a separate durable object. It is derived from canonical session metadata plus live activity.
 
 Key fields per session include:
 
-- `background`
-- `lastAction`
 - `name`
 - `group`
 - `description`
+- `workflowState`
+- `workflowPriority`
+- `pinned`
 - `updatedAt`
+- live `activity`
 
 ---
 
@@ -581,7 +586,7 @@ The flow is:
 1. load the live session + normalized history
 2. sanitize events and inline image data where needed
 3. write an immutable snapshot file
-4. render it via `templates/share.html` + `static/share.js`
+4. render it via `templates/chat.html` in `shareSnapshotMode`, hydrated by `/share-payload/:id.js`
 
 The shared page is intentionally read-only and more tightly sandboxed than the main app.
 
@@ -596,7 +601,7 @@ That call generates JSON describing canonical presentation metadata:
 - maybe `description`
 
 The result is written back into canonical session metadata.
-The current `Progress` tab is intentionally just an empty shell kept for future surfaces; long-term task-progress management should piggyback on session-list grouping instead of a separate summary board.
+The current workflow projection is intentionally session-first: session organization piggybacks on canonical metadata plus live activity instead of a separate task-style object.
 
 ### 9.5 Context compaction and “drop tools”
 
@@ -638,6 +643,28 @@ Pieces:
 
 This subsystem shows the direction that **external channels should behave as clients of the same durable session protocol**, not as a separate architecture universe.
 
+### 9.8 Session fork flow
+
+The shipped fork model is intentionally narrow and exact.
+
+Current flow:
+
+1. owner triggers `POST /api/sessions/:id/fork`
+2. server validates access and rejects sessions that still have unstable active execution state
+3. child session metadata is created by copying parent base fields into a fresh session record
+4. full normalized history is materialized into the child history store
+5. copied events drop parent execution identity such as `runId` and `requestId`
+6. child session clears live execution linkage such as `activeRunId`, `activeRun`, provider resume ids, `externalTriggerId`, and `completionTargets`
+7. current context head is copied so the child starts from the same durable RemoteLab-side continuation state
+8. parent remains open; fork is a preparation action, not an implicit context switch
+
+Current product contract:
+
+- v1 is **head fork** only: clone the session as it exists now
+- fork is **hard clone + hard isolation**, not a shared-thread branch
+- historical `Fork from here` is deferred until RemoteLab can preserve exact pre-compaction fork state without approximation
+- the sidebar remains flat; lineage metadata exists, but there is no full tree UI subsystem yet
+
 ---
 
 ## 10. Frontend architecture
@@ -657,7 +684,7 @@ The frontend is intentionally simple but still architecturally important.
 - WS only hints a refresh
 - optimistic UI is allowed, but canonical state still comes from HTTP
 - ETag-based revalidation is used for many GET reads
-- per-session event fetching is incremental via `afterSeq`
+- per-session event fetching is snapshot-style for visible timeline content, with hidden blocks loaded lazily as separate immutable resources
 
 ### 10.3 Main frontend responsibilities
 
@@ -666,23 +693,24 @@ The main chat frontend (`static/chat/`, loaded by `static/chat.js`) is responsib
 - bootstrapping owner vs visitor mode
 - listing sessions and rendering the sidebar
 - attaching to one active session
-- fetching incremental session events
+- fetching a visible event timeline plus lazy hidden-event blocks
 - rendering normalized event types
 - managing pending-message recovery on refresh
 - managing inline tool/model/reasoning selectors
 - handling session archive/rename actions
-- managing progress-tab reads
+- rendering the session-first sidebar / workflow projection
 - registering push notifications
 
-### 10.4 Share page frontend
+### 10.4 Share snapshot frontend
 
-`static/share.js` is a separate read-only renderer.
+Share snapshots reuse the main chat shell (`templates/chat.html` + `static/chat/`) with `shareSnapshotMode` bootstrapped from `/share-payload/:id.js`.
 
-It additionally:
+That mode additionally:
 
-- sanitizes rendered markdown aggressively
-- strips `<private>` / `<hide>` content from shared output
-- adds code-copy affordances
+- hides sidebar/session-management UI via visitor-mode layout rules
+- disables live auth/bootstrap and websocket attachment
+- renders frozen snapshot events through the same chat timeline components
+- keeps `<private>` / `<hide>` content filtered out before publication
 
 ---
 
@@ -695,10 +723,12 @@ The main chat plane is almost entirely driven through `chat/router.mjs`.
 Sessions:
 
 - `GET /api/sessions`
+- `GET /api/sessions/archived`
 - `POST /api/sessions`
 - `GET /api/sessions/:id`
 - `PATCH /api/sessions/:id`
-- `GET /api/sessions/:id/events?afterSeq=...`
+- `GET /api/sessions/:id/events?filter=visible|all`
+- `GET /api/sessions/:id/events/blocks/:startSeq-:endSeq`
 - `GET /api/sessions/:id/events/:seq/body`
 - `POST /api/sessions/:id/messages`
 - `POST /api/sessions/:id/cancel`
@@ -706,7 +736,9 @@ Sessions:
 - `POST /api/sessions/:id/drop-tools`
 - `POST /api/sessions/:id/share`
 
-The session event route is completeness-first: it returns the full event index after the given cursor. Heavy thinking and tool bodies stay deferred behind the per-event body route so session switches do not depend on a paged history fetch.
+`GET /api/sessions` is the owner sidebar collection and returns active-session metadata only. Archived sessions are fetched separately through `GET /api/sessions/archived` so the default bootstrap path stays small without introducing pagination.
+
+The session event route is display-first by default: `GET /api/sessions/:id/events?filter=visible` returns the visible timeline needed for the current UI, including inline user/assistant messages and synthetic collapsed blocks for hidden reasoning/tool steps. Expanding a collapsed block triggers `GET /api/sessions/:id/events/blocks/:startSeq-:endSeq`, which returns the hidden events with inline bodies and can be cached immutably. `filter=all` still exposes the raw deferred-body event index for debugging or compatibility, but the common-path transport now avoids shipping hidden tool/reasoning payloads up front.
 
 Runs:
 
@@ -834,7 +866,7 @@ Use this as the practical code-finding guide.
 | event persistence / long-output handling | `chat/history.mjs`, `chat/runs.mjs`, `chat/fs-utils.mjs` |
 | session labeling / auto-rename / grouping | `chat/summarizer.mjs`, `chat/session-manager.mjs`, `chat/session-naming.mjs`, `static/chat/` |
 | App templates or visitor flow | `chat/apps.mjs`, `chat/router.mjs`, `chat/session-manager.mjs`, `static/chat/`, `docs/creating-apps.md` |
-| share snapshots | `chat/shares.mjs`, `templates/share.html`, `static/share.js` |
+| share snapshots | `chat/shares.mjs`, `chat/router.mjs`, `templates/chat.html`, `static/chat/` |
 | push notifications | `chat/push.mjs`, `static/sw.js`, `static/chat/` |
 | model/tool picker behavior | `lib/tools.mjs`, `chat/models.mjs`, `static/chat/` |
 | pointer-first memory startup | `chat/system-prompt.mjs`, `notes/current/memory-activation-architecture.md` |
@@ -898,6 +930,7 @@ This repo already contains several design notes that point beyond the current co
 - app-centric architecture where default chat becomes a built-in App/policy model
 - richer autonomy / deferred triggers / background execution
 - deeper external channel unification (mail, repo bots, other message sources)
+- single-source active-run transcript projection with side-effect-free read paths
 - potentially broader runtime/provider cleanup after the current HTTP-first boundaries settle
 - broader theming beyond the current automatic system light/dark baseline
 - further icon-system cleanup beyond the current shipped Codicons subset
@@ -910,6 +943,7 @@ Use these notes when needed:
 - `notes/directional/app-centric-architecture.md`
 - `notes/directional/ai-driven-interaction.md`
 - `notes/directional/autonomous-execution.md`
+- `notes/directional/single-source-transcript-architecture.md`
 - `notes/directional/ui-theming.md`
 - `notes/directional/ui-icons.md`
 - `notes/current/self-hosting-dev-restarts.md`
@@ -920,7 +954,7 @@ Use these notes when needed:
 
 If you only remember one mental model, remember this:
 
-> RemoteLab is a **filesystem-backed HTTP control plane for long-lived AI work sessions**, with **detached CLI runners**, **normalized append-only session history**, **thin WebSocket invalidation**, and a **minimal mobile UI** that always converges back to durable state.
+> RemoteLab is a **filesystem-backed HTTP control plane for long-lived AI work sessions**, with **detached CLI runners**, **normalized append-only session history**, **thin WebSocket invalidation**, and a **minimal endpoint-flexible web UI** that always converges back to durable state.
 
 Everything else in the repo is either:
 

@@ -441,7 +441,7 @@ That part of the contract is already directionally correct.
 
 - `chat/shares.mjs`
 - share creation route in `chat/router.mjs`
-- share page template and frontend in `templates/share.html` and `static/share.js`
+- share page shell and frontend in `templates/chat.html` and `static/chat/` via `shareSnapshotMode`
 
 ### Current storage
 

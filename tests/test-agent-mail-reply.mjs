@@ -21,6 +21,7 @@ const {
   approveMessage,
   saveOutboundConfig,
 } = await import(pathToFileURL(join(repoRoot, 'lib', 'agent-mailbox.mjs')).href);
+const { sendOutboundEmail } = await import(pathToFileURL(join(repoRoot, 'lib', 'agent-mail-outbound.mjs')).href);
 const { createSession } = await import(pathToFileURL(join(repoRoot, 'chat', 'session-manager.mjs')).href);
 const { appendEvent } = await import(pathToFileURL(join(repoRoot, 'chat', 'history.mjs')).href);
 const { messageEvent } = await import(pathToFileURL(join(repoRoot, 'chat', 'normalizer.mjs')).href);
@@ -350,6 +351,119 @@ try {
   assert.equal(updatedTodoTail?.automation?.status, 'reply_sent');
   assert.equal(updatedTodoTail?.automation?.runId, todoTailRun.id);
   assert.equal(updatedTodoTail?.automation?.delivery?.provider, 'cloudflare_worker');
+
+  const ingestedRetry = ingestRawMessage(
+    [
+      'From: owner@example.com',
+      'To: rowan@example.com',
+      'Subject: clear retry error state',
+      'Date: Tue, 10 Mar 2026 03:15:00 +0800',
+      'Message-ID: <mail-cloudflare-retry-clear@example.com>',
+      'Content-Type: text/plain; charset=UTF-8',
+      '',
+      'please verify that a later success clears the prior failure state.',
+    ].join('\n'),
+    'cloudflare-worker-retry-clear.eml',
+    mailboxRoot,
+    { text: 'please verify that a later success clears the prior failure state.' },
+  );
+
+  const approvedRetry = approveMessage(ingestedRetry.id, mailboxRoot, 'tester');
+  const retryRequestId = `mailbox_reply_${approvedRetry.id}`;
+  const retrySession = await createSession(workspace, 'codex', 'Cloudflare retry clear test', {
+    completionTargets: [{
+      type: 'email',
+      requestId: retryRequestId,
+      to: 'owner@example.com',
+      subject: 'Re: clear retry error state',
+      inReplyTo: '<mail-cloudflare-retry-clear@example.com>',
+      references: '<mail-cloudflare-retry-clear@example.com>',
+      mailboxRoot,
+      mailboxItemId: approvedRetry.id,
+    }],
+  });
+  const retryRun = await createRun({
+    status: {
+      sessionId: retrySession.id,
+      requestId: retryRequestId,
+      state: 'completed',
+      tool: 'codex',
+    },
+    manifest: {
+      sessionId: retrySession.id,
+      requestId: retryRequestId,
+      folder: workspace,
+      tool: 'codex',
+      prompt: 'reply to the email, fail once, then succeed',
+      options: {},
+    },
+  });
+
+  await appendEvent(retrySession.id, messageEvent('assistant', 'Retry-success reply body.', undefined, {
+    runId: retryRun.id,
+    requestId: retryRequestId,
+  }));
+
+  const forcedFailureDeliveries = await dispatchSessionEmailCompletionTargets(retrySession, retryRun, {
+    fetchImpl: async () => {
+      const error = new TypeError('fetch failed');
+      error.cause = { code: 'UND_ERR_CONNECT_TIMEOUT' };
+      throw error;
+    },
+  });
+  assert.equal(forcedFailureDeliveries.length, 1);
+  assert.equal(forcedFailureDeliveries[0].state, 'failed');
+
+  const failedRetryItem = findQueueItem(approvedRetry.id, mailboxRoot)?.item;
+  assert.equal(failedRetryItem?.status, 'reply_failed');
+  assert.equal(failedRetryItem?.automation?.status, 'reply_failed');
+  assert.equal(failedRetryItem?.automation?.lastError, 'fetch failed');
+
+  const successfulRetryDeliveries = await dispatchSessionEmailCompletionTargets(retrySession, retryRun);
+  assert.equal(successfulRetryDeliveries.length, 1);
+  assert.equal(successfulRetryDeliveries[0].state, 'sent');
+
+  const updatedRetryItem = findQueueItem(approvedRetry.id, mailboxRoot)?.item;
+  assert.equal(updatedRetryItem?.status, 'reply_sent');
+  assert.equal(updatedRetryItem?.automation?.status, 'reply_sent');
+  assert.equal(updatedRetryItem?.automation?.lastError, null);
+  assert.equal(updatedRetryItem?.automation?.delivery?.provider, 'cloudflare_worker');
+
+  const curlRequests = [];
+  const curlTransportResult = await sendOutboundEmail({
+    to: 'owner@example.com',
+    from: 'rowan@example.com',
+    subject: 'Proxy-aware Cloudflare worker send',
+    text: 'Curl transport success.',
+  }, {
+    provider: 'cloudflare_worker',
+    workerBaseUrl: `http://127.0.0.1:${port}`,
+    workerToken: 'cloudflare-worker-secret',
+  }, {
+    forceCurlTransport: true,
+    sendCloudflareWorkerViaCurlImpl: async (request, prepared) => {
+      curlRequests.push({ request, prepared });
+      return {
+        provider: prepared.provider,
+        authMode: 'bearer_token',
+        statusCode: 202,
+        response: { id: 'msg_curl_123', message: 'queued' },
+        summary: { id: 'msg_curl_123', message: 'queued' },
+      };
+    },
+  });
+  assert.equal(curlTransportResult.statusCode, 202);
+  assert.equal(curlTransportResult.provider, 'cloudflare_worker');
+  assert.equal(curlRequests.length, 1);
+  assert.equal(curlRequests[0].request.url, `http://127.0.0.1:${port}/api/send-email`);
+  assert.deepEqual(JSON.parse(curlRequests[0].request.body), {
+    to: ['owner@example.com'],
+    from: 'rowan@example.com',
+    subject: 'Proxy-aware Cloudflare worker send',
+    text: 'Curl transport success.',
+    inReplyTo: '',
+    references: '',
+  });
 } finally {
   server.close();
   rmSync(tempHome, { recursive: true, force: true });
